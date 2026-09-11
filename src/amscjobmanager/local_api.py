@@ -6,8 +6,9 @@ from .logging import wfapiLog, wfapiUserQuery
 import io
 from pathlib import Path
 import sqlite3
+import threading
 
-def localMkdir(path: str, create_parents = True, allow_unsafe = False):    
+def localMkdir(path: str, create_parents = True, allow_unsafe = False):        
     if not allow_unsafe and not checkSafePath("local", path):
         raise Exception("Path is not a subdirectory of the sandbox path")
 
@@ -67,11 +68,15 @@ class LocalJobStatus:
                     status TEXT
                     )
                     """)
-    def startJob(self, job_id : str):
+    def enqueueJob(self, job_id : str):
         with self.conn as conn:        
             cur = conn.execute("INSERT INTO localjobs VALUES (?,?)",
-                                (job_id, "active"
-                                ) )
+                                (job_id, "queued"
+                                ) )        
+
+    def startJob(self, job_id : str):
+        with self.conn as conn:
+            conn.execute("UPDATE localjobs SET status = ? where job_id = ?", ("active", job_id) )        
 
     def finishJob(self, job_id : str, status : str):
         with self.conn as conn:
@@ -85,16 +90,40 @@ class LocalJobStatus:
             row = dict(r)
             return row["status"]
 
+class LocalJobStatusWrapper:
+    """Enwrap the status manager in a mutex"""
+    def __init__(self, filename: str | None = None):
+        self._status_man = LocalJobStatus(filename)
+        self._lock = threading.Lock()
+
+    def __enter__(self):        
+        self._lock.acquire()
+        return self._status_man
+            
+    def __exit__(self,exc_type, exc_val, exc_tb):
+        self._lock.release() #unlock before exception!
+        if exc_type:
+            raise Exception("Caught exception",exc_type,exc_val,exc_tb)
+
 status_man = None
+status_man_db_path = "localjobs.db"
+
+def setStatusManagerDatabasePath(path: str | None):
+    """Override the database path for the status manager. Must be called before the status manager is initialized. Setting it to None will use an in-memory database."""
+    if status_man is not None:
+        raise Exception("Can only call prior to initialization")
+    global status_man_db_path
+    status_man_db_path = path
 
 def statusMan():
     global status_man
     if status_man == None:
-        status_man = LocalJobStatus("localjobs.db")
+        status_man = LocalJobStatusWrapper(status_man_db_path)
     return status_man
 
 def getJobState(jobid: str) -> str:
-    return statusMan().jobStatus(jobid)
+    with statusMan() as m:
+        return m.jobStatus(jobid)
 
 def executeJobScript(script_body: str, job_run_dir : str, allow_unsafe=False) -> str:
     """
@@ -103,35 +132,42 @@ def executeJobScript(script_body: str, job_run_dir : str, allow_unsafe=False) ->
     """    
 
     jobid = subprocess.run(["cat", "/proc/sys/kernel/random/uuid"], capture_output=True, text=True).stdout.strip()
+    with statusMan() as m:
+        m.enqueueJob(jobid)
 
-    wfapiLog(f"Executing local job {jobid}")
-    statusMan().startJob(jobid)
-    
-    if not allow_unsafe and not checkSafePath("local", job_run_dir):
-        raise Exception("Path is not below the privileged directory")
+    def _run():
+        wfapiLog(f"Executing local job {jobid}")
+        with statusMan() as m:
+            m.startJob(jobid)
+        
+        if not allow_unsafe and not checkSafePath("local", job_run_dir):
+            raise Exception("Path is not below the privileged directory")
 
-    with open(f"{job_run_dir}/exec_wrap.sh",'w') as f:
-        f.write(script_body)
+        with open(f"{job_run_dir}/exec_wrap.sh",'w') as f:
+            f.write(script_body)
 
-    cmd = f"cd {job_run_dir} && chmod u+x exec_wrap.sh && ./exec_wrap.sh"
-    print(f"Executing: {cmd}")
-    logfile = f"{job_run_dir}/run.{jobid}.log"
-    with open(logfile, "w") as f:
-        result = subprocess.run(
-            cmd,
-            shell=True,
-            text=True,
-            stdout=f, 
-            stderr=subprocess.STDOUT, 
-            check=False,
-            executable="/bin/bash"
-        )
+        cmd = f"cd {job_run_dir} && chmod u+x exec_wrap.sh && ./exec_wrap.sh"
+        print(f"Executing: {cmd}")
+        logfile = f"{job_run_dir}/run.{jobid}.log"
+        with open(logfile, "w") as f:
+            result = subprocess.run(
+                cmd,
+                shell=True,
+                text=True,
+                stdout=f, 
+                stderr=subprocess.STDOUT, 
+                check=False,
+                executable="/bin/bash"
+            )
 
-    if result.returncode != 0:
-        print(f"Execution FAILED: see {logfile} for details")
-        statusMan().finishJob(jobid, "failed")
-    else:
-        print(f"Execution completed: see {logfile} for details")
-        statusMan().finishJob(jobid, "completed")    
+        if result.returncode != 0:
+            print(f"Execution FAILED: see {logfile} for details")
+            with statusMan() as m:
+                m.finishJob(jobid, "failed")
+        else:
+            print(f"Execution completed: see {logfile} for details")
+            with statusMan() as m:
+                m.finishJob(jobid, "completed")    
+    threading.Thread(target=_run).start()
 
     return jobid

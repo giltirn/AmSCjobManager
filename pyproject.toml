@@ -6,7 +6,9 @@ name = "amsc-job-manager"
 version = "0.1.0"
 dependencies = [  
   "pathlib",  
-  "globus_sdk"
+  "globus_sdk",
+  "authlib",
+  "httpx"
 ]
 
 [tool.setuptools]

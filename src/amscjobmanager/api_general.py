@@ -44,7 +44,8 @@ def uploadSmallFile(machine: str, remote_path: str, local_path: str, allow_unsaf
 
     #uploadBytes needs a full filename, not just a directory
     if not definitely_is_file:
-        if "directory" in pathType(machine, remote_path):
+        pt = pathType(machine, remote_path)
+        if "directory" in pt and "cannot open" not in pt:
             fname = pathlib.Path(local_path).name
             remote_path += "/" + fname
 

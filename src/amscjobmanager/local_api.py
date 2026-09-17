@@ -1,5 +1,5 @@
 #Implement local versions of API functions
-from .utils import checkSafePath
+from .globals import checkSafePath
 import subprocess
 import os
 from .logging import wfapiLog, wfapiUserQuery

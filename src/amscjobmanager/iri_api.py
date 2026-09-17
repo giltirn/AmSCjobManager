@@ -1,7 +1,7 @@
 from authlib.integrations.requests_client import OAuth2Session
 from authlib.oauth2.rfc7523 import PrivateKeyJWT
 import httpx
-from . import  globals
+from .globals import checkSafePath, addSandboxDirs
 import json
 from typing import Literal, Union, List, Optional, Tuple
 import time
@@ -13,7 +13,7 @@ from pathlib import Path
 import globus_sdk
 from globus_sdk.exc import GlobusAPIError
 from globus_sdk.scopes import TransferScopes
-from .utils import checkSafePath, queryYesNo
+from .utils import queryYesNo
 from .logging import wfapiLog, wfapiUserQuery
 from . import local_api
 
@@ -236,9 +236,9 @@ def setupWorkflowAgent(iriapi_key_path : str, iriapi_transfer_key_path : str, wo
     Args:
        iriapi_key_path: The full path to the IRI API key file. This will be generated automatically if it doesn't currently exist.
        iriapi_transfer_key_path: The full path to the IRI transfer API key file. This will be generated automatically if it doesn't currently exist.
-       work_dir: The remote work directories, by machine as a dict, e.g. { "perlmutter" : "/path/to/dir" }.  The agent is only allowed to modify the contents of files within this directory or its children
+       work_dir: The remote work directories, by machine as a dict, e.g. { "perlmutter" : "/path/to/dir" }. Use a list of directories if more than one. The API is only allowed to modify the contents of files within this directory or its children
     """
-    globals.remote_workdir={ machine.lower() : directory for machine, directory in work_dir.items() }
+    addSandboxDirs(work_dir)
     setupIRIapiCompute(iriapi_key_path)
     setupIRIapiTransfer(iriapi_transfer_key_path)
         
@@ -471,7 +471,7 @@ def remoteMkdir(machine: str, path: str, create_parents = True, allow_unsafe = F
     wfapiLog(f"Creating directory {machine}:{path}")
     
     if not allow_unsafe and not checkSafePath(machine, path):
-        raise Exception("Path is not a subdirectory of the sandbox path")
+        raise Exception(f"Path {path} is not a subdirectory of the sandbox path")
 
     if not pathlib.Path(path).is_absolute():
         raise Exception("Path must be absolute")

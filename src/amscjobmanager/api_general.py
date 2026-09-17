@@ -25,8 +25,27 @@ def testExecutablePrivileges(machine: str)-> bool:
     except Exception as e:
         return False    
 
+def isDirectory(machine:str, remote_path: str)->bool:
+    """
+    Check if a remote path is a directory
+    """
+    if not pathlib.Path(remote_path).is_absolute():
+        raise Exception("Path must be absolute")
+
+    if remote_path[-1] == '/':
+        return True
+
+    pt = pathType(machine, remote_path)
+    return "directory" in pt and "cannot open" not in pt
+
+def pathExists(machine: str, remote_path: str)->bool:
+    if not pathlib.Path(remote_path).is_absolute():
+        raise Exception("Path must be absolute")
+
+    pt = pathType(machine, remote_path)
+    return "cannot open" not in pt
     
-def uploadSmallFile(machine: str, remote_path: str, local_path: str, allow_unsafe = False, definitely_is_file = False) -> bool:
+def uploadSmallFile(machine: str, remote_path: str, local_path: str, allow_unsafe = False, definitely_is_file = False):
     """
     Upload a small file to a remote path
     Args:
@@ -35,8 +54,6 @@ def uploadSmallFile(machine: str, remote_path: str, local_path: str, allow_unsaf
        local_path - The path on the local machine
        allow_unsafe - Allow uploading to directories other than within the sandbox
        definitely_is_file - Assert that the path is an absolute file path, not a directory. Use to skip checking the type of the remote path.
-    Return:
-       True if successful, False otherwise
     """
 
     if not pathlib.Path(remote_path).is_absolute():
@@ -44,8 +61,7 @@ def uploadSmallFile(machine: str, remote_path: str, local_path: str, allow_unsaf
 
     #uploadBytes needs a full filename, not just a directory
     if not definitely_is_file:
-        pt = pathType(machine, remote_path)
-        if "directory" in pt and "cannot open" not in pt:
+        if isDirectory(machine, remote_path):        
             fname = pathlib.Path(local_path).name
             remote_path += "/" + fname
 

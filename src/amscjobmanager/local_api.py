@@ -32,7 +32,22 @@ def localMkdir(path: str, create_parents = True, allow_unsafe = False):
     if result.returncode != 0:
         raise Exception(f"Directory creation failed: {result.stderr}")        
 
+
+def localPathType(path: str):
+    args = [ "file", path]
+
+    result = subprocess.run(
+        args,
+        text=True,
+        capture_output=True,        
+        check=False,
+    )
     
+    if result.returncode != 0:
+        raise Exception(f"Failed to run 'file' on {path}: {result.stderr}")      
+        
+    return result.stdout.strip()
+
 def writeBytes(path: str, content: io.BytesIO, allow_unsafe = False):
     """
     Write contents as bytes

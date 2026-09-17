@@ -486,12 +486,68 @@ def remoteMkdir(machine: str, path: str, create_parents = True, allow_unsafe = F
         raise Exception(f"Directory creation failed, status: {status},  response: { json.dumps(j,indent=2) }")        
 
 
-def uploadBytes(machine: str, remote_path: str, content: io.BytesIO, allow_unsafe = False):
+def pathStat(machine: str, remote_path: str, dereference=True)->str:
     """
-    Upload file contents as bytes to a remote path
+    Run stat on the provided path
     Args:
        machine - The name of the machine. Valid values are 'Perlmutter'
        remote_path - The absolute path on the remote machine
+    """
+    machine = machine.lower()    
+
+    if machine == "local":
+        raise NotImplementedError()
+       
+    if not pathlib.Path(remote_path).is_absolute():
+        raise Exception("Path must be absolute")
+    
+    rid = getResourceID(machine, rtype="login")
+
+    j = get(machine, f"filesystem/stat/{rid}", params={'path' : remote_path, 'dereference' : dereference})
+    tid = j['task_id']
+    j = waitTask(machine, tid)
+
+    if j["status"] == "completed":
+        return j["result"]["output"]
+    else:
+        raise Exception(f"Download failed, response: { json.dumps(j,indent=2)}")        
+
+
+def pathType(machine: str, remote_path: str)->str:
+    """
+    Run 'file' on the provided path, identifying whether a file or directory
+    Args:
+       machine - The name of the machine. Valid values are 'Perlmutter'
+       remote_path - The absolute path on the remote machine
+    """
+    machine = machine.lower()    
+
+    if machine == "local":
+        return local_api.localPathType(remote_path)
+
+    if not pathlib.Path(remote_path).is_absolute():
+        raise Exception("Path must be absolute")
+    
+    rid = getResourceID(machine, rtype="login")
+
+    j = get(machine, f"filesystem/file/{rid}", params={'path' : remote_path})
+    tid = j['task_id']
+    j = waitTask(machine, tid)
+
+    if j["status"] == "completed":
+        return j["result"]["output"]
+    else:
+        raise Exception(f"Download failed, response: { json.dumps(j,indent=2)}")        
+
+    
+
+
+def uploadBytes(machine: str, remote_path: str, content: io.BytesIO, allow_unsafe = False):
+    """
+    Upload file contents as bytes to a remote path (max 5242880 Bytes)
+    Args:
+       machine - The name of the machine. Valid values are 'Perlmutter'
+       remote_path - The absolute path to the resulting file on the remote machine
        content - The file contents as binary
        allow_unsafe - Allow uploading to directories other than within the sandbox
     """
@@ -506,10 +562,11 @@ def uploadBytes(machine: str, remote_path: str, content: io.BytesIO, allow_unsaf
     
     if not pathlib.Path(remote_path).is_absolute():
         raise Exception("Path must be absolute")
-    
+   
     rid = getResourceID(machine, rtype="login")
 
     j, status = post(machine, f"filesystem/upload/{rid}", params={'path' : remote_path}, files={'file': content})
+
     tid = j['task_id']
     j = waitTask(machine, tid)
 
@@ -540,7 +597,7 @@ def downloadFile(machine: str, remote_path: str)->str:
     if j["status"] == "completed":
         return j["result"]["output"]
     else:
-        raise Exception(f"Download failed, status: {status}, response: { json.dumps(j,indent=2)}")        
+        raise Exception(f"Download failed, response: { json.dumps(j,indent=2)}")        
 
 
     

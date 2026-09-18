@@ -601,24 +601,27 @@ def downloadFileContents(machine: str, remote_path: str)->str:
     else:
         raise Exception(f"Download failed, response: { json.dumps(j,indent=2)}")        
 
-def downloadFile(machine: str, local_path_out: str, remote_path_in: str):
+def downloadFile(machine: str, local_path_out: str, remote_path_in: str)->str:
     from .api_general import isDirectory
-    if machine.lower() == "local":
-        return local_api.localCopyFile(local_path_out, remote_path_in, allow_unsafe=True)
 
-    content = downloadFileContents(machine, remote_path_in)
     if isDirectory("local", local_path_out):
-        local_path_out = local_api.getAbsoluteLocalPath(local_path_out) + "/" + pathlib.Path(remote_path_in).name        
+        local_path_out = local_api.getAbsoluteLocalPath(local_path_out) + "/" + pathlib.Path(remote_path_in).name
 
-    #Need to manually identify whether it is text or base64-binary encoded
-    if re.match(r'^([A-Za-z0-9+/]{4})*([A-Za-z0-9+/]{3}=|[A-Za-z0-9+/]{2}==)?$', content[:4096]):
-        wfapiLog(f"Writing *binary* file contents to {local_path_out}")    
-        with open(local_path_out, 'wb') as f:
-            f.write(base64.b64decode(content))
+    if machine.lower() == "local":
+        wfapiLog(f"Copying local file {remote_path_in} to {local_path_out}")    
+        local_api.localCopyFile(local_path_out, remote_path_in, allow_unsafe=True)
     else:
-        wfapiLog(f"Writing *plaintext* file contents to {local_path_out}")    
-        with open(local_path_out, 'w') as f:
-            f.write(content)
+        content = downloadFileContents(machine, remote_path_in)
+        #Need to manually identify whether it is text or base64-binary encoded
+        if re.match(r'^([A-Za-z0-9+/]{4})*([A-Za-z0-9+/]{3}=|[A-Za-z0-9+/]{2}==)?$', content[:4096]):
+            wfapiLog(f"Writing *binary* file contents to {local_path_out}")    
+            with open(local_path_out, 'wb') as f:
+                f.write(base64.b64decode(content))
+        else:
+            wfapiLog(f"Writing *plaintext* file contents to {local_path_out}")    
+            with open(local_path_out, 'w') as f:
+                f.write(content)
+    return local_path_out
     
 def executeBatchJobCompat(machine: str, script_body: str,
                     nodes : int, ranks_per_node : int, gpus_per_rank : int,

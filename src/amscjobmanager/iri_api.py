@@ -574,7 +574,7 @@ def uploadBytes(machine: str, remote_path: str, content: io.BytesIO, allow_unsaf
         raise Exception(f"Upload failed, status: {status},  response: {json.dumps(j,indent=2)}")        
 
 
-def downloadFile(machine: str, remote_path: str)->str:
+def downloadFileContents(machine: str, remote_path: str)->str:
     """
     Download a (small) remote file. Returns the file contents as a string
     Args:
@@ -583,8 +583,8 @@ def downloadFile(machine: str, remote_path: str)->str:
     """
     machine = machine.lower()
 
-    wfapiLog(f"Downloading file {machine}:{remote_path}")
-       
+    wfapiLog(f"Downloading file {machine}:{remote_path}")    
+
     if not pathlib.Path(remote_path).is_absolute():
         raise Exception("Path must be absolute")
     
@@ -599,8 +599,14 @@ def downloadFile(machine: str, remote_path: str)->str:
     else:
         raise Exception(f"Download failed, response: { json.dumps(j,indent=2)}")        
 
+def downloadFile(machine: str, local_path_out: str, remote_path_in: str):
+    if machine.lower() == "local":
+        return local_api.localCopyFile(local_path_out, remote_path_in, allow_unsafe=True)
 
-    
+    content = downloadFileContents(machine, remote_path_in)
+    with open(local_path_out, 'w') as f:
+        f.write(content)
+
     
 def executeBatchJobCompat(machine: str, script_body: str,
                     nodes : int, ranks_per_node : int, gpus_per_rank : int,

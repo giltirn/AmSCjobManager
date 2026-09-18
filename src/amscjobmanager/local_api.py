@@ -66,7 +66,25 @@ def writeBytes(path: str, content: io.BytesIO, allow_unsafe = False):
     except Exception as e:
          raise Exception(f"File write to path {path} failed: {e}")
 
+def localCopyFile(path_to: str, path_from: str, allow_unsafe = False):
+    """
+    Copy a file on the local machine
+    """
+    if not allow_unsafe and not checkSafePath("local", path):
+        raise Exception("Path is not a subdirectory of the sandbox path")
 
+    if path_to == path_from:
+        return
+
+    result = subprocess.run(
+        ["cp", path_from, path_to],
+        text=True,
+        capture_output=True,        
+        check=False,
+    )
+    
+    if result.returncode != 0:
+        raise Exception(f"File copy failed: {result.stderr}")      
 
 class LocalJobStatus:
     """The primary component of the workflow manager. It provides submission, tracking and updating of workflows backed by a database. State is updated upon calls to its functions."""

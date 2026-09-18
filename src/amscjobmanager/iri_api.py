@@ -9,6 +9,8 @@ import pathlib
 import io
 import os
 import stat
+import base64
+import re
 from pathlib import Path
 import globus_sdk
 from globus_sdk.exc import GlobusAPIError
@@ -576,7 +578,7 @@ def uploadBytes(machine: str, remote_path: str, content: io.BytesIO, allow_unsaf
 
 def downloadFileContents(machine: str, remote_path: str)->str:
     """
-    Download a (small) remote file. Returns the file contents as a string
+    Download a (small) remote file. Returns the file contents as a string (base64 or plaintext encoded, depending on the file)
     Args:
        machine - The name of the machine. Valid values are 'Perlmutter'
        remote_path - The absolute path on the remote machine
@@ -608,10 +610,15 @@ def downloadFile(machine: str, local_path_out: str, remote_path_in: str):
     if isDirectory("local", local_path_out):
         local_path_out = local_api.getAbsoluteLocalPath(local_path_out) + "/" + pathlib.Path(remote_path_in).name        
 
-    wfapiLog(f"Writing file contents to {local_path_out}")    
-    with open(local_path_out, 'w') as f:
-        f.write(content)
-
+    #Need to manually identify whether it is text or base64-binary encoded
+    if re.match(r'^([A-Za-z0-9+/]{4})*([A-Za-z0-9+/]{3}=|[A-Za-z0-9+/]{2}==)?$', content[:4096]):
+        wfapiLog(f"Writing *binary* file contents to {local_path_out}")    
+        with open(local_path_out, 'wb') as f:
+            f.write(base64.b64decode(content))
+    else:
+        wfapiLog(f"Writing *plaintext* file contents to {local_path_out}")    
+        with open(local_path_out, 'w') as f:
+            f.write(content)
     
 def executeBatchJobCompat(machine: str, script_body: str,
                     nodes : int, ranks_per_node : int, gpus_per_rank : int,

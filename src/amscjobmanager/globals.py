@@ -31,6 +31,8 @@ def addSandboxDirs(dirs: Dict[str,str | List[str]]):
     """
     Add paths to the sandbox directories. Expects a dictionary mapping machine to 
     """
+    from .api_general import isDirectory, remoteMkdir
+    from .utils import queryYesNo
     global remote_workdir
     if remote_workdir is None:
         remote_workdir = {}
@@ -43,4 +45,10 @@ def addSandboxDirs(dirs: Dict[str,str | List[str]]):
         if machine not in remote_workdir:
             remote_workdir[machine] = []
         for dir in dir_or_dirs:            
+            if not isDirectory(machine, dir):
+                docreate = queryYesNo(f"Directory {dir} on machine {machine} does not exist, do you want to create it?")
+                if docreate:
+                    remoteMkdir(machine, dir, allow_unsafe=True)
+                else:
+                    raise Exception(f"Directory {dir} on machine {machine} does not exist")
             remote_workdir[machine].append(dir)

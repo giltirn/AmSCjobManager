@@ -38,6 +38,8 @@ class JobData:
        
     def enqueueJob(self, workflow, job_group = None):
         """Insert a job workflow into the queued workflows but do not start it"""
+        if not isinstance(workflow, list):
+            workflow = [workflow]
         assert len(workflow) > 0
         with self.conn as conn:        
             cur = conn.execute("INSERT INTO jobs(job_group, workflow, workflow_stage, head_action_type, head_action_class, head_action_status, last_status_change) VALUES (?,?,?,?,?,?,?)",

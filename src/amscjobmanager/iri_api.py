@@ -237,10 +237,10 @@ def setupWorkflowAgent(iriapi_key_path : str, iriapi_transfer_key_path : str, wo
        iriapi_key_path: The full path to the IRI API key file. This will be generated automatically if it doesn't currently exist.
        iriapi_transfer_key_path: The full path to the IRI transfer API key file. This will be generated automatically if it doesn't currently exist.
        work_dir: The remote work directories, by machine as a dict, e.g. { "perlmutter" : "/path/to/dir" }. Use a list of directories if more than one. The API is only allowed to modify the contents of files within this directory or its children
-    """
-    addSandboxDirs(work_dir)
+    """    
     setupIRIapiCompute(iriapi_key_path)
     setupIRIapiTransfer(iriapi_transfer_key_path)
+    addSandboxDirs(work_dir) #needs the API to be set up
         
 
 def get(machine, suburl, params = None, base='iriapi_base'):

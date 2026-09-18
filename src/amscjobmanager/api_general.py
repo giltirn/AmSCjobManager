@@ -29,8 +29,14 @@ def isDirectory(machine:str, remote_path: str)->bool:
     """
     Check if a remote path is a directory
     """
+    if remote_path == ".":
+        remote_path = "./" #pathlib treats as a filename otherwise
+
     if not pathlib.Path(remote_path).is_absolute():
-        raise Exception("Path must be absolute")
+        if machine == "local":
+            remote_path = str(pathlib.Path(remote_path).resolve())
+        else:
+            raise Exception("Path must be absolute")
 
     if remote_path[-1] == '/':
         return True

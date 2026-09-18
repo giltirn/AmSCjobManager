@@ -583,7 +583,7 @@ def downloadFileContents(machine: str, remote_path: str)->str:
     """
     machine = machine.lower()
 
-    wfapiLog(f"Downloading file {machine}:{remote_path}")    
+    wfapiLog(f"Downloading file contents {machine}:{remote_path}")    
 
     if not pathlib.Path(remote_path).is_absolute():
         raise Exception("Path must be absolute")
@@ -600,10 +600,15 @@ def downloadFileContents(machine: str, remote_path: str)->str:
         raise Exception(f"Download failed, response: { json.dumps(j,indent=2)}")        
 
 def downloadFile(machine: str, local_path_out: str, remote_path_in: str):
+    from .api_general import isDirectory
     if machine.lower() == "local":
         return local_api.localCopyFile(local_path_out, remote_path_in, allow_unsafe=True)
 
     content = downloadFileContents(machine, remote_path_in)
+    if isDirectory("local", local_path_out):
+        local_path_out = local_api.getAbsoluteLocalPath(local_path_out) + "/" + pathlib.Path(remote_path_in).name        
+
+    wfapiLog(f"Writing file contents to {local_path_out}")    
     with open(local_path_out, 'w') as f:
         f.write(content)
 

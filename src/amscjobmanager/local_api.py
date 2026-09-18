@@ -86,6 +86,11 @@ def localCopyFile(path_to: str, path_from: str, allow_unsafe = False):
     if result.returncode != 0:
         raise Exception(f"File copy failed: {result.stderr}")      
 
+def getAbsoluteLocalPath(path):    
+    if path == ".":
+        path = "./"
+    return str(Path(path).resolve())
+
 class LocalJobStatus:
     """The primary component of the workflow manager. It provides submission, tracking and updating of workflows backed by a database. State is updated upon calls to its functions."""
 

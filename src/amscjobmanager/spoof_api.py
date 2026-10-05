@@ -16,10 +16,52 @@ def setupWorkflowAgent(iriapi_key_path : str, iriapi_transfer_key_path : str, wo
 tid = 0
 transfers = { }
 transfer_labels = { }
+transfer_details = { }
+compute_jobs = { }
+compute_job_names = { }
+compute_job_details = { }
+spoof_action_history = []
+_spoof_completion_delay = None
 
-def _fakeGlobusCopy(label=None):
+def resetSpoofActionState(completion_delay=None):
+    """Reset SPOOF action state and make subsequent actions deterministic.
+
+    This is intended for workflow tests which need to inspect submission and
+    completion ordering without waiting for randomized fake action durations.
+    """
+    global tid, jid, _spoof_completion_delay
+    tid = 0
+    jid = 0
+    _spoof_completion_delay = completion_delay
+    transfers.clear()
+    transfer_labels.clear()
+    transfer_details.clear()
+    compute_jobs.clear()
+    compute_job_names.clear()
+    compute_job_details.clear()
+    spoof_action_history.clear()
+
+def getSpoofActionHistory():
+    """Return the ordered remote action events recorded by the SPOOF API."""
+    return list(spoof_action_history)
+
+def _recordSpoofActionEvent(event, action_type, api_key, name=None, details=None):
+    spoof_action_history.append({
+        "sequence": len(spoof_action_history),
+        "event": event,
+        "action_type": action_type,
+        "api_key": api_key,
+        "name": name,
+        "details": details,
+    })
+
+def _fakeGlobusCopy(label=None, details=None):
     #Assign the transfer a fake active time
-    active_time = random.randint(3,8)
+    active_time = (
+        random.randint(3, 8)
+        if _spoof_completion_delay is None
+        else _spoof_completion_delay
+    )
 
     #Generate a unique_key
     global tid
@@ -28,6 +70,8 @@ def _fakeGlobusCopy(label=None):
 
     transfers[key] = timemodule.time() + active_time
     transfer_labels[key] = label
+    transfer_details[key] = details
+    _recordSpoofActionEvent("submitted", "transfer", key, label, details)
     wfapiLog("Fake transfer",key,"time",active_time)
     
     return key
@@ -38,13 +82,27 @@ def globusCopy(dest_uuid: str, dest_path: str,
                block_until_complete=False,
                label: str | None = None)-> str:
     wfapiLog(f"Initiating globus copy from {source_uuid}:{source_path} to {dest_uuid}:{dest_path} to ")
-    return _fakeGlobusCopy(label)
+    return _fakeGlobusCopy(label, {
+        "source_endpoint": source_uuid,
+        "source_path": source_path,
+        "dest_endpoint": dest_uuid,
+        "dest_path": dest_path,
+    })
    
 def globusTransferStatus(transfer_id):
     if timemodule.time() >= transfers[transfer_id]:
-        return "SUCCEEDED"
+        status = "SUCCEEDED"
     else:
-        return "ACTIVE"
+        status = "ACTIVE"
+    if status == "SUCCEEDED" and not any(
+        event["event"] == "completed" and event["api_key"] == transfer_id
+        for event in spoof_action_history
+    ):
+        _recordSpoofActionEvent(
+            "completed", "transfer", transfer_id, transfer_labels[transfer_id],
+            transfer_details[transfer_id],
+        )
+    return status
 
 def findGlobusTransfersByLabel(label: str) -> str | None:
     matches = [transfer_id for transfer_id, task_label in transfer_labels.items() if task_label == label]
@@ -86,8 +144,6 @@ def getMachineQueues(machine)->List[ Tuple[str,str] ]:
 
 
 jid=0
-compute_jobs = { }
-compute_job_names = { }
 
 def executeBatchJobCompat(machine: str, script_body: str,
                     nodes : int, ranks_per_node : int, gpus_per_rank : int,
@@ -97,7 +153,11 @@ def executeBatchJobCompat(machine: str, script_body: str,
     wfapiLog(f"Executing batch job on machine {machine} with nodes:{nodes}, ranks/node:{ranks_per_node}, gpus/rank:{gpus_per_rank}, time:{time}, queue:{queue}, account:{account}")
    
     #Assign the job a fake active time
-    active_time = random.randint(3,8)
+    active_time = (
+        random.randint(3, 8)
+        if _spoof_completion_delay is None
+        else _spoof_completion_delay
+    )
 
     #Generate a unique_key
     global jid
@@ -106,6 +166,14 @@ def executeBatchJobCompat(machine: str, script_body: str,
 
     compute_jobs[key] = timemodule.time() + active_time
     compute_job_names[key] = name
+    compute_job_details[key] = {
+        "machine": machine,
+        "script_body": script_body,
+        "job_run_dir": job_run_dir,
+    }
+    _recordSpoofActionEvent(
+        "submitted", "compute", key, name, compute_job_details[key]
+    )
     wfapiLog("Fake compute",key,"time",active_time)
     
     return key
@@ -115,6 +183,14 @@ def getJobState(machine: str, jobid: str) -> str:
         status = "completed"
     else:
         status = "active"
+    if status == "completed" and not any(
+        event["event"] == "completed" and event["api_key"] == jobid
+        for event in spoof_action_history
+    ):
+        _recordSpoofActionEvent(
+            "completed", "compute", jobid, compute_job_names[jobid],
+            compute_job_details[jobid],
+        )
     wfapiLog(f"Queried job state {machine}:{jobid}, got {status}")
     return status
 

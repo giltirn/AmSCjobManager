@@ -146,7 +146,24 @@ class ActionManager:
             # pass will retry it after the persisted backoff interval.
             return action_id
         self._maybeSimulateCrash("remote_submission_completed")
-        api_status = self._queryStatusInternal(getattr(action, "machine", None), api_key)
+        # Persist the remote key before polling status.  A temporary status
+        # outage must never make a successfully submitted action unfindable.
+        with self.conn as conn:
+            conn.execute(
+                f"UPDATE {self.table_name} SET api_key = ?, last_update = ?, "
+                "last_submission_error = NULL WHERE action_id = ?",
+                (api_key, int(time.time()), action_id),
+            )
+
+        try:
+            api_status = self._queryStatusInternal(
+                getattr(action, "machine", None), api_key
+            )
+        except SimulatedCrash:
+            raise
+        except Exception as exc:
+            self._recordSchedulingError(action_id, str(exc))
+            return action_id
         self._maybeSimulateCrash("remote_status_obtained")
         action_status = self.api_action_status_map[api_status]
 
@@ -183,9 +200,17 @@ class ActionManager:
         if action["action_status"] != ActionStatus.SCHEDULING.name:
             return action_id
 
-        api_key = action["api_key"] or self._findRemoteActionByName(
-            action["machine"], self._remoteActionName(action_id)
-        )
+        api_key = action["api_key"]
+        if api_key is None:
+            try:
+                api_key = self._findRemoteActionByName(
+                    action["machine"], self._remoteActionName(action_id)
+                )
+            except SimulatedCrash:
+                raise
+            except Exception as exc:
+                self._recordSchedulingError(action_id, str(exc))
+                return None
         if api_key is None:
             if action["submission_attempts"] >= self.max_submission_attempts:
                 return self._markSchedulingFailed(
@@ -208,7 +233,21 @@ class ActionManager:
                     return self._markSchedulingFailed(action_id, str(exc))
                 return None
 
-        api_status = self._queryStatusInternal(action["machine"], api_key)
+        # Preserve an API key discovered during recovery before its status is
+        # queried, for the same reason as a freshly submitted key above.
+        with self.conn as conn:
+            conn.execute(
+                f"UPDATE {self.table_name} SET api_key = ?, last_update = ?, "
+                "last_submission_error = NULL WHERE action_id = ?",
+                (api_key, int(time.time()), action_id),
+            )
+        try:
+            api_status = self._queryStatusInternal(action["machine"], api_key)
+        except SimulatedCrash:
+            raise
+        except Exception as exc:
+            self._recordSchedulingError(action_id, str(exc))
+            return None
         action_status = self.api_action_status_map[api_status]
         with self.conn as conn:
             conn.execute(
@@ -234,6 +273,15 @@ class ActionManager:
                 (error, ActionStatus.FAILED.name, error, int(time.time()), action_id),
             )
         return action_id
+
+    def _recordSchedulingError(self, action_id, error):
+        """Record a transient scheduling/recovery error without changing state."""
+        with self.conn as conn:
+            conn.execute(
+                f"UPDATE {self.table_name} SET last_submission_error = ?, last_update = ? "
+                "WHERE action_id = ?",
+                (error, int(time.time()), action_id),
+            )
 
 
     def updateStatuses(self):
@@ -264,6 +312,8 @@ class ActionManager:
             action = conn.execute(f"SELECT action_status, api_status, last_update, machine, api_key FROM {self.table_name} WHERE action_id = ?", (action_id,) ).fetchone()
             action_status = getattr(ActionStatus, action['action_status'],None)
             api_status = action['api_status']
+            if action['api_key'] is None:
+                return action_status, api_status
             if force_update or (int(time.time()) > action['last_update'] + update_freq):
                 api_status = self._queryStatusInternal(action['machine'],action['api_key'])
                 action_status = self.api_action_status_map[api_status]

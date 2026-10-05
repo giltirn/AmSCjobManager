@@ -248,7 +248,6 @@ class SchedulingReconciliationTests(unittest.TestCase):
         self.assertEqual(row["submission_attempts"], 1)
         self.assertIn("action-layer submission failure", row["last_submission_error"])
 
-    @unittest.expectedFailure
     def test_submission_status_lookup_error_leaves_action_scheduling(self):
         # Submission succeeds remotely, but the immediate status API call
         # fails before the local API key/status update.  This must leave a
@@ -262,8 +261,12 @@ class SchedulingReconciliationTests(unittest.TestCase):
         self._assert_persisted_states(
             job_data, job_id, ActionStatus.SCHEDULING, ActionStatus.SCHEDULING
         )
+        self.assertEqual(self.harness.submission_count, 1)
 
-    @unittest.expectedFailure
+        job_data.reconcileSchedulingActions()
+        self.assertEqual(self.harness.submission_count, 1)
+        self._assert_reconciled_active(job_data, job_id)
+
     def test_reconciliation_lookup_error_leaves_action_scheduling(self):
         # An outage while looking up a remote action must be deferred as a
         # retryable scheduling state, rather than terminating progression.
@@ -276,8 +279,12 @@ class SchedulingReconciliationTests(unittest.TestCase):
         self._assert_persisted_states(
             job_data, job_id, ActionStatus.SCHEDULING, ActionStatus.SCHEDULING
         )
+        self.assertEqual(self.harness.submission_count, 0)
 
-    @unittest.expectedFailure
+        job_data.reconcileSchedulingActions()
+        self.assertEqual(self.harness.submission_count, 1)
+        self._assert_reconciled_active(job_data, job_id)
+
     def test_stale_scheduling_status_does_not_poll_without_api_key(self):
         # A previous submission error leaves no API key.  Even after the usual
         # cached-status interval has elapsed, querying that action must return

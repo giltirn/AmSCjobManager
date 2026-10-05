@@ -6,7 +6,11 @@ from .manager_config_models import ManagerConfig
 
 if globals.api_impl in ("SPOOF", "IRI"):
     def setupManager(config : ManagerConfig):
-        setupWorkflowAgent(config.iriapi_key_path, config.transferapi_key_path, config.sandbox_directories)
+        setupWorkflowAgent(
+            config.iri_implementations,
+            config.transferapi_key_path,
+            config.sandbox_directories,
+        )
 else:
     raise Exception("Unknown API implementation")
    

@@ -1,4 +1,5 @@
 from amscjobmanager.manager_config import readManagerConfigFile, setupManager
+from amscjobmanager.manager_config_models import ManagerConfig
 from amscjobmanager.actions_base import ComputeActionBase
 from amscjobmanager.compute_actions import ExecuteBatchScriptComputeAction
 from amscjobmanager.api_general import executeBatchJobCompat
@@ -23,8 +24,12 @@ sleep 20
 
 #########################################################################
 
-if len(sys.argv) == 1:
-    raise Exception("Must provide the manager configuration JSON")
+if len(sys.argv) != 2:
+    template_path = ManagerConfig.write_template_json()
+    raise SystemExit(
+        "Usage: python3 test/test_local.py <manager-config.json>\n"
+        f"Configuration template available at {template_path}"
+    )
 
 config = readManagerConfigFile(sys.argv[1])
 print(type(config))

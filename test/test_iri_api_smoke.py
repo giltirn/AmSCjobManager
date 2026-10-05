@@ -17,10 +17,15 @@ import uuid
 
 from amscjobmanager import iri_api
 from amscjobmanager.manager_config import readManagerConfigFile
+from amscjobmanager.manager_config_models import ManagerConfig
 
 
 if len(sys.argv) != 2:
-    raise SystemExit("Usage: python3 test/test_iri_api_smoke.py <manager-config.json>")
+    template_path = ManagerConfig.write_template_json()
+    raise SystemExit(
+        "Usage: python3 test/test_iri_api_smoke.py <manager-config.json>\n"
+        f"Configuration template available at {template_path}"
+    )
 
 
 def run(name, operation):
@@ -31,7 +36,7 @@ def run(name, operation):
 
 config = readManagerConfigFile(sys.argv[1])
 sandbox_directories = iri_api.setupWorkflowAgent(
-    config.iriapi_key_path,
+    {"nersc": config.iri_implementations["nersc"]},
     config.transferapi_key_path,
     config.sandbox_directories,
 )

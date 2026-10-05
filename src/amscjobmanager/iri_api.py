@@ -12,6 +12,7 @@ import os
 import stat
 import base64
 import re
+from dataclasses import dataclass, field
 from pathlib import Path
 import globus_sdk
 from globus_sdk.exc import GlobusAPIError
@@ -20,24 +21,39 @@ from .utils import queryYesNo
 from .logging import wfapiLog, wfapiUserQuery
 from . import local_api
 
-known_machines = {  "perlmutter" :
-                    { "iriapi_base" : "https://api.iri.nersc.gov/api/v1",
-                      "iriapi_group" : "perlmutter",
-                      "globus_endpoint" : "6bdc7956-fc0f-4ad2-989c-7aa5ee643a79", 
-                      "queues" : [ ("debug", "max time 0.5 hours, max nodes 8"), ("regular", "use for standard, production jobs or those too large for debug") ]
-                     },
-                     "amsc_transfer_server" :  #Universal server for AmSC data transfer API
-                     {
-                      "iriapi_transfer_base" : "https://amsc-data-api.nersc.gov"
-                     }
+IRI_IMPLEMENTATIONS = {
+    "nersc": {
+        "resource_server": "ed3e577d-f7f3-4639-b96e-ff5a8445d699",
+        "api_base": "https://api.iri.nersc.gov/api/v1",
+        "required_scopes": {
+            "https://auth.globus.org/scopes/ed3e577d-f7f3-4639-b96e-ff5a8445d699/iri_api",
+        },
+        "machines": {
+            "perlmutter": {
+                "iriapi_group": "perlmutter",
+                "globus_endpoint": "6bdc7956-fc0f-4ad2-989c-7aa5ee643a79",
+                "queues": [
+                    ("debug", "max time 0.5 hours, max nodes 8"),
+                    ("regular", "use for standard, production jobs or those too large for debug"),
+                ],
+            },
+        },
+    },
+}
 
-                    }
+MACHINE_IMPLEMENTATIONS = {
+    machine: implementation
+    for implementation, specification in IRI_IMPLEMENTATIONS.items()
+    for machine in specification["machines"]
+}
+
+TRANSFER_API_BASE = "https://amsc-data-api.nersc.gov"
 
 #These endpoints require special data access permissions
 #We also use this to bake in nicknames
 #TODO: figure out how to deal with those that also require a special domain
 #TODO: user config should store endpoints for which scopes are required, and token should be regenerated if list is changed (right now requires deletion)
-special_globus_endpoints = { "dtn" :  "9d6d994a-6d04-11e5-ba46-22000b92c6ec", "perlmutter" : known_machines["perlmutter"]["globus_endpoint"],
+special_globus_endpoints = { "dtn" :  "9d6d994a-6d04-11e5-ba46-22000b92c6ec", "perlmutter" : IRI_IMPLEMENTATIONS["nersc"]["machines"]["perlmutter"]["globus_endpoint"],
                             "bnl": "12782fb1-a599-4f18-b0fb-2e849681e214"  }
 
 # The NERSC DTN and Perlmutter expose the same filesystem. A path approved in
@@ -56,14 +72,27 @@ def replaceSpecialGlobusEndpoint(endpoint : str):
 def listSpecialGlobusEndpoints():
     return special_globus_endpoints.keys()
 
-    
-tokens = { "iriapi_base" : None, "iriapi_transfer_base" : None, "globus_transfer" : None }  #index tokens by their base path
+
+tokens = { "iriapi_transfer_base" : None, "globus_transfer" : None }
 
 
+@dataclass
+class IRIComputeClient:
+    """Authenticated compute/filesystem connection for one IRI implementation."""
 
-#IRI main and transfer APIs currently have different servers and tokens
+    implementation: str
+    access_token: str
+    http_client: httpx.Client = field(default_factory=httpx.Client)
+    resource_map: dict[str, dict[str, str]] = field(default_factory=dict)
+    project_map: dict[str, dict[str, str]] = field(default_factory=dict)
 
-iri_api_client = httpx.Client()
+    def close(self):
+        self.http_client.close()
+
+
+iri_compute_clients: dict[str, IRIComputeClient] = {}
+# The data-transfer API remains a separate, single service.
+iri_transfer_client = httpx.Client()
                
 def parse_scope_string(scope_string: str) -> set[str]:
     return set(scope_string.split()) if scope_string else set()
@@ -111,22 +140,24 @@ def refresh_tokens(client: globus_sdk.NativeAppAuthClient, refresh_token: str, s
 
 GLOBUS_CLIENT_ID = "eb18f0bb-4c76-43b5-88f1-750782be30ad" #Femtomeas, ckelly@bnl.gov
 
-IRI_RESOURCE_SERVER="ed3e577d-f7f3-4639-b96e-ff5a8445d699"
 RESOURCE_SERVER = "auth.globus.org"
-REQUIRED_SCOPES = {
-    f"https://auth.globus.org/scopes/{IRI_RESOURCE_SERVER}/iri_api"
-}       
 
-def interactive_login(client: globus_sdk.NativeAppAuthClient) -> dict:
+def _implementation_scopes(implementation: str) -> set[str]:
+    return set(IRI_IMPLEMENTATIONS[implementation]["required_scopes"])
+
+
+def interactive_login(client: globus_sdk.NativeAppAuthClient, implementation: str) -> dict:
+    resource_server = IRI_IMPLEMENTATIONS[implementation]["resource_server"]
+    required_scopes = _implementation_scopes(implementation)
     client.oauth2_start_flow(
-        requested_scopes=" ".join(sorted(REQUIRED_SCOPES)),
+        requested_scopes=" ".join(sorted(required_scopes)),
         refresh_tokens=True,
     )
     query = f"""Open this URL, login, and consent:
     { client.oauth2_get_authorize_url(query_params={"prompt": "login"}) }
 
     Enter authorization code: """
-    
+
     accept = False
     while(not accept):
         try:
@@ -136,24 +167,29 @@ def interactive_login(client: globus_sdk.NativeAppAuthClient) -> dict:
         except Exception as e:
             continue
 
-    assert IRI_RESOURCE_SERVER in token_response.by_resource_server.keys()
+    assert resource_server in token_response.by_resource_server.keys()
         
-    return token_response.by_resource_server[IRI_RESOURCE_SERVER]
+    return token_response.by_resource_server[resource_server]
 
-def setupIRIapiCompute(key_path):
-    client =  globus_sdk.NativeAppAuthClient(GLOBUS_CLIENT_ID)
+def setupIRIapiCompute(implementation: str, key_path: str) -> IRIComputeClient:
+    if implementation not in IRI_IMPLEMENTATIONS:
+        raise ValueError(f"Unknown IRI implementation: {implementation!r}")
 
-    wfapiLog("setupIRIapi checking stored tokens at",key_path)
+    auth_client = globus_sdk.NativeAppAuthClient(GLOBUS_CLIENT_ID)
+    resource_server = IRI_IMPLEMENTATIONS[implementation]["resource_server"]
+    required_scopes = _implementation_scopes(implementation)
+
+    wfapiLog(f"setupIRIapi({implementation}) checking stored tokens at", key_path)
     stored = load_tokens(Path(key_path))
     auth_data = None
     if stored and stored.get("refresh_token"):
-        auth_data = refresh_tokens(client, stored["refresh_token"], IRI_RESOURCE_SERVER)
+        auth_data = refresh_tokens(auth_client, stored["refresh_token"], resource_server)
 
     if auth_data == None:
-        auth_data = interactive_login(client)
+        auth_data = interactive_login(auth_client, implementation)
 
     granted = parse_scope_string(auth_data.get("scope", ""))
-    missing = REQUIRED_SCOPES - granted
+    missing = required_scopes - granted
     if missing:
         raise RuntimeError(f"Missing required scopes: {sorted(missing)}")
 
@@ -164,10 +200,10 @@ def setupIRIapiCompute(key_path):
         ttl = int(expires_at - time.time())
         print(f"\nAccess token valid for ~{max(ttl, 0)} seconds.")
 
-    wfapiLog(f"Saved token data to {key_path}")
+    wfapiLog(f"Saved {implementation} token data to {key_path}")
     wfapiLog(f"Granted scopes: {auth_data.get('scope', '')}")
 
-    tokens['iriapi_base'] = auth_data['access_token']
+    return IRIComputeClient(implementation, auth_data['access_token'])
     
 
 #############################
@@ -281,61 +317,112 @@ def setupIRIapiTransfer(key_path):
 ##### Public facing API
 ################################################
         
-def setupWorkflowAgent(iriapi_key_path : str, iriapi_transfer_key_path : str, work_dir : dict):
+def _configured_implementation_name(machine: str) -> str:
+    machine = machine.lower()
+    try:
+        return MACHINE_IMPLEMENTATIONS[machine]
+    except KeyError as exc:
+        raise ValueError(f"Unknown IRI compute/filesystem machine: {machine!r}") from exc
+
+
+def _get_compute_client(machine: str) -> tuple[IRIComputeClient, dict]:
+    machine = machine.lower()
+    implementation = _configured_implementation_name(machine)
+    try:
+        client = iri_compute_clients[implementation]
+    except KeyError as exc:
+        raise RuntimeError(
+            f"IRI implementation {implementation!r}, required for machine "
+            f"{machine!r}, is not configured"
+        ) from exc
+    return client, IRI_IMPLEMENTATIONS[implementation]["machines"][machine]
+
+
+def _close_compute_clients():
+    for client in iri_compute_clients.values():
+        client.close()
+    iri_compute_clients.clear()
+
+
+def setupWorkflowAgent(iri_implementations: dict, iriapi_transfer_key_path: str,
+                       work_dir: dict):
     """
     Setup the workflow agent
     Args:
-       iriapi_key_path: The full path to the IRI API key file. This will be generated automatically if it doesn't currently exist.
+       iri_implementations: Mapping of implementation names to configuration
+           objects containing a token_path. Each implementation stores its
+           authentication token independently.
        iriapi_transfer_key_path: The full path to the IRI transfer API key file. This will be generated automatically if it doesn't currently exist.
        work_dir: The remote work directories, by machine as a dict, e.g. { "perlmutter" : "/path/to/dir" }. Use a list of directories if more than one. The API is only allowed to modify the contents of files within this directory or its children
     """    
+    normalized_implementations = {
+        name.lower(): settings for name, settings in iri_implementations.items()
+    }
+    unknown_implementations = set(normalized_implementations) - set(IRI_IMPLEMENTATIONS)
+    if unknown_implementations:
+        raise ValueError(f"Unknown IRI implementations: {sorted(unknown_implementations)}")
+
+    _close_compute_clients()
+    for implementation, settings in normalized_implementations.items():
+        token_path = (
+            settings.token_path
+            if hasattr(settings, "token_path")
+            else settings["token_path"]
+        )
+        iri_compute_clients[implementation] = setupIRIapiCompute(
+            implementation, token_path
+        )
+
     normalized_work_dir = {
         machine.lower(): directory for machine, directory in work_dir.items()
     }
-    setupIRIapiCompute(iriapi_key_path)
+    for machine in normalized_work_dir:
+        if machine != "local":
+            _get_compute_client(machine)
     setupIRIapiTransfer(iriapi_transfer_key_path)
     addSandboxDirs(normalized_work_dir) #needs the API to be set up
     return normalized_work_dir
         
 
-def get(machine, suburl, params = None, base='iriapi_base'):
+def get(machine, suburl, params = None):
     machine = machine.lower()
-    assert iri_api_client != None
-    assert machine in known_machines
-    assert base in known_machines[machine]
-    assert base in tokens
-
-    token = tokens[base]
-    base_path = known_machines[machine][base]
-    resp = iri_api_client.get(base_path + '/' + suburl, headers={ "accept" : "application/json", "Authorization" : f"Bearer {token}" }, params=params, timeout=300  )
+    client, _ = _get_compute_client(machine)
+    resp = client.http_client.get(
+        IRI_IMPLEMENTATIONS[client.implementation]["api_base"] + '/' + suburl,
+        headers={"accept": "application/json", "Authorization": f"Bearer {client.access_token}"},
+        params=params,
+        timeout=300,
+    )
     if resp.status_code == 200:
         j = json.loads(resp.text)
         return j
     else:
         raise Exception(f"Get operation failed with code {resp.status_code} and text {resp.text} (full response: {resp})")
         
-iri_api_project_map = {}
-
 def getUserProjectIDmap(machine):
     """
     Obtain the mapping between project name and id
     Return:
        dict name -> id
     """
-    global iri_api_project_map
     machine = machine.lower()
+    client, _ = _get_compute_client(machine)
 
-    if machine not in iri_api_project_map:
+    if machine not in client.project_map:
         j = get(machine, "account/projects")
         pmap = dict()
         for acct in j:
             pmap[acct['name']] = acct['id']
-        iri_api_project_map[machine] = pmap
+        client.project_map[machine] = pmap
     
-    return iri_api_project_map[machine]
+    return client.project_map[machine]
 
 def getKnownMachines():
-    return list(known_machines.keys()) + ["local"]
+    return [
+        machine
+        for implementation in iri_compute_clients
+        for machine in IRI_IMPLEMENTATIONS[implementation]["machines"]
+    ] + ["local"]
 
 def getMachineQueues(machine)->List[ Tuple[str,str] ]:
     """
@@ -344,15 +431,12 @@ def getMachineQueues(machine)->List[ Tuple[str,str] ]:
     Return: a list of string tuples, with the first tuple entry being the queue name and the second relevant information about the queue
     """
     machine = machine.lower()
-    if machine not in getKnownMachines():
-        raise Exception(f"Invalid machine: {machine}")
-
-    return known_machines[machine]["queues"]
+    _, machine_specification = _get_compute_client(machine)
+    return machine_specification["queues"]
 
 def getUserAccountProjects(machine):
     machine = machine.lower()
-    if machine not in getKnownMachines():
-        raise Exception(f"Invalid machine: {machine}")
+    _get_compute_client(machine)
     
     out = list(getUserProjectIDmap(machine).keys())
     if machine == "perlmutter": #_g is required for GPU nodes
@@ -360,26 +444,21 @@ def getUserAccountProjects(machine):
             out[i] += "_g"
     return out
     
-
-
-
-iri_api_resource_map = {}
-
 def getResourceID(machine, rtype="compute"):
     """
     Get the resource ID associated with the resource
     rtype: "compute" or "login"
     """
     machine = machine.lower()
-    global iri_api_resource_map
     if rtype not in ["compute","login"]:
         raise Exception("Invalid resource type")
+    client, machine_specification = _get_compute_client(machine)
     
-    if machine not in iri_api_resource_map:
+    if machine not in client.resource_map:
         wfapiLog("Obtaining resource information for machine",machine)
-        j = get(machine, "status/resources", params={"group" : known_machines[machine]['iriapi_group'], "resource_type" : "compute"})
+        j = get(machine, "status/resources", params={"group" : machine_specification['iriapi_group'], "resource_type" : "compute"})
         
-        iri_api_resource_map[machine] = dict()
+        client.resource_map[machine] = dict()
             
         #The API does not distinguish between login and compute nodes; both are "compute" resources, but the login node does not have any capabilities listed (unclear if this will change)
         #For now, use the capabilities to distinguish as the names are likely arbitrary
@@ -395,15 +474,15 @@ def getResourceID(machine, rtype="compute"):
                     gpu = True
             if cpu and gpu:
                 wfapiLog(f"Identified resource {json.dumps(r,indent=2)} as compute backend")
-                iri_api_resource_map[machine]["compute"] = r["id"]
+                client.resource_map[machine]["compute"] = r["id"]
             elif not cpu and not gpu:
                 wfapiLog(f"Identified resource {json.dumps(r,indent=2)} as login frontend")
-                iri_api_resource_map[machine]["login"] = r["id"]
+                client.resource_map[machine]["login"] = r["id"]
             else:
                 wfapiLog(f"Warning: unidentified resource {json.dumps(r,indent=2)}")
         
     
-    return iri_api_resource_map[machine][rtype]
+    return client.resource_map[machine][rtype]
 
 
 def queryMachineStatus(machine: str, rtype="compute")-> bool:
@@ -449,8 +528,7 @@ def remoteLs(machine: str, path: str)-> List[str]:
     TODO: Explore behavior of trailing slashes, and the fact that the directory name itself seems to be listed among the directory content; should we unify the behavior with SFAPI?
     """
     machine = machine.lower()
-    assert iri_api_client != None
-    assert machine in known_machines
+    _get_compute_client(machine)
 
     wfapiLog(f"Listing contents of directory {machine}:{path}")
     
@@ -466,15 +544,16 @@ def remoteLs(machine: str, path: str)-> List[str]:
 
 def put(machine, suburl, data = None, params=None):
     machine = machine.lower()
-    assert iri_api_client != None
-    assert machine in known_machines
-    assert 'iriapi_base' in tokens
-    
-    token = tokens['iriapi_base']   
-    base_path = known_machines[machine]['iriapi_base']
-    headers={ "accept" : "application/json", "Authorization" : f"Bearer {token}" }
-    
-    resp = iri_api_client.put(base_path + '/' + suburl, headers=headers, json=data, params=params, timeout=300)
+    client, _ = _get_compute_client(machine)
+    headers={ "accept" : "application/json", "Authorization" : f"Bearer {client.access_token}" }
+
+    resp = client.http_client.put(
+        IRI_IMPLEMENTATIONS[client.implementation]["api_base"] + '/' + suburl,
+        headers=headers,
+        json=data,
+        params=params,
+        timeout=300,
+    )
     return json.loads(resp.text), resp.status_code
 
 
@@ -498,18 +577,20 @@ def remoteChmod(machine: str, path : str, mode : str, allow_unsafe = False):
         raise Exception(f"Permission change failed: {json.dumps(j,indent=2)}")        
     
 
-def post(machine, suburl, data = None, params=None, files=None, base='iriapi_base', data_is_json=True):
+def post(machine, suburl, data = None, params=None, files=None, data_is_json=True):
     machine = machine.lower()
-    assert iri_api_client != None
-    assert machine in known_machines
-    assert base in known_machines[machine]
-    assert base in tokens
+    client, _ = _get_compute_client(machine)
+    headers={ "accept" : "application/json", "Authorization" : f"Bearer {client.access_token}" }
 
-    token = tokens[base]      
-    base_path = known_machines[machine][base]
-    headers={ "accept" : "application/json", "Authorization" : f"Bearer {token}" }
-    
-    resp = iri_api_client.post(base_path + '/' + suburl, headers=headers, json=data if data_is_json else None, data=data if not data_is_json else None, params=params, files=files, timeout=300 )
+    resp = client.http_client.post(
+        IRI_IMPLEMENTATIONS[client.implementation]["api_base"] + '/' + suburl,
+        headers=headers,
+        json=data if data_is_json else None,
+        data=data if not data_is_json else None,
+        params=params,
+        files=files,
+        timeout=300,
+    )
     return json.loads(resp.text), resp.status_code
     
 def remoteMkdir(machine: str, path: str, create_parents = True, allow_unsafe = False):
@@ -773,15 +854,48 @@ def findJobByName(machine: str, name: str) -> str | None:
     
 def delete(machine, suburl, params = None):
     machine = machine.lower()
-
-    assert iri_api_client != None
-    assert machine in known_machines
-    assert 'iriapi_base' in tokens
-    
-    token = tokens['iriapi_base']         
-    base_path = known_machines[machine]['iriapi_base']
-    resp = iri_api_client.delete(base_path + '/' + suburl, headers={ "accept" : "*/*", "Authorization" : f"Bearer {token}" }, params=params, timeout=300  )
+    client, _ = _get_compute_client(machine)
+    resp = client.http_client.delete(
+        IRI_IMPLEMENTATIONS[client.implementation]["api_base"] + '/' + suburl,
+        headers={"accept": "*/*", "Authorization": f"Bearer {client.access_token}"},
+        params=params,
+        timeout=300,
+    )
     return {} if resp.text == "" else resp.json(), resp.status_code
+
+
+def _transfer_get(suburl, params=None):
+    token = tokens["iriapi_transfer_base"]
+    if token is None:
+        raise RuntimeError("IRI transfer API token is not initialized")
+    response = iri_transfer_client.get(
+        TRANSFER_API_BASE + "/" + suburl,
+        headers={"accept": "application/json", "Authorization": f"Bearer {token}"},
+        params=params,
+        timeout=300,
+    )
+    if response.status_code != 200:
+        raise Exception(
+            f"Get operation failed with code {response.status_code} and text "
+            f"{response.text} (full response: {response})"
+        )
+    return json.loads(response.text)
+
+
+def _transfer_post(suburl, data=None, params=None, files=None, data_is_json=True):
+    token = tokens["iriapi_transfer_base"]
+    if token is None:
+        raise RuntimeError("IRI transfer API token is not initialized")
+    response = iri_transfer_client.post(
+        TRANSFER_API_BASE + "/" + suburl,
+        headers={"accept": "application/json", "Authorization": f"Bearer {token}"},
+        json=data if data_is_json else None,
+        data=data if not data_is_json else None,
+        params=params,
+        files=files,
+        timeout=300,
+    )
+    return json.loads(response.text), response.status_code
 
 def cancelJob(machine: str, jobid: str):
     machine = machine.lower()
@@ -802,7 +916,7 @@ def globusTransferStatus(transfer_id)-> str:
     "SUCCEEDED"  The task completed successfully.
     "FAILED"  The task or one of its subtasks failed, expired, or was canceled.
     """
-    j = get("amsc_transfer_server", f"movement/transfer/globus/{transfer_id}", base='iriapi_transfer_base')
+    j = _transfer_get(f"movement/transfer/globus/{transfer_id}")
     return j["status"]
 
 def findGlobusTransfersByLabel(label: str) -> str | None:
@@ -829,7 +943,7 @@ def _globusCopy(source_endpoint, dest_endpoint, source_path, dest_path,
                    "destination_uuid" : dest_endpoint, "destination_path" : dest_path,
                    "label" : label or "FemtoMeas transfer" }
     
-    j, status=post("amsc_transfer_server", "movement/transfer/globus", data=trans_args, base='iriapi_transfer_base', data_is_json=True)
+    j, status = _transfer_post("movement/transfer/globus", data=trans_args)
     if status == 200:
         tid = j["transfer_uuid"]
 

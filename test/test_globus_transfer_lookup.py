@@ -9,8 +9,7 @@ sandbox so a failed transfer can be inspected afterwards.
 """
 
 from io import BytesIO
-import json
-from pathlib import Path, PurePosixPath
+from pathlib import PurePosixPath
 import sys
 import time
 import uuid
@@ -22,16 +21,22 @@ from amscjobmanager.api_general import (
     setupWorkflowAgent,
     uploadBytes,
 )
+from amscjobmanager.manager_config import readManagerConfigFile
+from amscjobmanager.manager_config_models import ManagerConfig
 
 
 if len(sys.argv) != 2:
-    raise SystemExit("Usage: python3 test/test_globus_transfer_lookup.py <manager-config.json>")
+    template_path = ManagerConfig.write_template_json()
+    raise SystemExit(
+        "Usage: python3 test/test_globus_transfer_lookup.py <manager-config.json>\n"
+        f"Configuration template available at {template_path}"
+    )
 
-config = json.loads(Path(sys.argv[1]).read_text())
+config = readManagerConfigFile(sys.argv[1])
 sandbox_directories = setupWorkflowAgent(
-    config["iriapi_key_path"],
-    config["transferapi_key_path"],
-    config["sandbox_directories"],
+    config.iri_implementations,
+    config.transferapi_key_path,
+    config.sandbox_directories,
 )
 
 perlmutter_sandbox = PurePosixPath(sandbox_directories["perlmutter"])

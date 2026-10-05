@@ -231,8 +231,9 @@ class JobData:
 
         The JobData-issued action ID lets this method recreate a missing local
         action row and ask the action manager to find the corresponding remote action.
-        Nothing is resubmitted here: an unfindable remote action remains in
-        SCHEDULING to prevent duplicate compute jobs or transfers.
+        ActionManager first searches for a remote action under the durable
+        action name; only an unfindable action is retried according to its
+        persisted submission backoff policy.
         """
         with self.conn as conn:
             scheduling_jobs = conn.execute(

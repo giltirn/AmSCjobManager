@@ -40,7 +40,8 @@ class ActionManager:
         return f"amscjm:{action_id}"
     
     def __init__(self, connection : sqlite3.Connection, table_name, api_action_status_map : dict,
-                 *, _test_crash_at: str | None = None):
+                 *, _test_crash_at: str | None = None,
+                 scheduling_retry_delay=30, max_submission_attempts=3):
         """
         api_action_status_map : map between return status from the API to an ActionStatus
         """
@@ -48,6 +49,8 @@ class ActionManager:
         self.table_name = table_name
         self.api_action_status_map = api_action_status_map #
         self._test_crash_at = _test_crash_at
+        self.scheduling_retry_delay = scheduling_retry_delay
+        self.max_submission_attempts = max_submission_attempts
         
         with self.conn as conn:        
             conn.execute(f"""
@@ -59,7 +62,10 @@ class ActionManager:
             api_status TEXT,
             action_status TEXT,
             last_update INTEGER,
-            job_id INTEGER
+            job_id INTEGER,
+            submission_attempts INTEGER NOT NULL DEFAULT 0,
+            last_submission_attempt INTEGER,
+            last_submission_error TEXT
             )
             """)
 
@@ -107,11 +113,38 @@ class ActionManager:
         if entry["action_status"] != ActionStatus.SCHEDULING.name:
             raise Exception(f"Action {action_id} is not awaiting submission")
 
+        # Record the attempt before the remote call.  If the process dies in
+        # the call, reconciliation can use this timestamp for retry backoff.
+        with self.conn as conn:
+            conn.execute(
+                f"UPDATE {self.table_name} SET submission_attempts = submission_attempts + 1, "
+                "last_submission_attempt = ?, last_submission_error = NULL WHERE action_id = ?",
+                (int(time.time()), action_id),
+        )
+
         action = _unser(entry["details"])
         self._maybeSimulateCrash("before_remote_submission")
-        api_key = action.initiateAction(
-            entry["job_id"], name=self._remoteActionName(action_id)
-        )
+        try:
+            api_key = action.initiateAction(
+                entry["job_id"], name=self._remoteActionName(action_id)
+            )
+        except SimulatedCrash:
+            raise
+        except Exception as exc:
+            with self.conn as conn:
+                conn.execute(
+                    f"UPDATE {self.table_name} SET last_submission_error = ? WHERE action_id = ?",
+                    (str(exc), action_id),
+                )
+                attempts = conn.execute(
+                    f"SELECT submission_attempts FROM {self.table_name} WHERE action_id = ?",
+                    (action_id,),
+                ).fetchone()["submission_attempts"]
+            if attempts >= self.max_submission_attempts:
+                return self._markSchedulingFailed(action_id, str(exc))
+            # The action remains SCHEDULING.  The recurring reconciliation
+            # pass will retry it after the persisted backoff interval.
+            return action_id
         self._maybeSimulateCrash("remote_submission_completed")
         api_status = self._queryStatusInternal(getattr(action, "machine", None), api_key)
         self._maybeSimulateCrash("remote_status_obtained")
@@ -138,14 +171,11 @@ class ActionManager:
             ).fetchone() is not None
 
     def reconcileScheduledAction(self, action_id):
-        """Reconcile a SCHEDULING row without resubmitting it.
-
-        If the remote action cannot yet be found, leave the row untouched to
-        avoid creating a duplicate expensive action.
-        """
+        """Reconcile a SCHEDULING row, retrying an unsubmitted action safely."""
         with self.conn as conn:
             action = conn.execute(
-                f"SELECT machine, api_key, action_status FROM {self.table_name} WHERE action_id = ?",
+                f"SELECT machine, api_key, action_status, submission_attempts, "
+                f"last_submission_attempt FROM {self.table_name} WHERE action_id = ?",
                 (action_id,),
             ).fetchone()
         if action is None:
@@ -157,7 +187,26 @@ class ActionManager:
             action["machine"], self._remoteActionName(action_id)
         )
         if api_key is None:
-            return None
+            if action["submission_attempts"] >= self.max_submission_attempts:
+                return self._markSchedulingFailed(
+                    action_id,
+                    "Remote action was not found after the maximum number of submission attempts",
+                )
+
+            if not self._retryAllowed(action):
+                return None
+
+            try:
+                return self.submitScheduledAction(action_id)
+            except Exception as exc:
+                with self.conn as conn:
+                    attempts = conn.execute(
+                        f"SELECT submission_attempts FROM {self.table_name} WHERE action_id = ?",
+                        (action_id,),
+                    ).fetchone()["submission_attempts"]
+                if attempts >= self.max_submission_attempts:
+                    return self._markSchedulingFailed(action_id, str(exc))
+                return None
 
         api_status = self._queryStatusInternal(action["machine"], api_key)
         action_status = self.api_action_status_map[api_status]
@@ -165,6 +214,24 @@ class ActionManager:
             conn.execute(
                 f"UPDATE {self.table_name} SET api_key = ?, api_status = ?, action_status = ?, last_update = ? WHERE action_id = ?",
                 (api_key, api_status, action_status.name, int(time.time()), action_id),
+            )
+        return action_id
+
+    def _retryAllowed(self, action):
+        """Apply exponential backoff while remote action indexing catches up."""
+        if action["submission_attempts"] == 0:
+            return True
+        retry_delay = self.scheduling_retry_delay * (
+            2 ** (action["submission_attempts"] - 1)
+        )
+        return int(time.time()) >= action["last_submission_attempt"] + retry_delay
+
+    def _markSchedulingFailed(self, action_id, error):
+        with self.conn as conn:
+            conn.execute(
+                f"UPDATE {self.table_name} SET api_status = ?, action_status = ?, "
+                "last_submission_error = ?, last_update = ? WHERE action_id = ?",
+                (error, ActionStatus.FAILED.name, error, int(time.time()), action_id),
             )
         return action_id
 

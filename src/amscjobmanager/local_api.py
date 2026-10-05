@@ -99,18 +99,21 @@ class LocalJobStatus:
         self.conn = sqlite3.connect(db_path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
 
+        with self.conn as conn:
+            conn.execute("""
+            CREATE TABLE IF NOT EXISTS localjobs (
+            job_id TEXT PRIMARY KEY,
+            status TEXT,
+            name TEXT
+            )
+            """)
+
+    def enqueueJob(self, job_id: str, name: str | None = None):
         with self.conn as conn:        
-                    conn.execute("""
-                    CREATE TABLE IF NOT EXISTS localjobs (
-                    job_id TEXT PRIMARY KEY,
-                    status TEXT
-                    )
-                    """)
-    def enqueueJob(self, job_id : str):
-        with self.conn as conn:        
-            cur = conn.execute("INSERT INTO localjobs VALUES (?,?)",
-                                (job_id, "queued"
-                                ) )        
+            conn.execute(
+                "INSERT INTO localjobs(job_id, status, name) VALUES (?,?,?)",
+                (job_id, "queued", name),
+            )
 
     def startJob(self, job_id : str):
         with self.conn as conn:
@@ -163,15 +166,29 @@ def getJobState(jobid: str) -> str:
     with statusMan() as m:
         return m.jobStatus(jobid)
 
-def executeJobScript(script_body: str, job_run_dir : str, allow_unsafe=False) -> str:
+def findJobByName(name: str) -> str | None:
+    with statusMan() as m:
+        row = m.conn.execute(
+            "SELECT job_id FROM localjobs WHERE name = ? ORDER BY rowid DESC LIMIT 1",
+            (name,),
+        ).fetchone()
+        return None if row is None else row["job_id"]
+
+def executeJobScript(
+    script_body: str,
+    job_run_dir: str,
+    allow_unsafe=False,
+    name: str | None = None,
+) -> str:
     """
     Execute a job script on the local machine
     script_body: The content of the batch script. If you are executing an existing script, use "source /path/to/script"    
+    name: Optional job name recorded with the local job metadata.
     """    
 
     jobid = subprocess.run(["cat", "/proc/sys/kernel/random/uuid"], capture_output=True, text=True).stdout.strip()
     with statusMan() as m:
-        m.enqueueJob(jobid)
+        m.enqueueJob(jobid, name=name)
 
     def _run():
         wfapiLog(f"Executing local job {jobid}")

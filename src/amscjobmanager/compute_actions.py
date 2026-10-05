@@ -11,5 +11,5 @@ class ExecuteBatchScriptComputeAction(ComputeActionBase):
     gpus_per_rank: int
     exclusive : bool = True
 
-    def initiateAction(self, job_id)->str:
-        return executeBatchJobCompat(self.machine, self.script_body, self.nodes, self.ranks_per_node, self.gpus_per_rank,  time=self.time, queue=self.queue, account=self.account, job_run_dir=self.rundir, exclusive=self.exclusive, allow_unsafe=False)
+    def initiateAction(self, job_id, name: str | None = None)->str:
+        return executeBatchJobCompat(self.machine, self.script_body, self.nodes, self.ranks_per_node, self.gpus_per_rank,  time=self.time, queue=self.queue, account=self.account, job_run_dir=self.rundir, exclusive=self.exclusive, allow_unsafe=False, name=name)

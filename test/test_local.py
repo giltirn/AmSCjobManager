@@ -14,12 +14,12 @@ class TestComputeAction(ComputeActionBase):
     toprint: str
     rundir: str
 
-    def initiateAction(self, job_id)->str:
+    def initiateAction(self, job_id, name: str | None = None)->str:
         script_body = f"""
 echo "{self.toprint}"
 sleep 20
 """ 
-        return executeBatchJobCompat(self.machine, script_body, nodes=1, ranks_per_node=1, gpus_per_rank=0,  time=self.time, queue=self.queue, account=self.account, job_run_dir=self.rundir, exclusive=True, allow_unsafe=False)
+        return executeBatchJobCompat(self.machine, script_body, nodes=1, ranks_per_node=1, gpus_per_rank=0,  time=self.time, queue=self.queue, account=self.account, job_run_dir=self.rundir, exclusive=True, allow_unsafe=False, name=name)
 
 #########################################################################
 

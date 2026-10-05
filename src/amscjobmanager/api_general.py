@@ -7,10 +7,10 @@ from .logging import wfapiLog
 if globals.api_impl == "IRI":
     #Pure IRI
     print("Using IRI API")
-    from .iri_api import setupWorkflowAgent, remoteLs, remoteMkdir, uploadBytes, executeBatchJobCompat, remoteChmod, getJobState, cancelJob, queryMachineStatus, globusTransferStatus, getUserAccountProjects, getKnownMachines, getMachineQueues, downloadFile, listSpecialGlobusEndpoints, globusCopy, pathType
+    from .iri_api import setupWorkflowAgent, remoteLs, remoteMkdir, uploadBytes, executeBatchJobCompat, remoteChmod, getJobState, findJobByName, cancelJob, queryMachineStatus, globusTransferStatus, findGlobusTransferByLabel, findGlobusTransfersByLabel, getUserAccountProjects, getKnownMachines, getMachineQueues, downloadFile, listSpecialGlobusEndpoints, globusCopy, pathType
 elif globals.api_impl == "SPOOF":
     print("Using Spoof API")
-    from .spoof_api import setupWorkflowAgent, remoteMkdir, uploadBytes, executeBatchJobCompat, getJobState, globusTransferStatus, queryMachineStatus, getUserAccountProjects, getKnownMachines, getMachineQueues, remoteRun, downloadFile, listSpecialGlobusEndpoints, globusCopy
+    from .spoof_api import setupWorkflowAgent, remoteMkdir, uploadBytes, executeBatchJobCompat, getJobState, findJobByName, globusTransferStatus, findGlobusTransferByLabel, findGlobusTransfersByLabel, queryMachineStatus, getUserAccountProjects, getKnownMachines, getMachineQueues, remoteRun, downloadFile, listSpecialGlobusEndpoints, globusCopy
 else:
     raise Exception("Unknown API implementation")
 

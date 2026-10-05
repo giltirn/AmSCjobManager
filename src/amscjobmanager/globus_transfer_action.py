@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from .actions_base import replaceJobIdSubstring, TransferActionBase
-from .api_general import globusCopy, globusTransferStatus
+from .api_general import globusCopy, globusTransferStatus, findGlobusTransferByLabel
 from .action_manager import ActionManager, ActionStatus
 import sqlite3
 
@@ -12,11 +12,11 @@ class GlobusTransfer(TransferActionBase):
     source_endpoint: str 
     source_path: str
 
-    def initiateAction(self, job_id)-> str:        
+    def initiateAction(self, job_id, name: str | None = None)-> str:
         source_path = replaceJobIdSubstring(self.source_path, job_id)
         dest_path = replaceJobIdSubstring(self.dest_path, job_id)
         
-        return globusCopy(self.dest_endpoint, dest_path, self.source_endpoint, source_path, allow_unsafe=False, block_until_complete=True)
+        return globusCopy(self.dest_endpoint, dest_path, self.source_endpoint, source_path, allow_unsafe=False, block_until_complete=True, label=name)
 
     def getInfo(self)->dict:
         """
@@ -26,12 +26,15 @@ class GlobusTransfer(TransferActionBase):
 
 class GlobusDataTransfers(ActionManager):
     """Action manager for Globus transfers"""
-    def __init__(self, connection : sqlite3.Connection):
+    def __init__(self, connection : sqlite3.Connection, **kwargs):
         #"ACTIVE"  The task is in progress.
         #"INACTIVE" The task has been suspended and will not continue without intervention. Currently, only credential expiration will cause this state.
         #"SUCCEEDED"  The task completed successfully.
         #"FAILED"  The task or one of its subtasks failed, expired, or was canceled.
         smap = { "ACTIVE" : ActionStatus.ACTIVE, "INACTIVE" : ActionStatus.FAILED, "SUCCEEDED" : ActionStatus.COMPLETED, "FAILED" : ActionStatus.FAILED }    
-        super().__init__(connection, "transfers", smap)
-    def _queryStatusInternal(self, api_key):
+        super().__init__(connection, "transfers", smap, **kwargs)
+    def _queryStatusInternal(self, machine, api_key):
         return globusTransferStatus(api_key)
+
+    def _findRemoteActionByName(self, machine, name):
+        return findGlobusTransferByLabel(name)

@@ -36,7 +36,7 @@ class JobManager:
         """
         def __nincomplete():
             with self._lock:
-                return self.job_data.countWorkflowsWithStatus([ ActionStatus.PENDING, ActionStatus.ACTIVE, ActionStatus.COMPLETED ]) #note, complete (non-null) actions are awaiting progression
+                return self.job_data.countWorkflowsWithStatus([ ActionStatus.PENDING, ActionStatus.SCHEDULING, ActionStatus.ACTIVE, ActionStatus.COMPLETED ]) #note, complete (non-null) actions are awaiting progression
         
         if wait_until_done:
             while(__nincomplete() > 0):

@@ -11,11 +11,13 @@ def listSpecialGlobusEndpoints():
 def setupWorkflowAgent(iriapi_key_path : str, iriapi_transfer_key_path : str, work_dir : dict):
     globals.remote_workdir={ machine.lower() : directory for machine, directory in work_dir.items() }
     wfapiLog("Using SPOOF api with workdir", globals.remote_workdir)
+    return globals.remote_workdir
 
 tid = 0
 transfers = { }
+transfer_labels = { }
 
-def _fakeGlobusCopy():
+def _fakeGlobusCopy(label=None):
     #Assign the transfer a fake active time
     active_time = random.randint(3,8)
 
@@ -25,6 +27,7 @@ def _fakeGlobusCopy():
     tid +=1
 
     transfers[key] = timemodule.time() + active_time
+    transfer_labels[key] = label
     wfapiLog("Fake transfer",key,"time",active_time)
     
     return key
@@ -32,15 +35,26 @@ def _fakeGlobusCopy():
 def globusCopy(dest_uuid: str, dest_path: str,
                source_uuid: str, source_path: str,
                allow_unsafe=False,
-               block_until_complete=False)-> str: 
+               block_until_complete=False,
+               label: str | None = None)-> str:
     wfapiLog(f"Initiating globus copy from {source_uuid}:{source_path} to {dest_uuid}:{dest_path} to ")
-    return _fakeGlobusCopy()
+    return _fakeGlobusCopy(label)
    
 def globusTransferStatus(transfer_id):
     if timemodule.time() >= transfers[transfer_id]:
         return "SUCCEEDED"
     else:
         return "ACTIVE"
+
+def findGlobusTransfersByLabel(label: str) -> str | None:
+    matches = [transfer_id for transfer_id, task_label in transfer_labels.items() if task_label == label]
+    if len(matches) > 1:
+        raise RuntimeError(f"Multiple fake Globus transfers use submission label {label!r}")
+    return None if not matches else matches[0]
+
+def findGlobusTransferByLabel(label: str) -> str | None:
+    """Compatibility wrapper for the singular form of the lookup helper."""
+    return findGlobusTransfersByLabel(label)
     
 def remoteMkdir(machine: str, path: str, create_parents = True, allow_unsafe = False)-> int:
     wfapiLog(f"Creating directory {machine}:{path}")
@@ -73,11 +87,13 @@ def getMachineQueues(machine)->List[ Tuple[str,str] ]:
 
 jid=0
 compute_jobs = { }
+compute_job_names = { }
 
 def executeBatchJobCompat(machine: str, script_body: str,
                     nodes : int, ranks_per_node : int, gpus_per_rank : int,
                     time : str, queue : str, account : str,
-                    job_run_dir : str, exclusive=True, allow_unsafe=False) -> str:
+                    job_run_dir : str, exclusive=True, allow_unsafe=False,
+                    name: str | None = None) -> str:
     wfapiLog(f"Executing batch job on machine {machine} with nodes:{nodes}, ranks/node:{ranks_per_node}, gpus/rank:{gpus_per_rank}, time:{time}, queue:{queue}, account:{account}")
    
     #Assign the job a fake active time
@@ -89,6 +105,7 @@ def executeBatchJobCompat(machine: str, script_body: str,
     jid +=1
 
     compute_jobs[key] = timemodule.time() + active_time
+    compute_job_names[key] = name
     wfapiLog("Fake compute",key,"time",active_time)
     
     return key
@@ -100,6 +117,12 @@ def getJobState(machine: str, jobid: str) -> str:
         status = "active"
     wfapiLog(f"Queried job state {machine}:{jobid}, got {status}")
     return status
+
+def findJobByName(machine: str, name: str) -> str | None:
+    for job_id, job_name in compute_job_names.items():
+        if job_name == name:
+            return job_id
+    return None
 
 def downloadFile(machine: str, remote_path: str)->str:
     wfapiLog(f"Downloading file {machine}:{remote_path}")

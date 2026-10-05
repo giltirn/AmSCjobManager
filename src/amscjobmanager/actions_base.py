@@ -18,8 +18,8 @@ class TransferActionBase:
         """
         raise NotImplementedError("Derived class must implement getInfo")
 
-    def initiateAction(self, job_id)->str:
-        """Initiate the action with the provided job index, return the API's key for the action"""
+    def initiateAction(self, job_id, name: str | None = None)->str:
+        """Initiate the action and return the API key; name identifies the action."""
         raise NotImplementedError("Derived class must implement initiateAction")
 
 @dataclass
@@ -37,8 +37,8 @@ class ComputeActionBase:
         """
         return {"machine" : self.machine, "queue" : self.queue, "time" : self.time}    
 
-    def initiateAction(self, job_id)->str:
-        """Initiate the action with the provided job index, return the API's key for the action"""
+    def initiateAction(self, job_id, name: str | None = None)->str:
+        """Initiate the action and return the API key; name identifies the action."""
         raise NotImplementedError("Derived class must implement initiateAction")
 
 class ActionClass(Enum):
@@ -52,4 +52,4 @@ def actionClass(action):
     elif issubclass(type(action), ComputeActionBase):
         return ActionClass.COMPUTE
     else:
-        raise Exception("Unknown action type",type(action))       
+        raise Exception("Unknown action type",type(action))

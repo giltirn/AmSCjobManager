@@ -1,6 +1,7 @@
 from authlib.integrations.requests_client import OAuth2Session
 from authlib.oauth2.rfc7523 import PrivateKeyJWT
 import httpx
+from . import globals as manager_globals
 from .globals import checkSafePath, addSandboxDirs
 import json
 from typing import Literal, Union, List, Optional, Tuple
@@ -39,6 +40,10 @@ known_machines = {  "perlmutter" :
 special_globus_endpoints = { "dtn" :  "9d6d994a-6d04-11e5-ba46-22000b92c6ec", "perlmutter" : known_machines["perlmutter"]["globus_endpoint"],
                             "bnl": "12782fb1-a599-4f18-b0fb-2e849681e214"  }
 
+# The NERSC DTN and Perlmutter expose the same filesystem. A path approved in
+# the Perlmutter sandbox is therefore also safe as a DTN transfer destination.
+globus_endpoint_sandbox_aliases = {"dtn": "perlmutter"}
+
 def replaceSpecialGlobusEndpoint(endpoint : str):
     """Replace a special globus endpoint tag with the actual UUID"""
     endpoint = endpoint.lower()
@@ -52,7 +57,7 @@ def listSpecialGlobusEndpoints():
     return special_globus_endpoints.keys()
 
     
-tokens = { "iriapi_base" : None, "iriapi_transfer_base" : None }  #index tokens by their base path
+tokens = { "iriapi_base" : None, "iriapi_transfer_base" : None, "globus_transfer" : None }  #index tokens by their base path
 
 
 
@@ -182,7 +187,9 @@ def interactive_login_transfer(client: globus_sdk.NativeAppAuthClient) -> dict:
     print(f"Logging in with scope: {scope}")
 
     client.oauth2_start_flow(
-        requested_scopes=scope,                 #{IRI_TRANSFER_RESOURCE_SERVER: scope},
+        # The IRI service needs Transfer as a dependency, while this client
+        # also needs a first-party Transfer API token for task-list lookup.
+        requested_scopes=[scope, transfer_scope],
         refresh_tokens=True,
     )
     query = f"""Open this URL, login, and consent:
@@ -196,12 +203,48 @@ def interactive_login_transfer(client: globus_sdk.NativeAppAuthClient) -> dict:
             code = wfapiUserQuery("IRI Transfer API login", query)
             token_response = client.oauth2_exchange_code_for_tokens(code)
             accept = True
+        except EOFError as exc:
+            raise RuntimeError(
+                "Globus Transfer API authorization requires an interactive terminal"
+            ) from exc
         except Exception as e:
             continue
 
-    assert IRI_TRANSFER_RESOURCE_SERVER in token_response.by_resource_server.keys()
-        
-    return token_response.by_resource_server[IRI_TRANSFER_RESOURCE_SERVER]
+    return _transfer_tokens_from_response(token_response)
+
+def _transfer_tokens_from_response(token_response):
+    """Extract the IRI transfer-service and Globus Transfer API tokens."""
+    resource_tokens = token_response.by_resource_server
+    if IRI_TRANSFER_RESOURCE_SERVER not in resource_tokens:
+        raise RuntimeError(
+            "IRI transfer-service token was not granted; received tokens for "
+            f"{sorted(resource_tokens)}"
+        )
+    if "transfer.api.globus.org" not in resource_tokens:
+        raise RuntimeError(
+            "Globus Transfer API token was not granted; received tokens for "
+            f"{sorted(resource_tokens)}"
+        )
+    return (
+        resource_tokens[IRI_TRANSFER_RESOURCE_SERVER],
+        resource_tokens["transfer.api.globus.org"],
+    )
+
+def refresh_transfer_tokens(client: globus_sdk.NativeAppAuthClient, stored_tokens: dict):
+    """Refresh the separately persisted IRI and Globus Transfer API tokens."""
+    globus_auth_data = stored_tokens.get("globus_transfer")
+    if not globus_auth_data or not globus_auth_data.get("refresh_token"):
+        return None
+
+    iri_auth_data = refresh_tokens(
+        client, stored_tokens["refresh_token"], IRI_TRANSFER_RESOURCE_SERVER
+    )
+    globus_auth_data = refresh_tokens(
+        client, globus_auth_data["refresh_token"], "transfer.api.globus.org"
+    )
+    if iri_auth_data is None or globus_auth_data is None:
+        return None
+    return iri_auth_data, globus_auth_data
 
 def setupIRIapiTransfer(key_path):
     client =  globus_sdk.NativeAppAuthClient(GLOBUS_CLIENT_ID)
@@ -209,13 +252,18 @@ def setupIRIapiTransfer(key_path):
     wfapiLog("setupIRIapiTransfer checking stored tokens at",key_path)
     stored = load_tokens(Path(key_path))
     auth_data = None
+    globus_auth_data = None
     if stored and stored.get("refresh_token"):
-        auth_data = refresh_tokens(client, stored["refresh_token"], IRI_TRANSFER_RESOURCE_SERVER)
+        refreshed = refresh_transfer_tokens(client, stored)
+        if refreshed is not None:
+            auth_data, globus_auth_data = refreshed
 
     if auth_data == None:
-        auth_data = interactive_login_transfer(client)
+        auth_data, globus_auth_data = interactive_login_transfer(client)
 
-    save_tokens(Path(key_path), auth_data)
+    stored_tokens = dict(auth_data)
+    stored_tokens["globus_transfer"] = globus_auth_data
+    save_tokens(Path(key_path), stored_tokens)
 
     expires_at = auth_data.get("expires_at_seconds")
     if expires_at:
@@ -226,6 +274,7 @@ def setupIRIapiTransfer(key_path):
     wfapiLog(f"Granted scopes: {auth_data.get('scope', '')}")
 
     tokens['iriapi_transfer_base'] = auth_data['access_token']
+    tokens['globus_transfer'] = globus_auth_data['access_token']
 
     
 ################################################
@@ -240,9 +289,13 @@ def setupWorkflowAgent(iriapi_key_path : str, iriapi_transfer_key_path : str, wo
        iriapi_transfer_key_path: The full path to the IRI transfer API key file. This will be generated automatically if it doesn't currently exist.
        work_dir: The remote work directories, by machine as a dict, e.g. { "perlmutter" : "/path/to/dir" }. Use a list of directories if more than one. The API is only allowed to modify the contents of files within this directory or its children
     """    
+    normalized_work_dir = {
+        machine.lower(): directory for machine, directory in work_dir.items()
+    }
     setupIRIapiCompute(iriapi_key_path)
     setupIRIapiTransfer(iriapi_transfer_key_path)
-    addSandboxDirs(work_dir) #needs the API to be set up
+    addSandboxDirs(normalized_work_dir) #needs the API to be set up
+    return normalized_work_dir
         
 
 def get(machine, suburl, params = None, base='iriapi_base'):
@@ -626,7 +679,8 @@ def downloadFile(machine: str, local_path_out: str, remote_path_in: str)->str:
 def executeBatchJobCompat(machine: str, script_body: str,
                     nodes : int, ranks_per_node : int, gpus_per_rank : int,
                     time : str, queue : str, account : str,
-                    job_run_dir : str, exclusive=True, allow_unsafe=False) -> str:
+                    job_run_dir : str, exclusive=True, allow_unsafe=False,
+                    name: str | None = None) -> str:
     """
     Execute batch script on the machine
     script_body: The content of the batch script. If you are executing an existing remote script, use "source /path/to/script"    
@@ -638,7 +692,9 @@ def executeBatchJobCompat(machine: str, script_body: str,
     """
     machine = machine.lower()
     if machine == "local":
-        return local_api.executeJobScript(script_body, job_run_dir, allow_unsafe)
+        return local_api.executeJobScript(
+            script_body, job_run_dir, allow_unsafe, name=name
+        )
 
     wfapiLog(f"Executing batch job on machine {machine} with nodes:{nodes}, ranks/node:{ranks_per_node}, gpus/rank:{gpus_per_rank}, time:{time}, queue:{queue}, account:{account}")
     
@@ -660,6 +716,7 @@ def executeBatchJobCompat(machine: str, script_body: str,
     spec = {
         "executable": "date", 
         "directory" : job_run_dir,
+        "name": name,
         "inherit_environment": True,
         "stdin_path" : None,
         "stdout_path": f"{job_run_dir}/run.log",
@@ -688,6 +745,30 @@ def getJobState(machine: str, jobid: str) -> str:
     j = get(machine, f"compute/status/{rid}/{jobid}", params = { "historical" : True })
     wfapiLog(f"Queried job state {machine}:{jobid}, got {j['status']['state']}")
     return j['status']['state']
+
+def findJobByName(machine: str, name: str) -> str | None:
+    """Return the remote job ID with an exact JobSpec name, if present."""
+    machine = machine.lower()
+    if machine == "local":
+        return local_api.findJobByName(name)
+
+    rid = getResourceID(machine, rtype="compute")
+    offset = 0
+    limit = 1000
+    while True:
+        jobs, status = post(
+            machine,
+            f"compute/status/{rid}",
+            params={"historical": True, "include_spec": True, "offset": offset, "limit": limit},
+        )
+        if status != 200:
+            raise Exception(f"Job lookup failed, status: {status}, reason: {json.dumps(jobs, indent=2)}")
+        for job in jobs:
+            if job.get("job_spec", {}).get("name") == name:
+                return job["id"]
+        if len(jobs) < limit:
+            return None
+        offset += limit
     
     
 def delete(machine, suburl, params = None):
@@ -724,11 +805,29 @@ def globusTransferStatus(transfer_id)-> str:
     j = get("amsc_transfer_server", f"movement/transfer/globus/{transfer_id}", base='iriapi_transfer_base')
     return j["status"]
 
+def findGlobusTransfersByLabel(label: str) -> str | None:
+    """Return the unique Globus task ID bearing an exact task label."""
+    token = tokens["globus_transfer"]
+    if token is None:
+        raise RuntimeError("Globus Transfer API token is not initialized")
+    client = globus_sdk.TransferClient(
+        authorizer=globus_sdk.AccessTokenAuthorizer(token)
+    )
+    tasks = list(client.task_list(filter=f"label:={label}", limit=1000))
+    if len(tasks) > 1:
+        raise RuntimeError(f"Multiple Globus tasks use submission label {label!r}")
+    return None if not tasks else tasks[0]["task_id"]
 
-def _globusCopy(source_endpoint, dest_endpoint, source_path, dest_path, block_until_complete=False):
+def findGlobusTransferByLabel(label: str) -> str | None:
+    """Compatibility wrapper for the singular form of the lookup helper."""
+    return findGlobusTransfersByLabel(label)
+
+
+def _globusCopy(source_endpoint, dest_endpoint, source_path, dest_path,
+                block_until_complete=False, label: str | None = None):
     trans_args = { "source_uuid" : source_endpoint, "source_path": source_path,
                    "destination_uuid" : dest_endpoint, "destination_path" : dest_path,
-                   "label" : "FemtoMeas transfer" }
+                   "label" : label or "FemtoMeas transfer" }
     
     j, status=post("amsc_transfer_server", "movement/transfer/globus", data=trans_args, base='iriapi_transfer_base', data_is_json=True)
     if status == 200:
@@ -745,20 +844,22 @@ def _globusCopy(source_endpoint, dest_endpoint, source_path, dest_path, block_un
         raise Exception("Globus transfer failed, response content: " + json.dumps(j))
 
 def _checkSafePathTagOrUUID(machine_or_uuid: str, path: str)->bool:
-    #First check if machine_or_uuid is a machine in globals.remote_workdir
-    if machine_or_uuid in globals.remote_workdir.keys():
+    machine_or_uuid = machine_or_uuid.lower()
+
+    # First check whether this is a configured machine name.
+    if machine_or_uuid in manager_globals.remote_workdir:
         return checkSafePath(machine_or_uuid, path)
 
-    #See if machine_or_uuid is a UUID corresponding to a named machine
+    # Resolve a special endpoint tag or UUID to its configured sandbox alias.
     machine=None
     for m, uuid in special_globus_endpoints.items():
-        if uuid == machine_or_uuid:
+        if m == machine_or_uuid or uuid == machine_or_uuid:
             machine = m
             break
 
-    #If we have a remote_workdir assigned for this machine we can go ahead
-    if machine is not None and machine in globals.remote_workdir.keys():
-        return checkSafePath(machine, path)
+    sandbox_machine = globus_endpoint_sandbox_aliases.get(machine, machine)
+    if sandbox_machine is not None and sandbox_machine in manager_globals.remote_workdir:
+        return checkSafePath(sandbox_machine, path)
 
     #Otherwise we have to ask the user
     query = f"Do you give permission to write to path {path} on UUID {machine_or_uuid}"
@@ -769,7 +870,8 @@ def _checkSafePathTagOrUUID(machine_or_uuid: str, path: str)->bool:
 def globusCopy(dest_uuid: str, dest_path: str,
                source_uuid: str, source_path: str,
                allow_unsafe=False,
-               block_until_complete=False)-> str: 
+               block_until_complete=False,
+               label: str | None = None)-> str:
     """
     Perform a Globus transfer between two endpoints
     Args:
@@ -799,4 +901,4 @@ def globusCopy(dest_uuid: str, dest_path: str,
         wfapiLog(f"Source tag {source_uuid} replaced by UUID {special_globus_endpoints[source_uuid]}")
         source_uuid = special_globus_endpoints[source_uuid]        
 
-    return _globusCopy(source_endpoint=source_uuid, dest_endpoint=dest_uuid, source_path=source_path, dest_path=dest_path, block_until_complete=block_until_complete)
+    return _globusCopy(source_endpoint=source_uuid, dest_endpoint=dest_uuid, source_path=source_path, dest_path=dest_path, block_until_complete=block_until_complete, label=label)

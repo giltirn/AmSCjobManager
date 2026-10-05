@@ -3,7 +3,7 @@ import sqlite3
 from .actions_base import ActionClass, actionClass
 from .globus_transfer_action import GlobusDataTransfers
 from .compute_action_manager import ComputeActions
-from .action_manager import ActionStatus, _ser, _unser
+from .action_manager import ActionStatus, SimulatedCrash, _ser, _unser
 from .logging import wfmanLog
 import time
 import json
@@ -12,14 +12,25 @@ from typing import Tuple
 class JobData:
     """The primary component of the workflow manager. It provides submission, tracking and updating of workflows backed by a database. State is updated upon calls to its functions."""
 
-    def __init__(self, filename: str | None = None, max_workflows_active=10):
+    def __init__(self, filename: str | None = None, max_workflows_active=10,
+                 *, _test_crash_at: str | None = None,
+                 _test_action_manager_factories=None):
         db_path = ":memory:" if filename is None else str(Path(filename).expanduser())
         self.max_workflows_active = max_workflows_active
         self.conn = sqlite3.connect(db_path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         
-        self.action_man = { ActionClass.TRANSFER : GlobusDataTransfers(self.conn),
-                            ActionClass.COMPUTE : ComputeActions(self.conn) }
+        self._test_crash_at = _test_crash_at
+        manager_factories = {
+            ActionClass.TRANSFER: GlobusDataTransfers,
+            ActionClass.COMPUTE: ComputeActions,
+        }
+        if _test_action_manager_factories:
+            manager_factories.update(_test_action_manager_factories)
+        self.action_man = {
+            action_class: factory(self.conn, _test_crash_at=self._test_crash_at)
+            for action_class, factory in manager_factories.items()
+        }
 
         with self.conn as conn:        
             conn.execute("""
@@ -35,6 +46,29 @@ class JobData:
             last_status_change INTEGER
             )
             """)
+            # Action IDs are allocated here, rather than independently by each
+            # action manager, so a job head and its persisted action always use
+            # the same durable key.
+            conn.execute("CREATE TABLE IF NOT EXISTS action_ids (action_id INTEGER PRIMARY KEY AUTOINCREMENT)")
+            max_existing_action_id = conn.execute(
+                "SELECT MAX(action_id) FROM ("
+                "SELECT head_action_id AS action_id FROM jobs UNION ALL "
+                "SELECT action_id FROM computes UNION ALL "
+                "SELECT action_id FROM transfers)"
+            ).fetchone()[0]
+            if max_existing_action_id is not None:
+                conn.execute(
+                    "INSERT OR IGNORE INTO action_ids(action_id) VALUES (?)",
+                    (max_existing_action_id,),
+                )
+
+    def _allocateActionId(self, conn):
+        """Allocate the durable, cross-action-class ID for a new action."""
+        return conn.execute("INSERT INTO action_ids DEFAULT VALUES").lastrowid
+
+    def _maybeSimulateCrash(self, point):
+        if point == self._test_crash_at:
+            raise SimulatedCrash(point)
        
     def enqueueJob(self, workflow, job_group = None):
         """Insert a job workflow into the queued workflows but do not start it"""
@@ -109,18 +143,21 @@ class JobData:
 
                 next_action = None if next_workflow_stage == len(workflow) else workflow[next_workflow_stage]
                 next_action_class = ActionClass.NONE if next_action == None else actionClass(next_action)
-                next_action_status = ActionStatus.COMPLETED if next_action == None else ActionStatus.PENDING
+                next_action_status = ActionStatus.COMPLETED if next_action == None else ActionStatus.SCHEDULING
+                action_id = None if next_action is None else self._allocateActionId(conn)
                 
                 wfmanLog(f"Progressing job {job_id} action {a['head_action_type']} status {a['head_action_status']} to action {type(next_action).__name__}")
                 
-                #Update the next action and put into pending status
+                # Persist the workflow's scheduling intent before any remote API call.
                 conn.execute("UPDATE jobs SET head_action_type = ?, head_action_class = ?, head_action_status = ?, head_action_id = ?, last_status_change = ?, workflow_stage = ? WHERE job_id = ?",
-                             (type(next_action).__name__,  next_action_class.name, next_action_status.name, -1, int(time.time()), next_workflow_stage, job_id )
+                             (type(next_action).__name__,  next_action_class.name, next_action_status.name, action_id, int(time.time()), next_workflow_stage, job_id )
                               )
 
                 #Gather information to initiate next action
-                if next_action_status == ActionStatus.PENDING:
-                    pending_actions.append( (next_action_class, next_action, job_id ) )
+                if next_action_status == ActionStatus.SCHEDULING:
+                    pending_actions.append( (next_action_class, next_action, job_id, action_id ) )
+
+        self._maybeSimulateCrash("job_head_scheduling_persisted")
 
 
         # #Inform GUI regarding completed actions (requires database activity)
@@ -134,21 +171,20 @@ class JobData:
         #Initiate the required actions
         head_action_updates = [] #(job_id, head_action_id, head_action_status, head_action_class)
 
-        for action_class, action, job_id in pending_actions:
+        for action_class, action, job_id, action_id in pending_actions:
             wfmanLog(f"Initiating action of type {action_class.name} for {job_id}")
             aman = self.action_man[action_class]
-            action_id = aman.startAction(action, job_id)
+            action_id = aman.startAction(action, job_id, action_id)
             action_status, _ = aman.queryStatus(action_id)
             head_action_updates.append( (job_id, action_id, action_status, action_class) )
-            
-        ####WARNING: If the manager is killed here we can think the action is pending but it is already underway. The action DBs will know about it but not the main DB. How to fix?
-        #Maybe instead of PENDING we have some other marker, e.g. SCHEDULING. Then if we come across an entry with this status we will know to check the action DB to see if it was actually scheduled
+
+        self._maybeSimulateCrash("action_state_persisted_before_job_head_update")
         
         #Update job state DB
         with self.conn as conn:
             for job_id, action_id, status, _ in head_action_updates:
-                conn.execute("UPDATE jobs SET head_action_status = ?, head_action_id = ?, last_status_change = ? WHERE job_id = ?",
-                             (status.name, action_id, int(time.time()), job_id )
+                conn.execute("UPDATE jobs SET head_action_status = ?, last_status_change = ? WHERE job_id = ? AND head_action_id = ?",
+                             (status.name, int(time.time()), job_id, action_id )
                              )
 
         #Inform GUI regarding new actions (requires database activity)
@@ -166,9 +202,11 @@ class JobData:
         """
         Start the workflows specified by the list of job ids. If None, additional workflows will be started until the total number of active workflows reaches the maximum
         """
+        self.reconcileSchedulingActions()
+
         if job_ids == None:        
             with self.conn as conn:
-                count = int(conn.execute("SELECT COUNT(*) FROM jobs WHERE head_action_status = ?", (ActionStatus.ACTIVE.name,) ).fetchone()[0])
+                count = int(conn.execute("SELECT COUNT(*) FROM jobs WHERE head_action_status IN (?, ?)", (ActionStatus.SCHEDULING.name, ActionStatus.ACTIVE.name) ).fetchone()[0])
                 rem =  self.max_workflows_active - count
 
                 if rem > 0:
@@ -187,6 +225,45 @@ class JobData:
         Find COMPLETE actions and initiate the next stage of the workflow
         """
         self.progressWorkflows(("COMPLETE",None))
+
+    def reconcileSchedulingActions(self):
+        """Repair job heads whose submission crossed a process crash boundary.
+
+        The JobData-issued action ID lets this method recreate a missing local
+        action row and ask the action manager to find the corresponding remote action.
+        Nothing is resubmitted here: an unfindable remote action remains in
+        SCHEDULING to prevent duplicate compute jobs or transfers.
+        """
+        with self.conn as conn:
+            scheduling_jobs = conn.execute(
+                "SELECT job_id, workflow, workflow_stage, head_action_class, head_action_id FROM jobs WHERE head_action_status = ?",
+                (ActionStatus.SCHEDULING.name,),
+            ).fetchall()
+
+        updates = []
+        for job in scheduling_jobs:
+            action_class = ActionClass[job["head_action_class"]]
+            action_id = job["head_action_id"]
+            if action_id is None:
+                raise Exception(f"SCHEDULING job {job['job_id']} has no action ID")
+            aman = self.action_man[action_class]
+            if not aman.hasAction(action_id):
+                workflow = _unser(job["workflow"])
+                action = workflow[job["workflow_stage"]]
+                aman.recordSchedulingIntent(action, job["job_id"], action_id)
+
+            action_id = aman.reconcileScheduledAction(action_id)
+            if action_id is not None:
+                action_status, _ = aman.queryStatus(action_id)
+                updates.append((job["job_id"], action_id, action_status))
+
+        if updates:
+            with self.conn as conn:
+                for job_id, action_id, action_status in updates:
+                    conn.execute(
+                        "UPDATE jobs SET head_action_status = ?, last_status_change = ? WHERE job_id = ? AND head_action_id = ?",
+                        (action_status.name, int(time.time()), job_id, action_id),
+                    )
         
     def progressActiveActions(self, poll_freq=30, force_poll=False):
         """
@@ -223,6 +300,7 @@ class JobData:
         Updates knowledge of action state and then progresses the workflow for those actions that have completed
         poll_freq: control the minimum time lag between manager polls of the API for status updates. Queries within this period return only the cached status.
         force_poll: force the manager to poll the API for status updates, use wisely!"""
+        self.reconcileSchedulingActions()
         self.progressActiveActions(poll_freq=poll_freq, force_poll=force_poll)
         self.progressActiveWorkflows()
     

@@ -1,8 +1,10 @@
 import os
+import warnings
 from typing import Dict, List
 import pathlib
 
 remote_workdir = None ##Dictionary mapping machine to a sandbox directory
+configured_machines: set[str] | None = None
 api_impl = os.getenv("AMSC_JOB_MANAGER_API_IMPL", "IRI") #Control which API implementation is used
 
 def checkSafePath(machine: str, path: str)->bool:
@@ -27,9 +29,11 @@ def checkSafePath(machine: str, path: str)->bool:
     return False
 
 
-def addSandboxDirs(dirs: Dict[str,str | List[str]]):
+def addSandboxDirs(dirs: Dict[str,str | List[str]], warn_unavailable=True):
     """
-    Add paths to the sandbox directories. Expects a dictionary mapping machine to 
+    Add paths to the sandbox directories. Expects a dictionary mapping machine to
+    directories. Machines outside the implementations configured during setup
+    are ignored without probing the remote API.
     """
     from .api_general import isDirectory, remoteMkdir
     from .utils import queryYesNo
@@ -39,9 +43,19 @@ def addSandboxDirs(dirs: Dict[str,str | List[str]]):
     for machine, dir_or_dirs in dirs.items():
         assert isinstance(dir_or_dirs, (list,str))
 
+        machine = machine.lower()
+        if configured_machines is not None and machine not in configured_machines:
+            if warn_unavailable:
+                warnings.warn(
+                    f"Ignoring sandbox directory for {machine!r}: its IRI "
+                    "implementation is not configured",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+            continue
+
         if not isinstance(dir_or_dirs, list):
             dir_or_dirs = [dir_or_dirs]
-        machine = machine.lower()
         if machine not in remote_workdir:
             remote_workdir[machine] = []
         for dir in dir_or_dirs:            

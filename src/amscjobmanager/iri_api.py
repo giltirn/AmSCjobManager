@@ -25,16 +25,68 @@ IRI_IMPLEMENTATIONS = {
     "nersc": {
         "resource_server": "ed3e577d-f7f3-4639-b96e-ff5a8445d699",
         "api_base": "https://api.iri.nersc.gov/api/v1",
+        "status_resources_supports_filters": True,
+        "storage_iriapi_group": "perlmutter",
+        "storage_resource_type": "compute",
+        "storage_resource_paths": {"/": "login"},
         "required_scopes": {
             "https://auth.globus.org/scopes/ed3e577d-f7f3-4639-b96e-ff5a8445d699/iri_api",
         },
         "machines": {
             "perlmutter": {
                 "iriapi_group": "perlmutter",
+                "iriapi_resource_name": "compute",
                 "globus_endpoint": "6bdc7956-fc0f-4ad2-989c-7aa5ee643a79",
                 "queues": [
                     ("debug", "max time 0.5 hours, max nodes 8"),
                     ("regular", "use for standard, production jobs or those too large for debug"),
+                ],
+            },
+            "perlmutter_login": {
+                "iriapi_group": "perlmutter",
+                "iriapi_resource_name": "login",
+                "queues": [],
+            },
+        },
+    },
+    "alcf": {
+        "resource_server": "6be511f6-a071-471f-9bc0-02a0d0836723",
+        "api_base": "https://api.alcf.anl.gov/api/v1",
+        "status_resources_supports_filters": False,
+        "storage_iriapi_group": "storages",
+        "storage_resource_type": "storage",
+        "storage_resource_paths": {
+            "/flare": "Flare",
+            "/home": "Home",
+            "/eagle": "Eagle",
+            "/lus/eagle": "Eagle",
+        },
+        "required_scopes": {
+            "https://auth.globus.org/scopes/6be511f6-a071-471f-9bc0-02a0d0836723/filesystem",
+        },
+        # ALCF requires the session policy used by its IRI authorization flow.
+        "session_policy": "a128e981-c9a5-417a-97ab-8571c9831bff",
+        "machines": {
+            "polaris": {
+                "iriapi_group": "computes",
+                "iriapi_resource_name": "Polaris",
+                "queues": [
+                    ("debug", "1-2 nodes, 5 minutes-1 hour; max 24 nodes in use"),
+                    ("debug-scaling", "1-10 nodes, 5 minutes-1 hour; max one job per user"),
+                    ("prod", "10-496 nodes, 5 minutes-24 hours; routing queue"),
+                    ("preemptable", "1-10 nodes, 5 minutes-72 hours; may be killed for demand jobs; max 20 jobs per project"),
+                    ("demand", "1-56 nodes, 5 minutes-1 hour; by request only; max 100 jobs per project"),
+                    ("capacity", "1-4 nodes, 5 minutes-7 days; max 32 nodes and one running job per user"),
+                ],
+            },
+            "aurora": {
+                "iriapi_group": "computes",
+                "iriapi_resource_name": "Aurora",
+                "queues": [
+                    ("debug", "1-2 nodes, 5 minutes-1 hour; max one job per user"),
+                    ("debug-scaling", "2-256 nodes, 5 minutes-1 hour; max one job per user"),
+                    ("prod", "256-10,624 nodes, 5 minutes-24 hours; routing queue"),
+                    ("capacity", "1-16 nodes, 5 minutes-7 days; max 512 nodes and two running jobs per user"),
                 ],
             },
         },
@@ -55,10 +107,6 @@ TRANSFER_API_BASE = "https://amsc-data-api.nersc.gov"
 #TODO: user config should store endpoints for which scopes are required, and token should be regenerated if list is changed (right now requires deletion)
 special_globus_endpoints = { "dtn" :  "9d6d994a-6d04-11e5-ba46-22000b92c6ec", "perlmutter" : IRI_IMPLEMENTATIONS["nersc"]["machines"]["perlmutter"]["globus_endpoint"],
                             "bnl": "12782fb1-a599-4f18-b0fb-2e849681e214"  }
-
-# The NERSC DTN and Perlmutter expose the same filesystem. A path approved in
-# the Perlmutter sandbox is therefore also safe as a DTN transfer destination.
-globus_endpoint_sandbox_aliases = {"dtn": "perlmutter"}
 
 def replaceSpecialGlobusEndpoint(endpoint : str):
     """Replace a special globus endpoint tag with the actual UUID"""
@@ -83,7 +131,9 @@ class IRIComputeClient:
     implementation: str
     access_token: str
     http_client: httpx.Client = field(default_factory=httpx.Client)
-    resource_map: dict[str, dict[str, str]] = field(default_factory=dict)
+    resource_map: dict[str, dict[str, Union[str, dict[str, str]]]] = field(
+        default_factory=dict
+    )
     project_map: dict[str, dict[str, str]] = field(default_factory=dict)
 
     def close(self):
@@ -153,8 +203,12 @@ def interactive_login(client: globus_sdk.NativeAppAuthClient, implementation: st
         requested_scopes=" ".join(sorted(required_scopes)),
         refresh_tokens=True,
     )
+    query_parameters = {"prompt": "login"}
+    session_policy = IRI_IMPLEMENTATIONS[implementation].get("session_policy")
+    if session_policy:
+        query_parameters["session_required_policies"] = session_policy
     query = f"""Open this URL, login, and consent:
-    { client.oauth2_get_authorize_url(query_params={"prompt": "login"}) }
+    { client.oauth2_get_authorize_url(query_params=query_parameters) }
 
     Enter authorization code: """
 
@@ -376,11 +430,14 @@ def setupWorkflowAgent(iri_implementations: dict, iriapi_transfer_key_path: str,
     normalized_work_dir = {
         machine.lower(): directory for machine, directory in work_dir.items()
     }
-    for machine in normalized_work_dir:
-        if machine != "local":
-            _get_compute_client(machine)
     setupIRIapiTransfer(iriapi_transfer_key_path)
-    addSandboxDirs(normalized_work_dir) #needs the API to be set up
+    configured_machines = {"local"}
+    for implementation in iri_compute_clients:
+        configured_machines.update(
+            IRI_IMPLEMENTATIONS[implementation]["machines"].keys()
+        )
+    manager_globals.configured_machines = configured_machines
+    addSandboxDirs(normalized_work_dir, warn_unavailable=False)
     return normalized_work_dir
         
 
@@ -444,45 +501,91 @@ def getUserAccountProjects(machine):
             out[i] += "_g"
     return out
     
-def getResourceID(machine, rtype="compute"):
+def getResourceID(machine, rtype="compute", path: Optional[str] = None):
     """
-    Get the resource ID associated with the resource
-    rtype: "compute" or "login"
+    Get the resource ID associated with the resource.
+
+    rtype: "compute" or "storage". A storage path is required to select a
+        named storage resource.
     """
     machine = machine.lower()
-    if rtype not in ["compute","login"]:
+    if rtype not in ["compute", "storage"]:
         raise Exception("Invalid resource type")
     client, machine_specification = _get_compute_client(machine)
-    
+
     if machine not in client.resource_map:
-        wfapiLog("Obtaining resource information for machine",machine)
-        j = get(machine, "status/resources", params={"group" : machine_specification['iriapi_group'], "resource_type" : "compute"})
-        
-        client.resource_map[machine] = dict()
-            
-        #The API does not distinguish between login and compute nodes; both are "compute" resources, but the login node does not have any capabilities listed (unclear if this will change)
-        #For now, use the capabilities to distinguish as the names are likely arbitrary
-        compute = None
-        login=None
-        for r in j:
-            cpu = False
-            gpu =False
-            for cap in r['capability_uris']:
-                if 'capabilities/cpu' in cap:
-                    cpu = True
-                if 'capabilities/gpu' in cap:
-                    gpu = True
-            if cpu and gpu:
-                wfapiLog(f"Identified resource {json.dumps(r,indent=2)} as compute backend")
-                client.resource_map[machine]["compute"] = r["id"]
-            elif not cpu and not gpu:
-                wfapiLog(f"Identified resource {json.dumps(r,indent=2)} as login frontend")
-                client.resource_map[machine]["login"] = r["id"]
-            else:
-                wfapiLog(f"Warning: unidentified resource {json.dumps(r,indent=2)}")
-        
-    
-    return client.resource_map[machine][rtype]
+        wfapiLog("Obtaining resource information for machine", machine)
+
+        def resources_for(group, resource_type):
+            resource_params = {"group": group, "resource_type": resource_type}
+            if IRI_IMPLEMENTATIONS[client.implementation]["status_resources_supports_filters"]:
+                return get(machine, "status/resources", params=resource_params)
+            return [
+                resource for resource in get(machine, "status/resources")
+                if resource.get("group") == group
+                and resource.get("resource_type") == resource_type
+            ]
+
+        resources = resources_for(machine_specification["iriapi_group"], "compute")
+        client.resource_map[machine] = {}
+
+        resource_name = machine_specification["iriapi_resource_name"]
+        matched_resources = [
+            resource for resource in resources
+            if resource.get("name") == resource_name
+        ]
+        if len(matched_resources) != 1:
+            raise RuntimeError(
+                f"Expected exactly one resource named {resource_name!r} for "
+                f"machine {machine!r}; found {len(matched_resources)}"
+            )
+        client.resource_map[machine]["compute"] = matched_resources[0]["id"]
+        wfapiLog(
+            f"Identified resource {json.dumps(matched_resources[0], indent=2)} "
+            f"as machine {machine}"
+        )
+
+        implementation_specification = IRI_IMPLEMENTATIONS[client.implementation]
+        storage_group = implementation_specification.get("storage_iriapi_group")
+        if storage_group:
+            storage_resources = resources_for(
+                storage_group,
+                implementation_specification["storage_resource_type"],
+            )
+            client.resource_map[machine]["storage"] = {
+                resource["name"]: resource["id"] for resource in storage_resources
+            }
+
+    resource = client.resource_map[machine][rtype]
+    if rtype != "storage" or isinstance(resource, str):
+        return resource
+
+    if path is None:
+        raise ValueError(
+            f"A path is required to select a storage resource for {machine!r}"
+        )
+    path_object = pathlib.PurePosixPath(path)
+    if not path_object.is_absolute():
+        raise ValueError(f"Storage path must be absolute: {path!r}")
+
+    storage_paths = IRI_IMPLEMENTATIONS[client.implementation]["storage_resource_paths"]
+    matching_roots = [
+        pathlib.PurePosixPath(root)
+        for root in storage_paths
+        if path_object.is_relative_to(pathlib.PurePosixPath(root))
+    ]
+    if not matching_roots:
+        raise ValueError(
+            f"No storage resource is configured for {machine}:{path_object}"
+        )
+    selected_root = max(matching_roots, key=lambda root: len(root.parts))
+    resource_name = storage_paths[str(selected_root)]
+    if resource_name not in resource:
+        raise RuntimeError(
+            f"Configured storage resource {resource_name!r} is not available for "
+            f"machine {machine!r}"
+        )
+    return resource[resource_name]
 
 
 def queryMachineStatus(machine: str, rtype="compute")-> bool:
@@ -490,7 +593,7 @@ def queryMachineStatus(machine: str, rtype="compute")-> bool:
     Query the status of a machine
     Args:
        machine - The name of the machine
-       rtype - The resource type (compute/login)
+       rtype - The resource type (compute)
     Return:
        A bool indicating whether the machine up (True) or down (False)
     """
@@ -507,7 +610,7 @@ def waitTask(machine, task_id, poll_freq=4):
     machine = machine.lower()
     j = get(machine, f"task/{task_id}")
     
-    while(j['status'] == "active"):
+    while(j['status'] == "active" or j['status'] == "pending"):
         time.sleep(poll_freq)
         j = get(machine, f"task/{task_id}")
 
@@ -532,7 +635,7 @@ def remoteLs(machine: str, path: str)-> List[str]:
 
     wfapiLog(f"Listing contents of directory {machine}:{path}")
     
-    rid = getResourceID(machine, rtype="login")
+    rid = getResourceID(machine, rtype="storage", path=path)
 
     j = get(machine, f"filesystem/ls/{rid}", params={"path" : path})
     tid = j['task_id']
@@ -568,7 +671,7 @@ def remoteChmod(machine: str, path : str, mode : str, allow_unsafe = False):
     if not pathlib.Path(path).is_absolute():
         raise Exception("Path must be absolute")
 
-    rid = getResourceID(machine, rtype="login")
+    rid = getResourceID(machine, rtype="storage", path=path)
     j, status = put(machine, f"filesystem/chmod/{rid}", data={"path" : path, "mode" : mode})
     tid = j['task_id']
     j = waitTask(machine, tid)
@@ -612,7 +715,7 @@ def remoteMkdir(machine: str, path: str, create_parents = True, allow_unsafe = F
     if not pathlib.Path(path).is_absolute():
         raise Exception("Path must be absolute")
 
-    rid = getResourceID(machine, rtype="login")
+    rid = getResourceID(machine, rtype="storage", path=path)
         
     j, status = post(machine, f"filesystem/mkdir/{rid}", data={"path" : path, "parent" : create_parents})
     tid = j['task_id']
@@ -637,7 +740,7 @@ def pathStat(machine: str, remote_path: str, dereference=True)->str:
     if not pathlib.Path(remote_path).is_absolute():
         raise Exception("Path must be absolute")
     
-    rid = getResourceID(machine, rtype="login")
+    rid = getResourceID(machine, rtype="storage", path=remote_path)
 
     j = get(machine, f"filesystem/stat/{rid}", params={'path' : remote_path, 'dereference' : dereference})
     tid = j['task_id']
@@ -664,7 +767,7 @@ def pathType(machine: str, remote_path: str)->str:
     if not pathlib.Path(remote_path).is_absolute():
         raise Exception("Path must be absolute")
     
-    rid = getResourceID(machine, rtype="login")
+    rid = getResourceID(machine, rtype="storage", path=remote_path)
 
     j = get(machine, f"filesystem/file/{rid}", params={'path' : remote_path})
     tid = j['task_id']
@@ -699,7 +802,7 @@ def uploadBytes(machine: str, remote_path: str, content: io.BytesIO, allow_unsaf
     if not pathlib.Path(remote_path).is_absolute():
         raise Exception("Path must be absolute")
    
-    rid = getResourceID(machine, rtype="login")
+    rid = getResourceID(machine, rtype="storage", path=remote_path)
 
     j, status = post(machine, f"filesystem/upload/{rid}", params={'path' : remote_path}, files={'file': content})
 
@@ -724,7 +827,7 @@ def downloadFileContents(machine: str, remote_path: str)->str:
     if not pathlib.Path(remote_path).is_absolute():
         raise Exception("Path must be absolute")
     
-    rid = getResourceID(machine, rtype="login")
+    rid = getResourceID(machine, rtype="storage", path=remote_path)
 
     j = get(machine, f"filesystem/download/{rid}", params={'path' : remote_path})
     tid = j['task_id']
@@ -964,16 +1067,15 @@ def _checkSafePathTagOrUUID(machine_or_uuid: str, path: str)->bool:
     if machine_or_uuid in manager_globals.remote_workdir:
         return checkSafePath(machine_or_uuid, path)
 
-    # Resolve a special endpoint tag or UUID to its configured sandbox alias.
+    # Resolve a special endpoint tag or UUID to its configured machine name.
     machine=None
     for m, uuid in special_globus_endpoints.items():
         if m == machine_or_uuid or uuid == machine_or_uuid:
             machine = m
             break
 
-    sandbox_machine = globus_endpoint_sandbox_aliases.get(machine, machine)
-    if sandbox_machine is not None and sandbox_machine in manager_globals.remote_workdir:
-        return checkSafePath(sandbox_machine, path)
+    if machine is not None and machine in manager_globals.remote_workdir:
+        return checkSafePath(machine, path)
 
     #Otherwise we have to ask the user
     query = f"Do you give permission to write to path {path} on UUID {machine_or_uuid}"

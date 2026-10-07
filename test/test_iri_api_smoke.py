@@ -1,8 +1,8 @@
-"""Smoke-test the existing IRI API wrappers against a configured NERSC sandbox.
+"""Smoke-test the IRI API wrappers against a configured machine sandbox.
 
 Run manually with an IRI manager configuration:
 
-    python3 test/test_iri_api_smoke.py path/to/manager-config.json
+    python3 test/test_iri_api_smoke.py path/to/manager-config.json <machine>
 
 The test intentionally checks only that each wrapper command is accepted by
 the remote API.  It submits a short-lived, harmless compute job and cancels it
@@ -19,29 +19,49 @@ from amscjobmanager import iri_api
 from amscjobmanager.manager_config import readManagerConfigFile
 from amscjobmanager.manager_config_models import ManagerConfig
 
+UNSUPPORTED_OPERATIONS = {
+    "alcf": {"uploadBytes", "downloadFileContents", "pathStat"},
+}
 
-if len(sys.argv) != 2:
+
+if len(sys.argv) != 3:
     template_path = ManagerConfig.write_template_json()
     raise SystemExit(
-        "Usage: python3 test/test_iri_api_smoke.py <manager-config.json>\n"
+        "Usage: python3 test/test_iri_api_smoke.py <manager-config.json> <machine>\n"
         f"Configuration template available at {template_path}"
     )
 
 
 def run(name, operation):
     """Run one wrapper and report the command accepted by the IRI API."""
+    if name in UNSUPPORTED_OPERATIONS.get(implementation, set()):
+        print(f"skipped: {name} (not supported by {implementation})")
+        return
     operation()
     print(f"accepted: {name}")
 
 
 config = readManagerConfigFile(sys.argv[1])
+machine = sys.argv[2].lower()
+try:
+    implementation = iri_api.MACHINE_IMPLEMENTATIONS[machine]
+except KeyError as exc:
+    raise SystemExit(f"Unknown IRI machine: {machine!r}") from exc
+
+try:
+    implementation_config = config.iri_implementations[implementation]
+except KeyError as exc:
+    raise SystemExit(
+        f"Configuration must provide an IRI token for {implementation!r}, "
+        f"which serves machine {machine!r}"
+    ) from exc
+
 sandbox_directories = iri_api.setupWorkflowAgent(
-    {"nersc": config.iri_implementations["nersc"]},
+    {implementation: implementation_config},
     config.transferapi_key_path,
     config.sandbox_directories,
 )
 
-machine = "perlmutter"
 if machine not in sandbox_directories:
     raise SystemExit(
         f"Configuration must provide a sandbox directory for {machine!r}"
@@ -57,13 +77,11 @@ run("getKnownMachines", iri_api.getKnownMachines)
 run("listSpecialGlobusEndpoints", iri_api.listSpecialGlobusEndpoints)
 run("getMachineQueues", lambda: iri_api.getMachineQueues(machine))
 run("getUserAccountProjects", lambda: iri_api.getUserAccountProjects(machine))
-run("getResourceID(login)", lambda: iri_api.getResourceID(machine, "login"))
 run("getResourceID(compute)", lambda: iri_api.getResourceID(machine, "compute"))
-run("queryMachineStatus(login)", lambda: iri_api.queryMachineStatus(machine, "login"))
 run("queryMachineStatus(compute)", lambda: iri_api.queryMachineStatus(machine, "compute"))
 
-# Filesystem task endpoints.  All remote writes are confined to the configured
-# sandbox, and subsequent calls use the artifacts created by the earlier ones.
+#Filesystem task endpoints.  All remote writes are confined to the configured
+#sandbox, and subsequent calls use the artifacts created by the earlier ones.
 run("remoteMkdir", lambda: iri_api.remoteMkdir(machine, str(test_dir)))
 run(
     "uploadBytes",
@@ -73,10 +91,10 @@ run(
         BytesIO(b"AmSC job manager IRI API smoke test\n"),
     ),
 )
-run("remoteChmod", lambda: iri_api.remoteChmod(machine, str(test_file), "600"))
+run("remoteChmod", lambda: iri_api.remoteChmod(machine, str(test_dir), "700"))
 run("remoteLs", lambda: iri_api.remoteLs(machine, str(test_dir)))
-run("pathStat", lambda: iri_api.pathStat(machine, str(test_file)))
-run("pathType", lambda: iri_api.pathType(machine, str(test_file)))
+run("pathStat", lambda: iri_api.pathStat(machine, str(test_dir)))
+run("pathType", lambda: iri_api.pathType(machine, str(test_dir)))
 run("downloadFileContents", lambda: iri_api.downloadFileContents(machine, str(test_file)))
 
 # Compute job endpoints.  Use values advertised by the IRI API rather than

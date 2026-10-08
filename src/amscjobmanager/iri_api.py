@@ -63,6 +63,12 @@ IRI_IMPLEMENTATIONS = {
         "status_resources_supports_filters": False,
         "storage_iriapi_group": "storages",
         "storage_resource_type": "storage",
+        "unsupported_filesystem_operations": {
+            "uploadBytes": "globus",
+            "downloadFile": "globus",
+            "downloadFileContents": "globus",
+            "pathStat": "skip",
+        },
         "storage_resource_paths": {
             "/flare": "Flare",
             "/lus/flare": "Flare",
@@ -602,6 +608,33 @@ def getMachineQueues(machine)->List[ Tuple[str,str] ]:
     _, machine_specification = _get_compute_client(machine)
     return machine_specification["queues"]
 
+
+def _filesystem_operation_handling(machine: str, operation: str) -> str | None:
+    implementation = _configured_implementation_name(machine)
+    return IRI_IMPLEMENTATIONS[implementation].get(
+        "unsupported_filesystem_operations", {}
+    ).get(operation)
+
+
+def _require_filesystem_operation(machine: str, operation: str) -> None:
+    if _filesystem_operation_handling(machine, operation) == "skip":
+        implementation = _configured_implementation_name(machine)
+        raise NotImplementedError(
+            f"{operation} is not implemented by the {implementation!r} IRI API"
+        )
+
+
+def _require_globus_fallback(machine: str, operation: str) -> None:
+    if (
+        _filesystem_operation_handling(machine, operation) == "globus"
+        and globus_personal_endpoint is None
+    ):
+        implementation = _configured_implementation_name(machine)
+        raise RuntimeError(
+            f"{operation} on {implementation!r} requires the Globus fallback; "
+            "configure globus_personal_endpoint in the manager configuration"
+        )
+
 def getUserAccountProjects(machine):
     machine = machine.lower()
     _get_compute_client(machine)
@@ -840,13 +873,15 @@ def pathStat(machine: str, remote_path: str, dereference=True)->str:
     """
     Run stat on the provided path
     Args:
-       machine - The name of the machine. Valid values are 'Perlmutter'
+       machine - The name of the machine.
        remote_path - The absolute path on the remote machine
     """
     machine = machine.lower()    
 
     if machine == "local":
         raise NotImplementedError()
+
+    _require_filesystem_operation(machine, "pathStat")
        
     if not pathlib.Path(remote_path).is_absolute():
         raise Exception("Path must be absolute")
@@ -912,6 +947,21 @@ def uploadBytes(machine: str, remote_path: str, content: io.BytesIO, allow_unsaf
     
     if not pathlib.Path(remote_path).is_absolute():
         raise Exception("Path must be absolute")
+
+    if _filesystem_operation_handling(machine, "uploadBytes") == "globus":
+        _require_globus_fallback(machine, "uploadBytes")
+        staging = _personal_staging_configuration()
+        remote_filename = pathlib.PurePosixPath(remote_path).name
+        if not remote_filename:
+            raise ValueError(f"Remote upload path must name a file: {remote_path!r}")
+        temporary_directory, _ = _temporary_staging_directory(staging)
+        staging_file = temporary_directory / remote_filename
+        try:
+            with staging_file.open("wb") as file_handle:
+                file_handle.write(content.getbuffer())
+            return uploadFileGlobus(machine, remote_path, str(staging_file))
+        finally:
+            shutil.rmtree(temporary_directory, ignore_errors=True)
    
     rid = getResourceID(machine, rtype="storage", path=remote_path)
 
@@ -928,10 +978,33 @@ def downloadFileContents(machine: str, remote_path: str)->str:
     """
     Download a (small) remote file. Returns the file contents as a string (base64 or plaintext encoded, depending on the file)
     Args:
-       machine - The name of the machine. Valid values are 'Perlmutter'
+       machine - The name of the machine.
        remote_path - The absolute path on the remote machine
     """
     machine = machine.lower()
+
+    _require_filesystem_operation(machine, "downloadFileContents")
+
+    if _filesystem_operation_handling(machine, "downloadFileContents") == "globus":
+        _require_globus_fallback(machine, "downloadFileContents")
+        staging = _personal_staging_configuration()
+        remote_filename = pathlib.PurePosixPath(remote_path).name
+        if not remote_filename:
+            raise ValueError(f"Remote download path must name a file: {remote_path!r}")
+        temporary_directory, _ = _temporary_staging_directory(staging)
+        staging_file = temporary_directory / remote_filename
+        try:
+            downloadFileGlobus(machine, remote_path, str(staging_file))
+            file_description = local_api.localPathType(str(staging_file)).lower()
+            contents = staging_file.read_bytes()
+            if "text" in file_description or "empty" in file_description:
+                try:
+                    return contents.decode("utf-8")
+                except UnicodeDecodeError:
+                    pass
+            return base64.b64encode(contents).decode("ascii")
+        finally:
+            shutil.rmtree(temporary_directory, ignore_errors=True)
 
     wfapiLog(f"Downloading file contents {machine}:{remote_path}")    
 
@@ -951,6 +1024,12 @@ def downloadFileContents(machine: str, remote_path: str)->str:
 
 def downloadFile(machine: str, local_path_out: str, remote_path_in: str)->str:
     from .api_general import isDirectory
+
+    if machine.lower() != "local" and _filesystem_operation_handling(
+        machine, "downloadFile"
+    ) == "globus":
+        _require_globus_fallback(machine, "downloadFile")
+        return downloadFileGlobus(machine, remote_path_in, local_path_out)
 
     if isDirectory("local", local_path_out):
         local_path_out = local_api.getAbsoluteLocalPath(local_path_out) + "/" + pathlib.Path(remote_path_in).name

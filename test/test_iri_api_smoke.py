@@ -19,11 +19,6 @@ from amscjobmanager import iri_api
 from amscjobmanager.manager_config import readManagerConfigFile
 from amscjobmanager.manager_config_models import ManagerConfig
 
-UNSUPPORTED_OPERATIONS = {
-    #"alcf": {"uploadBytes", "downloadFileContents", "pathStat"},
-}
-
-
 if len(sys.argv) != 3:
     template_path = ManagerConfig.write_template_json()
     raise SystemExit(
@@ -34,7 +29,10 @@ if len(sys.argv) != 3:
 
 def run(name, operation):
     """Run one wrapper and report the command accepted by the IRI API."""
-    if name in UNSUPPORTED_OPERATIONS.get(implementation, set()):
+    operation_handling = iri_api.IRI_IMPLEMENTATIONS[implementation].get(
+        "unsupported_filesystem_operations", {}
+    ).get(name)
+    if operation_handling == "skip":
         print(f"skipped: {name} (not supported by {implementation})")
         return
     operation()

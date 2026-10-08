@@ -37,17 +37,18 @@ sandbox_directories = setupWorkflowAgent(
     config.iri_implementations,
     config.transferapi_key_path,
     config.sandbox_directories,
+    config.globus_personal_endpoint,
 )
 
-perlmutter_sandbox = PurePosixPath(sandbox_directories["perlmutter"])
+perlmutter_sandbox = PurePosixPath(sandbox_directories["perlmutter"][0])
 test_id = uuid.uuid4().hex
 test_dir = perlmutter_sandbox / "amsc-job-manager-transfer-tests" / test_id
 source_file = test_dir / "source.txt"
 destination_dir = test_dir / "dtn-destination"
 label = f"amscjm:transfer-wrapper-test:{test_id}"
 
-# Perlmutter and the NERSC DTN share this filesystem, so make both directories
-# through Perlmutter. The configured sandbox applies to the shared path.
+# NERSC recommends using its DTN collection for all transfers. The configured
+# Perlmutter sandbox path is shared with that collection.
 remoteMkdir("perlmutter", str(test_dir), allow_unsafe=False)
 remoteMkdir("perlmutter", str(destination_dir), allow_unsafe=False)
 uploadBytes(
@@ -59,8 +60,8 @@ uploadBytes(
 
 transfer_id = globusCopy(
     "dtn",
-    str(destination_dir),
-    "perlmutter",
+    f"{destination_dir}/",
+    "dtn",
     str(source_file),
     allow_unsafe=False,
     block_until_complete=False,

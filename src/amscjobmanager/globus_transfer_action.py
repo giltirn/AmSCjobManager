@@ -15,6 +15,8 @@ class GlobusTransfer(TransferActionBase):
     def initiateAction(self, job_id, name: str | None = None)-> str:
         source_path = replaceJobIdSubstring(self.source_path, job_id)
         dest_path = replaceJobIdSubstring(self.dest_path, job_id)
+        if not dest_path.endswith("/"):
+            dest_path += "/"
         
         return globusCopy(self.dest_endpoint, dest_path, self.source_endpoint, source_path, allow_unsafe=False, block_until_complete=True, label=name)
 

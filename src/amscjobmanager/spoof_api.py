@@ -9,7 +9,7 @@ def listSpecialGlobusEndpoints():
     return ["fake_endpoint1","fake_endpoint2"]
 
 def setupWorkflowAgent(iri_implementations: dict, iriapi_transfer_key_path: str,
-                       work_dir: dict):
+                       work_dir: dict, globus_personal_endpoint_config=None):
     globals.remote_workdir={ machine.lower() : directory for machine, directory in work_dir.items() }
     wfapiLog("Using SPOOF api with workdir", globals.remote_workdir)
     return globals.remote_workdir
@@ -89,6 +89,12 @@ def globusCopy(dest_uuid: str, dest_path: str,
         "dest_endpoint": dest_uuid,
         "dest_path": dest_path,
     })
+
+def uploadFileGlobus(machine: str, remote_path: str, local_path: str) -> str:
+    raise NotImplementedError("Globus file staging is unavailable with the SPOOF API")
+
+def downloadFileGlobus(machine: str, remote_path: str, local_path: str) -> str:
+    raise NotImplementedError("Globus file staging is unavailable with the SPOOF API")
    
 def globusTransferStatus(transfer_id):
     if timemodule.time() >= transfers[transfer_id]:

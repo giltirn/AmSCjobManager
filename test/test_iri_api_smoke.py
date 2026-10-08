@@ -20,7 +20,7 @@ from amscjobmanager.manager_config import readManagerConfigFile
 from amscjobmanager.manager_config_models import ManagerConfig
 
 UNSUPPORTED_OPERATIONS = {
-    "alcf": {"uploadBytes", "downloadFileContents", "pathStat"},
+    #"alcf": {"uploadBytes", "downloadFileContents", "pathStat"},
 }
 
 
@@ -60,14 +60,17 @@ sandbox_directories = iri_api.setupWorkflowAgent(
     {implementation: implementation_config},
     config.transferapi_key_path,
     config.sandbox_directories,
+    config.globus_personal_endpoint,
 )
 
-if machine not in sandbox_directories:
+if machine not in sandbox_directories or not sandbox_directories[machine]:
     raise SystemExit(
         f"Configuration must provide a sandbox directory for {machine!r}"
     )
 
-sandbox = PurePosixPath(sandbox_directories[machine])
+# The smoke test exercises one sandbox for the requested machine. The Globus
+# round-trip test covers every configured sandbox collection.
+sandbox = PurePosixPath(sandbox_directories[machine][0])
 test_id = uuid.uuid4().hex
 test_dir = sandbox / "amsc-job-manager-iri-api-smoke" / test_id
 test_file = test_dir / "smoke.txt"

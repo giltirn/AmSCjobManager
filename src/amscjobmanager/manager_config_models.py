@@ -9,6 +9,20 @@ if globals.api_impl in ("SPOOF", "IRI"):
             description="Path to this implementation's IRI compute/filesystem token file",
         )
 
+    class GlobusPersonalEndpointConfig(BaseModel):
+        endpoint_uuid: str = Field(
+            ...,
+            description="UUID of the personal Globus endpoint",
+        )
+        staging_directory_globus: str = Field(
+            ...,
+            description="Staging directory path as seen by the Globus endpoint",
+        )
+        staging_directory_local: str = Field(
+            ...,
+            description="Staging directory path as seen by the manager host OS",
+        )
+
 
     class ManagerConfig(BaseModel):
         iri_implementations: dict[str, IRIImplementationConfig] = Field(
@@ -16,7 +30,14 @@ if globals.api_impl in ("SPOOF", "IRI"):
             description="IRI compute/filesystem implementations to initialize",
         )
         transferapi_key_path: str = Field(..., description="The path to the Data Transfer API key (will be created if doesn't yet exist)")
-        sandbox_directories: dict[str, str] = Field(..., description="A map of machine names to base sandbox directories")
+        sandbox_directories: dict[str, list[str]] = Field(
+            ...,
+            description="A map of machine names to base sandbox directories",
+        )
+        globus_personal_endpoint: GlobusPersonalEndpointConfig | None = Field(
+            None,
+            description="Optional personal Globus endpoint and its manager-accessible staging directory",
+        )
 
         @classmethod
         def write_template_json(
@@ -35,9 +56,14 @@ if globals.api_impl in ("SPOOF", "IRI"):
                 },
                 transferapi_key_path="/path/to/iri-transfer-token.json",
                 sandbox_directories={
-                    "perlmutter": "/path/to/perlmutter-sandbox",
-                    "local": "/path/to/local-sandbox",
+                    "perlmutter": ["/path/to/perlmutter-sandbox"],
+                    "local": ["/path/to/local-sandbox"],
                 },
+                globus_personal_endpoint=GlobusPersonalEndpointConfig(
+                    endpoint_uuid="your-personal-globus-endpoint-uuid",
+                    staging_directory_globus="/path/on/personal/endpoint",
+                    staging_directory_local="/path/as/seen/by/manager",
+                ),
             )
             output_path.write_text(template.model_dump_json(indent=2) + "\n")
             return output_path

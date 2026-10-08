@@ -3,7 +3,7 @@ import warnings
 from typing import Dict, List
 import pathlib
 
-remote_workdir = None ##Dictionary mapping machine to a sandbox directory
+remote_workdir = None ##Dictionary mapping machine to one or more sandbox directories
 configured_machines: set[str] | None = None
 api_impl = os.getenv("AMSC_JOB_MANAGER_API_IMPL", "IRI") #Control which API implementation is used
 

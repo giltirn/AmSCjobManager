@@ -40,8 +40,8 @@ man = JobManager(poll_freq=2)
 man.start()
 
 with man as jd:
-    #jobid = jd.enqueueJob([ TestComputeAction(machine="local", account="", queue="", time=600, rundir=config.sandbox_directories["local"], toprint="Hello world!") ])
-    jobid = jd.enqueueJob( ExecuteBatchScriptComputeAction(machine="local", account="", queue="", time=600, nodes=1, ranks_per_node=1, gpus_per_rank=0, rundir=config.sandbox_directories["local"], script_body = """
+    #jobid = jd.enqueueJob([ TestComputeAction(machine="local", account="", queue="", time=600, rundir=config.sandbox_directories["local"][0], toprint="Hello world!") ])
+    jobid = jd.enqueueJob( ExecuteBatchScriptComputeAction(machine="local", account="", queue="", time=600, nodes=1, ranks_per_node=1, gpus_per_rank=0, rundir=config.sandbox_directories["local"][0], script_body = """
 echo "Hello World!"
 sleep 20
 """) )

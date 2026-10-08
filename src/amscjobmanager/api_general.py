@@ -7,10 +7,10 @@ from .logging import wfapiLog
 if globals.api_impl == "IRI":
     #Pure IRI
     print("Using IRI API")
-    from .iri_api import setupWorkflowAgent, remoteLs, remoteMkdir, uploadBytes, executeBatchJobCompat, remoteChmod, getJobState, findJobByName, cancelJob, queryMachineStatus, globusTransferStatus, findGlobusTransferByLabel, findGlobusTransfersByLabel, getUserAccountProjects, getKnownMachines, getMachineQueues, downloadFile, listSpecialGlobusEndpoints, globusCopy, pathType
+    from .iri_api import setupWorkflowAgent, remoteLs, remoteMkdir, uploadBytes, uploadFileGlobus, executeBatchJobCompat, remoteChmod, getJobState, findJobByName, cancelJob, queryMachineStatus, globusTransferStatus, findGlobusTransferByLabel, findGlobusTransfersByLabel, getUserAccountProjects, getKnownMachines, getMachineQueues, downloadFile, downloadFileGlobus, listSpecialGlobusEndpoints, globusCopy, pathType
 elif globals.api_impl == "SPOOF":
     print("Using Spoof API")
-    from .spoof_api import setupWorkflowAgent, remoteMkdir, uploadBytes, executeBatchJobCompat, getJobState, findJobByName, globusTransferStatus, findGlobusTransferByLabel, findGlobusTransfersByLabel, queryMachineStatus, getUserAccountProjects, getKnownMachines, getMachineQueues, remoteRun, downloadFile, listSpecialGlobusEndpoints, globusCopy
+    from .spoof_api import setupWorkflowAgent, remoteMkdir, uploadBytes, uploadFileGlobus, executeBatchJobCompat, getJobState, findJobByName, globusTransferStatus, findGlobusTransferByLabel, findGlobusTransfersByLabel, queryMachineStatus, getUserAccountProjects, getKnownMachines, getMachineQueues, remoteRun, downloadFile, downloadFileGlobus, listSpecialGlobusEndpoints, globusCopy
 else:
     raise Exception("Unknown API implementation")
 
@@ -59,7 +59,7 @@ def uploadSmallFile(machine: str, remote_path: str, local_path: str, allow_unsaf
        remote_path - The absolute path on the remote machine
        local_path - The path on the local machine
        allow_unsafe - Allow uploading to directories other than within the sandbox
-       definitely_is_file - Assert that the path is an absolute file path, not a directory. Use to skip checking the type of the remote path.
+       definitely_is_file - Assert that the remote path is an absolute file path, not a directory. Use to skip checking the type of the remote path.
     """
 
     if not pathlib.Path(remote_path).is_absolute():

@@ -9,9 +9,11 @@ import time
 import pathlib
 import io
 import os
+import shutil
 import stat
 import base64
 import re
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 import globus_sdk
@@ -29,6 +31,13 @@ IRI_IMPLEMENTATIONS = {
         "storage_iriapi_group": "perlmutter",
         "storage_resource_type": "compute",
         "storage_resource_paths": {"/": "login"},
+        "globus_filesystems": [
+            {
+                "filesystem_root": "/",
+                "endpoint": "dtn",
+                "globus_root": "/",
+            },
+        ],
         "required_scopes": {
             "https://auth.globus.org/scopes/ed3e577d-f7f3-4639-b96e-ff5a8445d699/iri_api",
         },
@@ -36,7 +45,6 @@ IRI_IMPLEMENTATIONS = {
             "perlmutter": {
                 "iriapi_group": "perlmutter",
                 "iriapi_resource_name": "compute",
-                "globus_endpoint": "6bdc7956-fc0f-4ad2-989c-7aa5ee643a79",
                 "queues": [
                     ("debug", "max time 0.5 hours, max nodes 8"),
                     ("regular", "use for standard, production jobs or those too large for debug"),
@@ -57,10 +65,43 @@ IRI_IMPLEMENTATIONS = {
         "storage_resource_type": "storage",
         "storage_resource_paths": {
             "/flare": "Flare",
+            "/lus/flare": "Flare",
             "/home": "Home",
             "/eagle": "Eagle",
             "/lus/eagle": "Eagle",
         },
+        "globus_filesystems": [
+            {
+                "filesystem_root": "/home",
+                "endpoint": "9032dd3a-e841-4687-a163-2720da731b5b",
+                "globus_root": "/",
+                "requires_data_access": True,
+            },
+            {
+                "filesystem_root": "/lus/flare/projects",
+                "endpoint": "f39a7a0f-5bfc-46ce-9615-ba9f8592814f",
+                "globus_root": "/",
+                "requires_data_access": True,
+            },
+            {
+                "filesystem_root": "/flare",
+                "endpoint": "f39a7a0f-5bfc-46ce-9615-ba9f8592814f",
+                "globus_root": "/",
+                "requires_data_access": True,
+            },
+            {
+                "filesystem_root": "/lus/eagle/projects",
+                "endpoint": "05d2c76a-e867-4f67-aa57-76edeb0beda0",
+                "globus_root": "/",
+                "requires_data_access": True,
+            },
+            {
+                "filesystem_root": "/eagle",
+                "endpoint": "05d2c76a-e867-4f67-aa57-76edeb0beda0",
+                "globus_root": "/",
+                "requires_data_access": True,
+            },
+        ],
         "required_scopes": {
             "https://auth.globus.org/scopes/6be511f6-a071-471f-9bc0-02a0d0836723/filesystem",
         },
@@ -105,8 +146,11 @@ TRANSFER_API_BASE = "https://amsc-data-api.nersc.gov"
 #We also use this to bake in nicknames
 #TODO: figure out how to deal with those that also require a special domain
 #TODO: user config should store endpoints for which scopes are required, and token should be regenerated if list is changed (right now requires deletion)
-special_globus_endpoints = { "dtn" :  "9d6d994a-6d04-11e5-ba46-22000b92c6ec", "perlmutter" : IRI_IMPLEMENTATIONS["nersc"]["machines"]["perlmutter"]["globus_endpoint"],
-                            "bnl": "12782fb1-a599-4f18-b0fb-2e849681e214"  }
+special_globus_endpoints = {
+    "dtn": "9d6d994a-6d04-11e5-ba46-22000b92c6ec",
+    "bnl": "12782fb1-a599-4f18-b0fb-2e849681e214",
+}
+globus_personal_endpoint: dict[str, str] | None = None
 
 def replaceSpecialGlobusEndpoint(endpoint : str):
     """Replace a special globus endpoint tag with the actual UUID"""
@@ -143,6 +187,10 @@ class IRIComputeClient:
 iri_compute_clients: dict[str, IRIComputeClient] = {}
 # The data-transfer API remains a separate, single service.
 iri_transfer_client = httpx.Client()
+
+IRI_GET_RETRYABLE_STATUS_CODES = {502, 503, 504}
+IRI_GET_MAX_ATTEMPTS = 4
+IRI_GET_INITIAL_RETRY_DELAY_SECONDS = 1
                
 def parse_scope_string(scope_string: str) -> set[str]:
     return set(scope_string.split()) if scope_string else set()
@@ -267,9 +315,21 @@ def setupIRIapiCompute(implementation: str, key_path: str) -> IRIComputeClient:
 IRI_TRANSFER_RESOURCE_SERVER = "08da012c-6998-46f9-9375-a6985ebe3f2b"
 IRI_TRANSFER_DEFAULT_SCOPE = f"https://auth.globus.org/scopes/{IRI_TRANSFER_RESOURCE_SERVER}/transfer"
 
+def _globus_data_access_collections() -> set[str]:
+    """Return every collection for which the transfer login needs access."""
+    collections = set()
+    for implementation in iri_compute_clients:
+        specification = IRI_IMPLEMENTATIONS[implementation]
+        for filesystem in specification.get("globus_filesystems", []):
+            if not filesystem.get("requires_data_access", False):
+                continue
+            endpoint = filesystem["endpoint"]
+            collections.add(special_globus_endpoints.get(endpoint, endpoint))
+    return collections
+
 def interactive_login_transfer(client: globus_sdk.NativeAppAuthClient) -> dict:
     scope = globus_sdk.Scope(IRI_TRANSFER_DEFAULT_SCOPE)
-    mapped_collections = [v for k,v in special_globus_endpoints.items()]
+    mapped_collections = _globus_data_access_collections()
     
     data_access = [globus_sdk.scopes.GCSCollectionScopes(mc).data_access for mc in mapped_collections] #data access scope required for mapped collections
     transfer_scope = TransferScopes.all.with_dependencies(data_access)
@@ -398,8 +458,29 @@ def _close_compute_clients():
     iri_compute_clients.clear()
 
 
+def _configure_personal_globus_endpoint(configuration) -> None:
+    """Configure the optional personal Globus endpoint for this process."""
+    global globus_personal_endpoint
+    special_globus_endpoints.pop("personal", None)
+    if configuration is None:
+        globus_personal_endpoint = None
+        return
+
+    def value(name):
+        if hasattr(configuration, name):
+            return getattr(configuration, name)
+        return configuration[name]
+
+    globus_personal_endpoint = {
+        "endpoint_uuid": value("endpoint_uuid"),
+        "staging_directory_globus": value("staging_directory_globus"),
+        "staging_directory_local": value("staging_directory_local"),
+    }
+    special_globus_endpoints["personal"] = globus_personal_endpoint["endpoint_uuid"]
+
+
 def setupWorkflowAgent(iri_implementations: dict, iriapi_transfer_key_path: str,
-                       work_dir: dict):
+                       work_dir: dict, globus_personal_endpoint_config=None):
     """
     Setup the workflow agent
     Args:
@@ -408,6 +489,8 @@ def setupWorkflowAgent(iri_implementations: dict, iriapi_transfer_key_path: str,
            authentication token independently.
        iriapi_transfer_key_path: The full path to the IRI transfer API key file. This will be generated automatically if it doesn't currently exist.
        work_dir: The remote work directories, by machine as a dict, e.g. { "perlmutter" : "/path/to/dir" }. Use a list of directories if more than one. The API is only allowed to modify the contents of files within this directory or its children
+       globus_personal_endpoint_config: Optional personal endpoint UUID and
+           staging-directory paths used by blocking Globus file transfers.
     """    
     normalized_implementations = {
         name.lower(): settings for name, settings in iri_implementations.items()
@@ -416,6 +499,7 @@ def setupWorkflowAgent(iri_implementations: dict, iriapi_transfer_key_path: str,
     if unknown_implementations:
         raise ValueError(f"Unknown IRI implementations: {sorted(unknown_implementations)}")
 
+    _configure_personal_globus_endpoint(globus_personal_endpoint_config)
     _close_compute_clients()
     for implementation, settings in normalized_implementations.items():
         token_path = (
@@ -444,17 +528,44 @@ def setupWorkflowAgent(iri_implementations: dict, iriapi_transfer_key_path: str,
 def get(machine, suburl, params = None):
     machine = machine.lower()
     client, _ = _get_compute_client(machine)
-    resp = client.http_client.get(
-        IRI_IMPLEMENTATIONS[client.implementation]["api_base"] + '/' + suburl,
-        headers={"accept": "application/json", "Authorization": f"Bearer {client.access_token}"},
-        params=params,
-        timeout=300,
-    )
-    if resp.status_code == 200:
-        j = json.loads(resp.text)
-        return j
-    else:
-        raise Exception(f"Get operation failed with code {resp.status_code} and text {resp.text} (full response: {resp})")
+    url = IRI_IMPLEMENTATIONS[client.implementation]["api_base"] + '/' + suburl
+    retry_errors = []
+    for attempt in range(IRI_GET_MAX_ATTEMPTS):
+        try:
+            resp = client.http_client.get(
+                url,
+                headers={"accept": "application/json", "Authorization": f"Bearer {client.access_token}"},
+                params=params,
+                timeout=300,
+            )
+        except httpx.TransportError as exc:
+            retryable_error = exc
+        else:
+            if resp.status_code == 200:
+                return json.loads(resp.text)
+            if resp.status_code not in IRI_GET_RETRYABLE_STATUS_CODES:
+                raise Exception(
+                    f"Get operation failed with code {resp.status_code} and text "
+                    f"{resp.text} (full response: {resp})"
+                )
+            retryable_error = RuntimeError(
+                f"HTTP {resp.status_code}: {resp.text}"
+            )
+
+        retry_errors.append(f"attempt {attempt + 1}: {retryable_error}")
+
+        if attempt == IRI_GET_MAX_ATTEMPTS - 1:
+            raise RuntimeError(
+                f"GET {url} failed after {IRI_GET_MAX_ATTEMPTS} attempts: "
+                + "; ".join(retry_errors)
+            ) from retryable_error
+
+        delay = IRI_GET_INITIAL_RETRY_DELAY_SECONDS * (2 ** attempt)
+        wfapiLog(
+            f"Transient GET failure for {machine}:{suburl} ({retryable_error}); "
+            f"retrying in {delay} seconds"
+        )
+        time.sleep(delay)
         
 def getUserProjectIDmap(machine):
     """
@@ -1040,6 +1151,136 @@ def findGlobusTransferByLabel(label: str) -> str | None:
     return findGlobusTransfersByLabel(label)
 
 
+def _globus_path(root: str, relative_path: pathlib.PurePosixPath) -> str:
+    return str(pathlib.PurePosixPath(root).joinpath(relative_path))
+
+
+def _remote_globus_location(machine: str, remote_path: str) -> tuple[str, str]:
+    """Translate a machine filesystem path to its Globus collection and path."""
+    path = pathlib.PurePosixPath(remote_path)
+    if not path.is_absolute():
+        raise ValueError(f"Remote Globus path must be absolute: {remote_path!r}")
+
+    implementation = _configured_implementation_name(machine)
+    filesystems = IRI_IMPLEMENTATIONS[implementation].get("globus_filesystems", [])
+    matches = [
+        filesystem for filesystem in filesystems
+        if path.is_relative_to(pathlib.PurePosixPath(filesystem["filesystem_root"]))
+    ]
+    if not matches:
+        raise ValueError(f"No Globus endpoint is configured for {machine}:{path}")
+    filesystem = max(
+        matches,
+        key=lambda item: len(pathlib.PurePosixPath(item["filesystem_root"]).parts),
+    )
+    root = pathlib.PurePosixPath(filesystem["filesystem_root"])
+    return filesystem["endpoint"], _globus_path(
+        filesystem["globus_root"], path.relative_to(root)
+    )
+
+
+def _personal_staging_configuration() -> dict[str, str]:
+    if globus_personal_endpoint is None:
+        raise RuntimeError(
+            "Globus file transfers require globus_personal_endpoint in the "
+            "manager configuration"
+        )
+    return globus_personal_endpoint
+
+
+def _staging_globus_path(local_path: Path, staging: dict[str, str]) -> str | None:
+    staging_local = Path(staging["staging_directory_local"]).expanduser().resolve()
+    try:
+        relative_path = local_path.expanduser().resolve().relative_to(staging_local)
+    except ValueError:
+        return None
+    return _globus_path(staging["staging_directory_globus"], relative_path)
+
+
+def _temporary_staging_directory(staging: dict[str, str]) -> tuple[Path, str]:
+    staging_local = Path(staging["staging_directory_local"]).expanduser().resolve()
+    staging_local.mkdir(parents=True, exist_ok=True)
+    temporary_directory = staging_local / f".amsc-globus-{uuid.uuid4().hex}"
+    temporary_directory.mkdir()
+    return temporary_directory, _globus_path(
+        staging["staging_directory_globus"],
+        temporary_directory.relative_to(staging_local),
+    )
+
+
+def uploadFileGlobus(machine: str, remote_path: str, local_path: str) -> str:
+    """Blocking upload of one local file through the configured personal endpoint."""
+    source_path = Path(local_path).expanduser().resolve()
+    if not source_path.is_file():
+        raise ValueError(f"Local upload source is not a file: {local_path!r}")
+    if not checkSafePath(machine, remote_path):
+        raise Exception(f"Attempting to copy data to a disallowed location on {machine}")
+
+    staging = _personal_staging_configuration()
+    remote_endpoint, remote_globus_path = _remote_globus_location(machine, remote_path)
+    remote_globus_file = pathlib.PurePosixPath(remote_globus_path)
+    remote_filename = remote_globus_file.name
+    if not remote_filename:
+        raise ValueError(f"Remote upload path must name a file: {remote_path!r}")
+
+    staged_path = _staging_globus_path(source_path, staging)
+    temporary_directory = None
+    if staged_path is None or source_path.name != remote_filename:
+        temporary_directory, staging_directory = _temporary_staging_directory(staging)
+        staged_path = _globus_path(staging_directory, pathlib.PurePosixPath(remote_filename))
+        shutil.copy2(source_path, temporary_directory / remote_filename)
+
+    try:
+        return globusCopy(
+            remote_endpoint, f"{remote_globus_file.parent}/", "personal", staged_path,
+            allow_unsafe=True, block_until_complete=True,
+            label="AmSC job manager file upload",
+        )
+    finally:
+        if temporary_directory is not None:
+            shutil.rmtree(temporary_directory, ignore_errors=True)
+
+
+def downloadFileGlobus(machine: str, remote_path: str, local_path: str) -> str:
+    """Blocking download of one remote file through the configured personal endpoint."""
+    staging = _personal_staging_configuration()
+    output_path = Path(local_path).expanduser()
+    if output_path.is_dir():
+        output_path /= pathlib.PurePosixPath(remote_path).name
+    output_path = output_path.resolve()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    remote_endpoint, remote_globus_path = _remote_globus_location(machine, remote_path)
+    remote_globus_file = pathlib.PurePosixPath(remote_globus_path)
+    remote_filename = remote_globus_file.name
+    if not remote_filename:
+        raise ValueError(f"Remote download path must name a file: {remote_path!r}")
+
+    staged_path = _staging_globus_path(output_path, staging)
+    temporary_directory = None
+    if staged_path is not None and output_path.name == remote_filename:
+        staging_destination = str(pathlib.PurePosixPath(staged_path).parent)
+    else:
+        temporary_directory, staging_destination = _temporary_staging_directory(staging)
+
+    try:
+        globusCopy(
+            "personal", f"{staging_destination}/", remote_endpoint, remote_globus_path,
+            allow_unsafe=True, block_until_complete=True,
+            label="AmSC job manager file download",
+        )
+        if temporary_directory is not None:
+            downloaded_file = temporary_directory / remote_filename
+            if _staging_globus_path(output_path, staging) is not None:
+                shutil.move(downloaded_file, output_path)
+            else:
+                shutil.copy2(downloaded_file, output_path)
+        return str(output_path)
+    finally:
+        if temporary_directory is not None:
+            shutil.rmtree(temporary_directory, ignore_errors=True)
+
+
 def _globusCopy(source_endpoint, dest_endpoint, source_path, dest_path,
                 block_until_complete=False, label: str | None = None):
     trans_args = { "source_uuid" : source_endpoint, "source_path": source_path,
@@ -1055,6 +1296,8 @@ def _globusCopy(source_endpoint, dest_endpoint, source_path, dest_path,
                 print(".", end="")
                 time.sleep(20)
             print(status)
+            if status != "SUCCEEDED":
+                raise RuntimeError(f"Globus transfer {tid} finished with status {status}")
 
         return tid
     else:

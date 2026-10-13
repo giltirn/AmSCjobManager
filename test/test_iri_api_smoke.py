@@ -108,6 +108,10 @@ if not queues:
     raise RuntimeError(f"No queues are available for {machine!r}")
 if not accounts:
     raise RuntimeError(f"No accounts are available for {machine!r}")
+run(
+    "getProjectAllocation",
+    lambda: iri_api.getProjectAllocation(machine, accounts[0]),
+)
 
 job_id = None
 try:

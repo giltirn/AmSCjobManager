@@ -7,10 +7,10 @@ from .logging import wfapiLog
 if globals.api_impl == "IRI":
     #Pure IRI
     print("Using IRI API")
-    from .iri_api import setupWorkflowAgent, remoteLs, remoteMkdir, uploadBytes, uploadFileGlobus, executeBatchJobCompat, remoteChmod, getJobState, findJobByName, cancelJob, queryMachineStatus, globusTransferStatus, findGlobusTransferByLabel, findGlobusTransfersByLabel, getUserAccountProjects, getKnownMachines, getMachineQueues, downloadFile, downloadFileGlobus, listSpecialGlobusEndpoints, globusCopy, pathType
+    from .iri_api import setupWorkflowAgent, remoteLs, remoteMkdir, uploadBytes, uploadFileGlobus, executeJob, executeBatchJobCompat, remoteChmod, getJobState, findJobByName, cancelJob, queryMachineStatus, globusTransferStatus, findGlobusTransferByLabel, findGlobusTransfersByLabel, getUserAccountProjects, getProjectAllocation, getKnownMachines, getMachineQueues, downloadFile, downloadFileGlobus, listSpecialGlobusEndpoints, globusCopy, pathType
 elif globals.api_impl == "SPOOF":
     print("Using Spoof API")
-    from .spoof_api import setupWorkflowAgent, remoteMkdir, uploadBytes, uploadFileGlobus, executeBatchJobCompat, getJobState, findJobByName, globusTransferStatus, findGlobusTransferByLabel, findGlobusTransfersByLabel, queryMachineStatus, getUserAccountProjects, getKnownMachines, getMachineQueues, remoteRun, downloadFile, downloadFileGlobus, listSpecialGlobusEndpoints, globusCopy
+    from .spoof_api import setupWorkflowAgent, remoteMkdir, uploadBytes, uploadFileGlobus, executeJob, executeBatchJobCompat, getJobState, findJobByName, globusTransferStatus, findGlobusTransferByLabel, findGlobusTransfersByLabel, queryMachineStatus, getUserAccountProjects, getProjectAllocation, getKnownMachines, getMachineQueues, remoteRun, downloadFile, downloadFileGlobus, listSpecialGlobusEndpoints, globusCopy
 else:
     raise Exception("Unknown API implementation")
 

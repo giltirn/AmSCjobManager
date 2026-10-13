@@ -1,6 +1,7 @@
 import random
 import time as timemodule
 import io
+import shlex
 from . import globals
 from .logging import wfapiLog
 from typing import Literal, Union, List, Optional, Tuple
@@ -141,6 +142,12 @@ def getUserAccountProjects(machine):
     
     return ["my_proj1", "my_proj2"]
 
+
+def getProjectAllocation(machine: str, project_name: str) -> List[dict]:
+    if project_name not in getUserAccountProjects(machine):
+        raise Exception(f"Invalid project {project_name!r} for machine {machine!r}")
+    return [{"allocation": 100000, "usage": 0, "unit": "node_hours"}]
+
 def getMachineQueues(machine)->List[ Tuple[str,str] ]:
     """
     Provide a list of queues and associated information for a given machine
@@ -151,6 +158,23 @@ def getMachineQueues(machine)->List[ Tuple[str,str] ]:
 
 
 jid=0
+
+def executeJob(machine: str, executable: str, arguments: List[str], nodes: int, ranks_per_node: int,
+               gpus_per_rank: int, time: str, queue: str, account: str,
+               job_run_dir: str, exclusive=True, allow_unsafe=False,
+               name: str | None = None, *, pre_launch: str | None = None,
+               post_launch: str | None = None) -> str:
+    """Spoof the native IRI pre-launch/executable/post-launch workflow."""
+    script_body = "\n".join(
+        command for command in (
+            pre_launch, shlex.join([executable, *arguments]), post_launch
+        ) if command
+    )
+    return executeBatchJobCompat(
+        machine, script_body, nodes, ranks_per_node, gpus_per_rank, time,
+        queue, account, job_run_dir, exclusive=exclusive,
+        allow_unsafe=allow_unsafe, name=name,
+    )
 
 def executeBatchJobCompat(machine: str, script_body: str,
                     nodes : int, ranks_per_node : int, gpus_per_rank : int,

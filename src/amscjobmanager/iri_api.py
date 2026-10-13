@@ -13,6 +13,7 @@ import shutil
 import stat
 import base64
 import re
+import shlex
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -45,6 +46,7 @@ IRI_IMPLEMENTATIONS = {
             "perlmutter": {
                 "iriapi_group": "perlmutter",
                 "iriapi_resource_name": "compute",
+                "launcher": "srun",
                 "queues": [
                     ("debug", "max time 0.5 hours, max nodes 8"),
                     ("regular", "use for standard, production jobs or those too large for debug"),
@@ -117,6 +119,7 @@ IRI_IMPLEMENTATIONS = {
             "polaris": {
                 "iriapi_group": "computes",
                 "iriapi_resource_name": "Polaris",
+                "custom_attributes": {"filesystems": "home:eagle"},
                 "queues": [
                     ("debug", "1-2 nodes, 5 minutes-1 hour; max 24 nodes in use"),
                     ("debug-scaling", "1-10 nodes, 5 minutes-1 hour; max one job per user"),
@@ -129,6 +132,7 @@ IRI_IMPLEMENTATIONS = {
             "aurora": {
                 "iriapi_group": "computes",
                 "iriapi_resource_name": "Aurora",
+                "custom_attributes": {"filesystems": "flare"},
                 "queues": [
                     ("debug", "1-2 nodes, 5 minutes-1 hour; max one job per user"),
                     ("debug-scaling", "2-256 nodes, 5 minutes-1 hour; max one job per user"),
@@ -194,7 +198,7 @@ iri_compute_clients: dict[str, IRIComputeClient] = {}
 # The data-transfer API remains a separate, single service.
 iri_transfer_client = httpx.Client()
 
-IRI_GET_RETRYABLE_STATUS_CODES = {502, 503, 504}
+IRI_GET_RETRYABLE_STATUS_CODES = {502, 503, 504, 500}
 IRI_GET_MAX_ATTEMPTS = 4
 IRI_GET_INITIAL_RETRY_DELAY_SECONDS = 1
                
@@ -635,6 +639,17 @@ def _require_globus_fallback(machine: str, operation: str) -> None:
             "configure globus_personal_endpoint in the manager configuration"
         )
 
+
+def _require_compute_operation(machine: str, operation: str) -> None:
+    implementation = _configured_implementation_name(machine)
+    handling = IRI_IMPLEMENTATIONS[implementation].get(
+        "unsupported_compute_operations", {}
+    ).get(operation)
+    if handling == "skip":
+        raise NotImplementedError(
+            f"{operation} is not implemented by the {implementation!r} IRI API"
+        )
+
 def getUserAccountProjects(machine):
     machine = machine.lower()
     _get_compute_client(machine)
@@ -644,6 +659,37 @@ def getUserAccountProjects(machine):
         for i in range(len(out)):
             out[i] += "_g"
     return out
+
+
+def getProjectAllocation(machine: str, project_name: str) -> List[dict]:
+    """Return all allocation entries associated with ``project_name``.
+
+    The IRI endpoint returns a list of project-allocation records, each of
+    which contains an ``entries`` list.  Flattening those lists preserves the
+    useful allocation records even if a project has more than one allocation.
+    The internal project ID required by the endpoint is resolved from the
+    user-facing project name.
+    """
+    machine = machine.lower()
+    _get_compute_client(machine)
+    project_map = getUserProjectIDmap(machine)
+    project_id = project_map.get(project_name)
+    if project_id is None and machine == "perlmutter" and project_name.endswith("_g"):
+        # GPU queue accounts carry this suffix, while the IRI project map uses
+        # the underlying project name.
+        project_id = project_map.get(project_name.removesuffix("_g"))
+    if project_id is None:
+        raise ValueError(
+            f"Unknown project {project_name!r} for machine {machine!r}"
+        )
+    allocations = get(
+        machine, f"account/projects/{project_id}/project_allocations"
+    )
+    return [
+        entry
+        for allocation in allocations
+        for entry in allocation.get("entries", [])
+    ]
     
 def getResourceID(machine, rtype="compute", path: Optional[str] = None):
     """
@@ -1049,7 +1095,188 @@ def downloadFile(machine: str, local_path_out: str, remote_path_in: str)->str:
             with open(local_path_out, 'w') as f:
                 f.write(content)
     return local_path_out
+
+
+def _alcf_post_launch_wrapper(
+    job_run_dir: str,
+    barrier_dir: str,
+    executable: str,
+    arguments: List[str],
+    post_launch: str,
+    ranks: int,
+) -> str:
+    """Build the per-rank wrapper used for ALCF post-launch processing.
+
+    The ALCF IRI service does not return control to the head-node process after
+    ``mpiexec``.  The wrapper therefore runs the requested executable on every
+    rank, synchronizes through the shared filesystem, then has rank zero run
+    the post-launch commands.
+    """
+    launch_command = shlex.join([executable, *arguments])
+    quoted_job_dir = shlex.quote(job_run_dir)
+    quoted_barrier_dir = shlex.quote(barrier_dir)
+    return f"""#!/bin/bash
+cd {quoted_job_dir} || exit 125
+
+barrier_dir={quoted_barrier_dir}
+expected_ranks={ranks}
+
+barrier() {{
+    local count
+    (
+        flock -x 9 || exit 1
+        count=$(cat "$barrier_dir/count") || exit 1
+        [[ "$count" =~ ^[0-9]+$ ]] || exit 1
+        printf '%s\\n' "$((count + 1))" > "$barrier_dir/count"
+    ) 9>"$barrier_dir/lock" || return 1
+
+    while true; do
+        count=$( (
+            flock -s 9 || exit 1
+            cat "$barrier_dir/count"
+        ) 9>"$barrier_dir/lock" ) || return 1
+        [[ "$count" =~ ^[0-9]+$ ]] || return 1
+        (( count >= expected_ranks )) && return 0
+        sleep 0.1
+    done
+}}
+
+{launch_command}
+application_status=$?
+barrier || exit 125
+
+# Aurora exposes PALS_RANKID.  The fallbacks allow the same wrapper to work
+# with common PMI/PMIx launch environments on other ALCF systems.
+rank="${{PALS_RANKID:-${{PMI_RANK:-${{PMIX_RANK:-}}}}}}"
+[[ -n "$rank" ]] || {{
+    echo "Unable to identify the MPI rank for ALCF post-launch" >&2
+    exit 125
+}}
+if [[ "$rank" == "0" ]]; then
+    (
+{post_launch}
+    )
+    post_launch_status=$?
+    if (( application_status != 0 )); then
+        exit "$application_status"
+    fi
+    exit "$post_launch_status"
+fi
+
+exit "$application_status"
+"""
     
+def executeJob(machine: str, executable: str, arguments: List[str], nodes: int, ranks_per_node: int,
+               gpus_per_rank: int, time: str, queue: str, account: str,
+               job_run_dir: str, exclusive=True, allow_unsafe=False,
+               name: str | None = None, *, pre_launch: str | None = None,
+               post_launch: str | None = None) -> str:
+    """Submit a compute job using the IRI pre-launch/executable/post-launch API.
+
+    On implementations that support native hooks, ``pre_launch`` and
+    ``post_launch`` run on the login/head node before and after the launcher
+    runs ``executable``.  ALCF runs ``pre_launch`` on the head node, then uses
+    a shared-filesystem barrier to run ``post_launch`` on MPI rank zero after
+    every rank has completed the executable.
+    """
+    machine = machine.lower()
+    if machine == "local":
+        script_body = "\n".join(
+            command for command in (
+                pre_launch, shlex.join([executable, *arguments]), post_launch
+            )
+            if command
+        )
+        return local_api.executeJobScript(
+            script_body, job_run_dir, allow_unsafe, name=name
+        )
+
+    wfapiLog(
+        f"Executing job on machine {machine} with nodes:{nodes}, "
+        f"ranks/node:{ranks_per_node}, gpus/rank:{gpus_per_rank}, "
+        f"time:{time}, queue:{queue}, account:{account}"
+    )
+    if not allow_unsafe and not checkSafePath(machine, job_run_dir):
+        raise Exception("Path is not below the privileged directory")
+
+    _, machine_specification = _get_compute_client(machine)
+    if _configured_implementation_name(machine) == "alcf":
+        ranks = nodes * ranks_per_node
+        if post_launch is None:
+            launch_command = shlex.join([executable, *arguments])
+            script_body = "\n".join(
+                command for command in (
+                    pre_launch,
+                    f"mpiexec -np {ranks} {launch_command}",
+                )
+                if command
+            )
+        else:
+            barrier_dir = (
+                f"{job_run_dir}/.amsc-post-launch-barrier-{uuid.uuid4().hex}"
+            )
+            wrapper_path = f"{barrier_dir}/wrapper.sh"
+            wrapper = _alcf_post_launch_wrapper(
+                job_run_dir, barrier_dir, executable, arguments, post_launch, ranks
+            )
+            encoded_wrapper = base64.b64encode(wrapper.encode()).decode()
+            script_body = "\n".join(
+                command for command in (
+                    pre_launch,
+                    f"mkdir -p {shlex.quote(barrier_dir)}",
+                    f"printf '0\\n' > {shlex.quote(barrier_dir + '/count')}",
+                    f": > {shlex.quote(barrier_dir + '/lock')}",
+                    f"echo {encoded_wrapper} | base64 -d > {shlex.quote(wrapper_path)}",
+                    f"chmod u+x {shlex.quote(wrapper_path)}",
+                    f"mpiexec -np {ranks} /bin/bash {shlex.quote(wrapper_path)}",
+                )
+                if command
+            )
+        return executeBatchJobCompat(
+            machine, script_body, nodes, ranks_per_node, gpus_per_rank,
+            time, queue, account, job_run_dir, exclusive=exclusive,
+            allow_unsafe=allow_unsafe, name=name,
+        )
+
+    spec = {
+        "executable": executable,
+        "arguments" : arguments,
+        "directory": job_run_dir,
+        "name": name,
+        "inherit_environment": True,
+        "stdin_path": None,
+        "stdout_path": f"{job_run_dir}/run.log",
+        "stderr_path": f"{job_run_dir}/err.log",
+        "resources": {
+            "node_count": nodes,
+            "processes_per_node": ranks_per_node,
+            "exclusive_node_use": exclusive,
+            "gpu_cores_per_process": gpus_per_rank,
+        },
+        "attributes": {
+            "duration": time,
+            "account": account,
+            "queue_name": queue,
+        },
+    }
+    if launcher := machine_specification.get("launcher"):
+        spec["launcher"] = launcher
+    if pre_launch is not None:
+        spec["pre_launch"] = pre_launch
+    if post_launch is not None:
+        spec["post_launch"] = post_launch
+    if custom_attributes := machine_specification.get("custom_attributes"):
+        spec["attributes"]["custom_attributes"] = custom_attributes
+    rid = getResourceID(machine, rtype="compute")
+    response, status = post(machine, f"compute/job/{rid}", data=spec)
+    if status == 200:
+        return response["id"]
+    raise Exception(
+        f"Job submission failed, status: {status}, reason: "
+        f"{json.dumps(response, indent=2)}"
+    )
+
+
 def executeBatchJobCompat(machine: str, script_body: str,
                     nodes : int, ranks_per_node : int, gpus_per_rank : int,
                     time : str, queue : str, account : str,
@@ -1075,32 +1302,57 @@ def executeBatchJobCompat(machine: str, script_body: str,
     if not allow_unsafe and not checkSafePath(machine, job_run_dir):
         raise Exception("Path is not below the privileged directory")
 
-    resources = {
-        "node_count" : nodes,
-        "processes_per_node" : ranks_per_node,
-        "exclusive_node_use": exclusive,
-        "gpu_cores_per_process" : gpus_per_rank
-        }       
-        
+    _, machine_specification = _get_compute_client(machine)
     attributes = {
         "duration" : time,
         "account": account,
         "queue_name": queue
         }
-    spec = {
-        "executable": "date", 
-        "directory" : job_run_dir,
-        "name": name,
-        "inherit_environment": True,
-        "stdin_path" : None,
-        "stdout_path": f"{job_run_dir}/run.log",
-        "stderr_path": f"{job_run_dir}/err.log",
-        "resources" : resources,
-        "attributes" : attributes,
-        "launcher" : "srun",
-        "pre_launch" : f"cd {job_run_dir}\n" + script_body,  #hijack the pre_launch to run the actual batch script content to avoid the jobspec restrictions
-        "post_launch" : None
+    if custom_attributes := machine_specification.get("custom_attributes"):
+        attributes["custom_attributes"] = custom_attributes
+
+    if _configured_implementation_name(machine) == "alcf":
+        encoded_script = base64.b64encode(script_body.encode()).decode()
+        spec = {
+            "executable": "/bin/bash",
+            "arguments": [
+                "-lc",
+                f"cd {shlex.quote(job_run_dir)}; "
+                f"echo {encoded_script} | base64 -d | /bin/bash",
+            ],
+            "directory": job_run_dir,
+            "name": name,
+            "inherit_environment": True,
+            "stdin_path": None,
+            "stdout_path": f"{job_run_dir}/run.log",
+            "stderr_path": f"{job_run_dir}/err.log",
+            "resources": {
+                "node_count": nodes,
+                "exclusive_node_use": exclusive,
+            },
+            "attributes": attributes,
         }
+    else:
+        spec = {
+            "executable": "date",
+            "directory": job_run_dir,
+            "name": name,
+            "inherit_environment": True,
+            "stdin_path": None,
+            "stdout_path": f"{job_run_dir}/run.log",
+            "stderr_path": f"{job_run_dir}/err.log",
+            "resources": {
+                "node_count": nodes,
+                "processes_per_node": ranks_per_node,
+                "exclusive_node_use": exclusive,
+                "gpu_cores_per_process": gpus_per_rank,
+            },
+            "attributes": attributes,
+            "pre_launch": f"cd {job_run_dir}\n" + script_body,
+            "post_launch": None,
+        }
+        if launcher := machine_specification.get("launcher"):
+            spec["launcher"] = launcher
     
     rid = getResourceID(machine, rtype="compute")
 

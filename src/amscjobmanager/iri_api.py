@@ -4,7 +4,7 @@ import httpx
 from . import globals as manager_globals
 from .globals import checkSafePath, addSandboxDirs
 import json
-from typing import Literal, Union, List, Optional, Tuple
+from typing import Callable, Literal, Union, List, Optional, Tuple
 import time
 import pathlib
 import io
@@ -31,14 +31,21 @@ IRI_IMPLEMENTATIONS = {
         "status_resources_supports_filters": True,
         "storage_iriapi_group": "perlmutter",
         "storage_resource_type": "compute",
-        "storage_resource_paths": {"/": "login"},
-        "globus_filesystems": [
-            {
-                "filesystem_root": "/",
-                "endpoint": "dtn",
-                "globus_root": "/",
+        "filesystems": {
+            "perlmutter_login_filesystem": {
+                "description": "Perlmutter filesystem exposed through its login resource",
+                "storage_resource_paths": [
+                    {"filesystem_roots": ["/"], "resource_name": "login"},
+                ],
+                "globus_filesystems": [
+                    {
+                        "filesystem_roots": ["/"],
+                        "endpoint": "dtn",
+                        "globus_root": "/",
+                    },
+                ],
             },
-        ],
+        },
         "required_scopes": {
             "https://auth.globus.org/scopes/ed3e577d-f7f3-4639-b96e-ff5a8445d699/iri_api",
         },
@@ -47,6 +54,7 @@ IRI_IMPLEMENTATIONS = {
                 "iriapi_group": "perlmutter",
                 "iriapi_resource_name": "compute",
                 "launcher": "srun",
+                "mounted_filesystems": ["perlmutter_login_filesystem"],
                 "queues": [
                     ("debug", "max time 0.5 hours, max nodes 8"),
                     ("regular", "use for standard, production jobs or those too large for debug"),
@@ -55,6 +63,7 @@ IRI_IMPLEMENTATIONS = {
             "perlmutter_login": {
                 "iriapi_group": "perlmutter",
                 "iriapi_resource_name": "login",
+                "mounted_filesystems": ["perlmutter_login_filesystem"],
                 "queues": [],
             },
         },
@@ -66,50 +75,65 @@ IRI_IMPLEMENTATIONS = {
         "storage_iriapi_group": "storages",
         "storage_resource_type": "storage",
         "unsupported_filesystem_operations": {
+            #not implemented by API but can circumvent using Globus
             "uploadBytes": "globus",
             "downloadFile": "globus",
-            "downloadFileContents": "globus",
-            "pathStat": "skip",
+            "downloadFileContents": "globus",            
+            "pathStat": "skip", #no clear workaround
         },
-        "storage_resource_paths": {
-            "/flare": "Flare",
-            "/lus/flare": "Flare",
-            "/home": "Home",
-            "/eagle": "Eagle",
-            "/lus/eagle": "Eagle",
+        "filesystems": {
+            "alcf_home": {
+                "description": (
+                    "ALCF home filesystem mounted by Polaris, Sophia, and Crux; "
+                    "Aurora has a separate /home that IRI and Globus do not expose"
+                ),
+                "storage_resource_paths": [
+                    {"filesystem_roots": ["/home"], "resource_name": "Home"},
+                ],
+                "globus_filesystems": [
+                    {
+                        "filesystem_roots": ["/home"],
+                        "endpoint": "9032dd3a-e841-4687-a163-2720da731b5b",
+                        "globus_root": "/",
+                        "requires_data_access": True,
+                    },
+                ],
+            },
+            "alcf_flare": {
+                "description": "ALCF Flare project filesystem",
+                "storage_resource_paths": [
+                    {
+                        "filesystem_roots": ["/flare", "/lus/flare"],
+                        "resource_name": "Flare",
+                    },
+                ],
+                "globus_filesystems": [
+                    {
+                        "filesystem_roots": ["/lus/flare/projects", "/flare"],
+                        "endpoint": "f39a7a0f-5bfc-46ce-9615-ba9f8592814f",
+                        "globus_root": "/",
+                        "requires_data_access": True,
+                    },
+                ],
+            },
+            "alcf_eagle": {
+                "description": "ALCF Eagle project filesystem",
+                "storage_resource_paths": [
+                    {
+                        "filesystem_roots": ["/eagle", "/lus/eagle"],
+                        "resource_name": "Eagle",
+                    },
+                ],
+                "globus_filesystems": [
+                    {
+                        "filesystem_roots": ["/lus/eagle/projects", "/eagle"],
+                        "endpoint": "05d2c76a-e867-4f67-aa57-76edeb0beda0",
+                        "globus_root": "/",
+                        "requires_data_access": True,
+                    },
+                ],
+            },
         },
-        "globus_filesystems": [
-            {
-                "filesystem_root": "/home",
-                "endpoint": "9032dd3a-e841-4687-a163-2720da731b5b",
-                "globus_root": "/",
-                "requires_data_access": True,
-            },
-            {
-                "filesystem_root": "/lus/flare/projects",
-                "endpoint": "f39a7a0f-5bfc-46ce-9615-ba9f8592814f",
-                "globus_root": "/",
-                "requires_data_access": True,
-            },
-            {
-                "filesystem_root": "/flare",
-                "endpoint": "f39a7a0f-5bfc-46ce-9615-ba9f8592814f",
-                "globus_root": "/",
-                "requires_data_access": True,
-            },
-            {
-                "filesystem_root": "/lus/eagle/projects",
-                "endpoint": "05d2c76a-e867-4f67-aa57-76edeb0beda0",
-                "globus_root": "/",
-                "requires_data_access": True,
-            },
-            {
-                "filesystem_root": "/eagle",
-                "endpoint": "05d2c76a-e867-4f67-aa57-76edeb0beda0",
-                "globus_root": "/",
-                "requires_data_access": True,
-            },
-        ],
         "required_scopes": {
             "https://auth.globus.org/scopes/6be511f6-a071-471f-9bc0-02a0d0836723/filesystem",
         },
@@ -120,6 +144,7 @@ IRI_IMPLEMENTATIONS = {
                 "iriapi_group": "computes",
                 "iriapi_resource_name": "Polaris",
                 "custom_attributes": {"filesystems": "home:eagle"},
+                "mounted_filesystems": ["alcf_home", "alcf_eagle"],
                 "queues": [
                     ("debug", "1-2 nodes, 5 minutes-1 hour; max 24 nodes in use"),
                     ("debug-scaling", "1-10 nodes, 5 minutes-1 hour; max one job per user"),
@@ -133,6 +158,7 @@ IRI_IMPLEMENTATIONS = {
                 "iriapi_group": "computes",
                 "iriapi_resource_name": "Aurora",
                 "custom_attributes": {"filesystems": "flare"},
+                "mounted_filesystems": ["alcf_flare"],
                 "queues": [
                     ("debug", "1-2 nodes, 5 minutes-1 hour; max one job per user"),
                     ("debug-scaling", "2-256 nodes, 5 minutes-1 hour; max one job per user"),
@@ -201,6 +227,8 @@ iri_transfer_client = httpx.Client()
 IRI_GET_RETRYABLE_STATUS_CODES = {502, 503, 504, 500}
 IRI_GET_MAX_ATTEMPTS = 4
 IRI_GET_INITIAL_RETRY_DELAY_SECONDS = 1
+IRI_TASK_MAX_ATTEMPTS = 4
+IRI_TASK_INITIAL_RETRY_DELAY_SECONDS = 1
                
 def parse_scope_string(scope_string: str) -> set[str]:
     return set(scope_string.split()) if scope_string else set()
@@ -330,7 +358,13 @@ def _globus_data_access_collections() -> set[str]:
     collections = set()
     for implementation in iri_compute_clients:
         specification = IRI_IMPLEMENTATIONS[implementation]
-        for filesystem in specification.get("globus_filesystems", []):
+        filesystems = [
+            globus_filesystem
+            for machine in specification["machines"]
+            for filesystem in _mounted_filesystems(machine).values()
+            for globus_filesystem in filesystem.get("globus_filesystems", [])
+        ]
+        for filesystem in filesystems:
             if not filesystem.get("requires_data_access", False):
                 continue
             endpoint = filesystem["endpoint"]
@@ -460,6 +494,101 @@ def _get_compute_client(machine: str) -> tuple[IRIComputeClient, dict]:
             f"{machine!r}, is not configured"
         ) from exc
     return client, IRI_IMPLEMENTATIONS[implementation]["machines"][machine]
+
+
+def _mounted_filesystems(machine: str) -> dict[str, dict]:
+    """Return the named facility filesystems mounted on ``machine``."""
+    machine = machine.lower()
+    implementation = _configured_implementation_name(machine)
+    implementation_specification = IRI_IMPLEMENTATIONS[implementation]
+    filesystems = implementation_specification.get("filesystems", {})
+    mounted_names = implementation_specification["machines"][machine].get(
+        "mounted_filesystems", []
+    )
+    unknown_filesystems = set(mounted_names) - filesystems.keys()
+    if unknown_filesystems:
+        raise RuntimeError(
+            f"Machine {machine!r} references unknown filesystem definitions: "
+            f"{sorted(unknown_filesystems)}"
+        )
+    return {name: filesystems[name] for name in mounted_names}
+
+
+def _matching_filesystems(
+    machine: str, path: pathlib.PurePosixPath, mapping: str
+) -> dict[str, dict]:
+    """Return facility filesystems whose storage or Globus roots include path."""
+    machine = machine.lower()
+    implementation = _configured_implementation_name(machine)
+    matches = {}
+    for name, filesystem in IRI_IMPLEMENTATIONS[implementation].get(
+        "filesystems", {}
+    ).items():
+        if mapping == "storage_resource_paths":
+            roots = {
+                root
+                for storage_mapping in filesystem.get(mapping, [])
+                for root in storage_mapping["filesystem_roots"]
+            }
+        elif mapping == "globus_filesystems":
+            roots = {
+                root
+                for filesystem_mapping in filesystem.get(mapping, [])
+                for root in filesystem_mapping["filesystem_roots"]
+            }
+        else:
+            raise ValueError(f"Unknown filesystem mapping type: {mapping!r}")
+        if any(
+            path.is_relative_to(pathlib.PurePosixPath(root)) for root in roots
+        ):
+            matches[name] = filesystem
+    return matches
+
+
+def _machine_storage_resource_paths(machine: str) -> list[dict]:
+    """Return one IRI storage routing entry per alias on mounted filesystems."""
+    return [
+        {
+            **{
+                key: value
+                for key, value in storage_mapping.items()
+                if key != "filesystem_roots"
+            },
+            "filesystem_root": filesystem_root,
+        }
+        for filesystem in _mounted_filesystems(machine).values()
+        for storage_mapping in filesystem.get("storage_resource_paths", [])
+        for filesystem_root in storage_mapping["filesystem_roots"]
+    ]
+
+
+def _machine_globus_filesystems(machine: str) -> list[dict]:
+    """Return one Globus routing entry per alias on mounted filesystems."""
+    return [
+        {**globus_filesystem, "filesystem_root": filesystem_root}
+        for filesystem in _mounted_filesystems(machine).values()
+        for globus_filesystem in filesystem.get("globus_filesystems", [])
+        for filesystem_root in globus_filesystem["filesystem_roots"]
+    ]
+
+
+def _unmounted_filesystem_error(
+    machine: str, path: pathlib.PurePosixPath, mapping: str
+) -> ValueError | None:
+    """Describe a path belonging to a known but unmounted filesystem."""
+    matching_filesystems = _matching_filesystems(machine, path, mapping)
+    mounted_filesystems = _mounted_filesystems(machine)
+    unmounted_names = set(matching_filesystems) - set(mounted_filesystems)
+    if not unmounted_names:
+        return None
+    descriptions = "; ".join(
+        f"{name!r} ({matching_filesystems[name]['description']})"
+        for name in sorted(unmounted_names)
+    )
+    return ValueError(
+        f"Path {path!s} belongs to filesystem(s) not mounted on {machine!r}: "
+        f"{descriptions}"
+    )
 
 
 def _close_compute_clients():
@@ -758,18 +887,29 @@ def getResourceID(machine, rtype="compute", path: Optional[str] = None):
     if not path_object.is_absolute():
         raise ValueError(f"Storage path must be absolute: {path!r}")
 
-    storage_paths = IRI_IMPLEMENTATIONS[client.implementation]["storage_resource_paths"]
-    matching_roots = [
-        pathlib.PurePosixPath(root)
-        for root in storage_paths
-        if path_object.is_relative_to(pathlib.PurePosixPath(root))
+    storage_paths = _machine_storage_resource_paths(machine)
+    matching_storage_paths = [
+        storage_mapping
+        for storage_mapping in storage_paths
+        if path_object.is_relative_to(
+            pathlib.PurePosixPath(storage_mapping["filesystem_root"])
+        )
     ]
-    if not matching_roots:
+    if not matching_storage_paths:
+        if error := _unmounted_filesystem_error(
+            machine, path_object, "storage_resource_paths"
+        ):
+            raise error
         raise ValueError(
             f"No storage resource is configured for {machine}:{path_object}"
         )
-    selected_root = max(matching_roots, key=lambda root: len(root.parts))
-    resource_name = storage_paths[str(selected_root)]
+    selected_storage_path = max(
+        matching_storage_paths,
+        key=lambda mapping: len(
+            pathlib.PurePosixPath(mapping["filesystem_root"]).parts
+        ),
+    )
+    resource_name = selected_storage_path["resource_name"]
     if resource_name not in resource:
         raise RuntimeError(
             f"Configured storage resource {resource_name!r} is not available for "
@@ -796,18 +936,69 @@ def queryMachineStatus(machine: str, rtype="compute")-> bool:
     return j['current_status'] == 'up'
     
 
-def waitTask(machine, task_id, poll_freq=4):
+def waitTask(
+    machine: str,
+    task_id: str,
+    poll_freq: int = 4,
+):
+    """Wait for one task to reach a terminal state and return its response."""
     machine = machine.lower()
     j = get(machine, f"task/{task_id}")
-    
-    while(j['status'] == "active" or j['status'] == "pending"):
+
+    while j["status"] in {"active", "pending"}:
         time.sleep(poll_freq)
         j = get(machine, f"task/{task_id}")
-
-    if j['status'] != "completed":
-        raise Exception(f"Task not completed, response {json.dumps(j,indent=2)}")
-
     return j
+
+
+def submitTask(
+    machine: str,
+    action: Callable[[], str],
+    poll_freq: int = 4,
+):
+    """Submit an asynchronous action and retry unsuccessful attempts.
+
+    ``action`` must submit the request and return the IRI task ID. A failed
+    IRI task cannot be restarted, so retrying resubmits the original action.
+    Both submission/polling exceptions and all non-completed terminal task
+    states are retried.
+    """
+    machine = machine.lower()
+    retry_errors = []
+    for attempt in range(IRI_TASK_MAX_ATTEMPTS):
+        try:
+            task_id = action()
+            j = waitTask(machine, task_id, poll_freq)
+        except Exception as exc:
+            retry_errors.append(
+                f"attempt {attempt + 1}, submission/polling error: {exc}"
+            )
+            last_error = exc
+        else:
+            if j["status"] == "completed":
+                return j
+            retry_errors.append(
+                f"attempt {attempt + 1}, task {task_id}: "
+                f"{json.dumps(j, indent=2)}"
+            )
+            last_error = None
+
+        if attempt == IRI_TASK_MAX_ATTEMPTS - 1:
+            error = RuntimeError(
+                "Task failed after "
+                f"{IRI_TASK_MAX_ATTEMPTS} submission attempts: "
+                + "; ".join(retry_errors)
+            )
+            if last_error is not None:
+                raise error from last_error
+            raise error
+
+        delay = IRI_TASK_INITIAL_RETRY_DELAY_SECONDS * (2 ** attempt)
+        wfapiLog(
+            f"Unsuccessful task submission for {machine}; "
+            f"resubmitting in {delay} seconds"
+        )
+        time.sleep(delay)
 
 def remoteLs(machine: str, path: str)-> List[str]:
     """
@@ -827,9 +1018,11 @@ def remoteLs(machine: str, path: str)-> List[str]:
     
     rid = getResourceID(machine, rtype="storage", path=path)
 
-    j = get(machine, f"filesystem/ls/{rid}", params={"path" : path})
-    tid = j['task_id']
-    j = waitTask(machine, tid)
+    def submit_ls_task() -> str:
+        response = get(machine, f"filesystem/ls/{rid}", params={"path": path})
+        return response["task_id"]
+
+    j = submitTask(machine, submit_ls_task)
 
     files = [ f['name'] for f in j['result']['output'] ]
     return files
@@ -862,9 +1055,14 @@ def remoteChmod(machine: str, path : str, mode : str, allow_unsafe = False):
         raise Exception("Path must be absolute")
 
     rid = getResourceID(machine, rtype="storage", path=path)
-    j, status = put(machine, f"filesystem/chmod/{rid}", data={"path" : path, "mode" : mode})
-    tid = j['task_id']
-    j = waitTask(machine, tid)
+
+    def submit_chmod_task() -> str:
+        response, _ = put(
+            machine, f"filesystem/chmod/{rid}", data={"path": path, "mode": mode}
+        )
+        return response["task_id"]
+
+    j = submitTask(machine, submit_chmod_task)
     
     if j["status"] != "completed":        
         raise Exception(f"Permission change failed: {json.dumps(j,indent=2)}")        
@@ -906,13 +1104,19 @@ def remoteMkdir(machine: str, path: str, create_parents = True, allow_unsafe = F
         raise Exception("Path must be absolute")
 
     rid = getResourceID(machine, rtype="storage", path=path)
-        
-    j, status = post(machine, f"filesystem/mkdir/{rid}", data={"path" : path, "parent" : create_parents})
-    tid = j['task_id']
-    j = waitTask(machine, tid)
+
+    def submit_mkdir_task() -> str:
+        response, _ = post(
+            machine,
+            f"filesystem/mkdir/{rid}",
+            data={"path": path, "parent": create_parents},
+        )
+        return response["task_id"]
+
+    j = submitTask(machine, submit_mkdir_task)
 
     if j["status"] != "completed":
-        raise Exception(f"Directory creation failed, status: {status},  response: { json.dumps(j,indent=2) }")        
+        raise Exception(f"Directory creation failed, response: {json.dumps(j, indent=2)}")
 
 
 def pathStat(machine: str, remote_path: str, dereference=True)->str:
@@ -934,9 +1138,15 @@ def pathStat(machine: str, remote_path: str, dereference=True)->str:
     
     rid = getResourceID(machine, rtype="storage", path=remote_path)
 
-    j = get(machine, f"filesystem/stat/{rid}", params={'path' : remote_path, 'dereference' : dereference})
-    tid = j['task_id']
-    j = waitTask(machine, tid)
+    def submit_stat_task() -> str:
+        response = get(
+            machine,
+            f"filesystem/stat/{rid}",
+            params={"path": remote_path, "dereference": dereference},
+        )
+        return response["task_id"]
+
+    j = submitTask(machine, submit_stat_task)
 
     if j["status"] == "completed":
         return j["result"]["output"]
@@ -961,9 +1171,11 @@ def pathType(machine: str, remote_path: str)->str:
     
     rid = getResourceID(machine, rtype="storage", path=remote_path)
 
-    j = get(machine, f"filesystem/file/{rid}", params={'path' : remote_path})
-    tid = j['task_id']
-    j = waitTask(machine, tid)
+    def submit_file_task() -> str:
+        response = get(machine, f"filesystem/file/{rid}", params={"path": remote_path})
+        return response["task_id"]
+
+    j = submitTask(machine, submit_file_task)
 
     if j["status"] == "completed":
         return j["result"]["output"]
@@ -1011,13 +1223,20 @@ def uploadBytes(machine: str, remote_path: str, content: io.BytesIO, allow_unsaf
    
     rid = getResourceID(machine, rtype="storage", path=remote_path)
 
-    j, status = post(machine, f"filesystem/upload/{rid}", params={'path' : remote_path}, files={'file': content})
+    def submit_upload_task() -> str:
+        content.seek(0)
+        response, _ = post(
+            machine,
+            f"filesystem/upload/{rid}",
+            params={"path": remote_path},
+            files={"file": content},
+        )
+        return response["task_id"]
 
-    tid = j['task_id']
-    j = waitTask(machine, tid)
+    j = submitTask(machine, submit_upload_task)
 
     if j["status"] != "completed":
-        raise Exception(f"Upload failed, status: {status},  response: {json.dumps(j,indent=2)}")        
+        raise Exception(f"Upload failed, status: {j["status"]},  response: {json.dumps(j,indent=2)}")        
 
 
 def downloadFileContents(machine: str, remote_path: str)->str:
@@ -1059,9 +1278,13 @@ def downloadFileContents(machine: str, remote_path: str)->str:
     
     rid = getResourceID(machine, rtype="storage", path=remote_path)
 
-    j = get(machine, f"filesystem/download/{rid}", params={'path' : remote_path})
-    tid = j['task_id']
-    j = waitTask(machine, tid)
+    def submit_download_task() -> str:
+        response = get(
+            machine, f"filesystem/download/{rid}", params={"path": remote_path}
+        )
+        return response["task_id"]
+
+    j = submitTask(machine, submit_download_task)
     
     if j["status"] == "completed":
         return j["result"]["output"]
@@ -1492,13 +1715,16 @@ def _remote_globus_location(machine: str, remote_path: str) -> tuple[str, str]:
     if not path.is_absolute():
         raise ValueError(f"Remote Globus path must be absolute: {remote_path!r}")
 
-    implementation = _configured_implementation_name(machine)
-    filesystems = IRI_IMPLEMENTATIONS[implementation].get("globus_filesystems", [])
+    filesystems = _machine_globus_filesystems(machine)
     matches = [
         filesystem for filesystem in filesystems
         if path.is_relative_to(pathlib.PurePosixPath(filesystem["filesystem_root"]))
     ]
     if not matches:
+        if error := _unmounted_filesystem_error(
+            machine, path, "globus_filesystems"
+        ):
+            raise error
         raise ValueError(f"No Globus endpoint is configured for {machine}:{path}")
     filesystem = max(
         matches,

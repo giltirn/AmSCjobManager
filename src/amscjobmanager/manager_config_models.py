@@ -1,12 +1,17 @@
 from . import globals
 from pydantic import BaseModel, Field
 from pathlib import Path
+from typing import Literal
 
 if globals.api_impl in ("SPOOF", "IRI"):
     class IRIImplementationConfig(BaseModel):
+        token_type: Literal["globus", "amsc_pat"] = Field(
+            "globus",
+            description="Authentication method for this implementation's token file",
+        )
         token_path: str = Field(
             ...,
-            description="Path to this implementation's IRI compute/filesystem token file",
+            description="Path to a Globus token file or an AMSC PAT JSON file",
         )
 
     class GlobusPersonalEndpointConfig(BaseModel):
@@ -29,7 +34,10 @@ if globals.api_impl in ("SPOOF", "IRI"):
             ...,
             description="IRI compute/filesystem implementations to initialize",
         )
-        transferapi_key_path: str = Field(..., description="The path to the Data Transfer API key (will be created if doesn't yet exist)")
+        transferapi_key_path: str | None = Field(
+            None,
+            description="Optional Data Transfer API token path; omit to disable Globus transfer authentication",
+        )
         sandbox_directories: dict[str, list[str]] = Field(
             ...,
             description="A map of machine names to base sandbox directories",
@@ -51,6 +59,7 @@ if globals.api_impl in ("SPOOF", "IRI"):
             template = cls(
                 iri_implementations={
                     "nersc": IRIImplementationConfig(
+                        token_type="globus",
                         token_path="/path/to/nersc-iri-token.json"
                     ),
                 },

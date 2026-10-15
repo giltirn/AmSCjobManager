@@ -9,6 +9,7 @@ from pathlib import Path
 import globus_sdk
 from globus_sdk.exc import GlobusAPIError
 from globus_sdk.scopes import TransferScopes
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from ..logging import wfapiLog, wfapiUserQuery
 from .config import IRI_IMPLEMENTATIONS
@@ -16,20 +17,20 @@ from .state import IRIComputeClient, iri_compute_clients, tokens
 from .state import special_globus_endpoints
 from .filesystem import _mounted_filesystems
 
-def parse_scope_string(scope_string: str) -> set[str]:
+def parse_globus_scope_string(scope_string: str) -> set[str]:
     return set(scope_string.split()) if scope_string else set()
 
 def ensure_private_parent_dir(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     os.chmod(path.parent, 0o700)
 
-def load_tokens(token_file: Path) -> dict | None:
+def load_globus_tokens(token_file: Path) -> dict | None:
     if not token_file.exists():
         return None
     with token_file.open("r", encoding="utf-8") as f:
         return json.load(f)
 
-def save_tokens(token_file: Path, tokens: dict) -> None:
+def save_globus_tokens(token_file: Path, tokens: dict) -> None:
     ensure_private_parent_dir(token_file)
     tmp = token_file.with_suffix(".tmp")
     with os.fdopen(
@@ -41,7 +42,7 @@ def save_tokens(token_file: Path, tokens: dict) -> None:
     os.replace(tmp, token_file)
     os.chmod(token_file, stat.S_IRUSR | stat.S_IWUSR)
 
-def refresh_tokens(client: globus_sdk.NativeAppAuthClient, refresh_token: str, server: str) -> dict | None:
+def refresh_globus_tokens(client: globus_sdk.NativeAppAuthClient, refresh_token: str, server: str) -> dict | None:
     try:
         token_response = client.oauth2_refresh_token(refresh_token)
         return token_response.by_resource_server[server]
@@ -64,13 +65,13 @@ GLOBUS_CLIENT_ID = "eb18f0bb-4c76-43b5-88f1-750782be30ad" #Femtomeas, ckelly@bnl
 
 RESOURCE_SERVER = "auth.globus.org"
 
-def _implementation_scopes(implementation: str) -> set[str]:
+def _globus_implementation_scopes(implementation: str) -> set[str]:
     return set(IRI_IMPLEMENTATIONS[implementation]["required_scopes"])
 
 
-def interactive_login(client: globus_sdk.NativeAppAuthClient, implementation: str) -> dict:
+def interactive_globus_login(client: globus_sdk.NativeAppAuthClient, implementation: str) -> dict:
     resource_server = IRI_IMPLEMENTATIONS[implementation]["resource_server"]
-    required_scopes = _implementation_scopes(implementation)
+    required_scopes = _globus_implementation_scopes(implementation)
     client.oauth2_start_flow(
         requested_scopes=" ".join(sorted(required_scopes)),
         refresh_tokens=True,
@@ -97,29 +98,87 @@ def interactive_login(client: globus_sdk.NativeAppAuthClient, implementation: st
         
     return token_response.by_resource_server[resource_server]
 
-def setupIRIapiCompute(implementation: str, key_path: str) -> IRIComputeClient:
+class AMSCPersonalAccessToken(BaseModel):
+    """The JSON credential produced by the AMSC PAT generator."""
+
+    model_config = ConfigDict(strict=True, hide_input_in_errors=True)
+
+    project: str
+    description: str
+    token_id: str
+    token: str = Field(pattern=r"\S", repr=False)
+
+
+def _load_amsc_pat(key_path: str) -> dict[str, str]:
+    """Read a PAT without exposing its contents in validation errors."""
+    path = Path(key_path).expanduser()
+    try:
+        data = path.read_text(encoding="utf-8")
+    except (UnicodeError, OSError) as exc:
+        raise ValueError(
+            f"Cannot read AMSC PAT file {str(path)!r}: {type(exc).__name__}"
+        ) from None
+
+    try:
+        return AMSCPersonalAccessToken.model_validate_json(data).model_dump()
+    except ValidationError as exc:
+        raise ValueError(
+            f"Invalid AMSC PAT file {str(path)!r}: {exc}"
+        ) from None
+
+
+def setupIRIapiCompute(
+    implementation: str, key_path: str, token_type: str = "globus"
+) -> IRIComputeClient:
+    """Create an IRI client using the selected authentication method."""
     if implementation not in IRI_IMPLEMENTATIONS:
         raise ValueError(f"Unknown IRI implementation: {implementation!r}")
 
+    client_factories = {
+        "globus": _create_globus_client,
+        "amsc_pat": _create_amsc_pat_client,
+    }
+    try:
+        factory = client_factories[token_type]
+    except KeyError:
+        raise ValueError(f"Unknown IRI token type: {token_type!r}") from None
+    return factory(implementation, key_path)
+
+
+def _create_amsc_pat_client(implementation: str, key_path: str) -> IRIComputeClient:
+    """Create an IRI client from an AMSC personal access token file."""
+    pat = _load_amsc_pat(key_path)
+    return IRIComputeClient(
+        implementation,
+        pat["token"],
+        token_type="amsc_pat",
+        project=pat["project"],
+        description=pat["description"],
+        token_id=pat["token_id"],
+    )
+
+
+def _create_globus_client(implementation: str, key_path: str) -> IRIComputeClient:
+    """Create an IRI client through Globus login or token refresh."""
     auth_client = globus_sdk.NativeAppAuthClient(GLOBUS_CLIENT_ID)
     resource_server = IRI_IMPLEMENTATIONS[implementation]["resource_server"]
-    required_scopes = _implementation_scopes(implementation)
+    required_scopes = _globus_implementation_scopes(implementation)
 
     wfapiLog(f"setupIRIapi({implementation}) checking stored tokens at", key_path)
-    stored = load_tokens(Path(key_path))
+    stored = load_globus_tokens(Path(key_path))
     auth_data = None
     if stored and stored.get("refresh_token"):
-        auth_data = refresh_tokens(auth_client, stored["refresh_token"], resource_server)
+        auth_data = refresh_globus_tokens(auth_client, stored["refresh_token"], resource_server)
 
     if auth_data == None:
-        auth_data = interactive_login(auth_client, implementation)
+        auth_data = interactive_globus_login(auth_client, implementation)
 
-    granted = parse_scope_string(auth_data.get("scope", ""))
+    granted = parse_globus_scope_string(auth_data.get("scope", ""))
     missing = required_scopes - granted
     if missing:
         raise RuntimeError(f"Missing required scopes: {sorted(missing)}")
 
-    save_tokens(Path(key_path), auth_data)
+    save_globus_tokens(Path(key_path), auth_data)
 
     expires_at = auth_data.get("expires_at_seconds")
     if expires_at:
@@ -157,7 +216,7 @@ def _globus_data_access_collections() -> set[str]:
             collections.add(special_globus_endpoints.get(endpoint, endpoint))
     return collections
 
-def interactive_login_transfer(client: globus_sdk.NativeAppAuthClient) -> dict:
+def interactive_globus_transfer_login(client: globus_sdk.NativeAppAuthClient) -> dict:
     scope = globus_sdk.Scope(IRI_TRANSFER_DEFAULT_SCOPE)
     mapped_collections = _globus_data_access_collections()
     
@@ -190,9 +249,9 @@ def interactive_login_transfer(client: globus_sdk.NativeAppAuthClient) -> dict:
         except Exception as e:
             continue
 
-    return _transfer_tokens_from_response(token_response)
+    return _globus_transfer_tokens_from_response(token_response)
 
-def _transfer_tokens_from_response(token_response):
+def _globus_transfer_tokens_from_response(token_response):
     """Extract the IRI transfer-service and Globus Transfer API tokens."""
     resource_tokens = token_response.by_resource_server
     if IRI_TRANSFER_RESOURCE_SERVER not in resource_tokens:
@@ -210,40 +269,40 @@ def _transfer_tokens_from_response(token_response):
         resource_tokens["transfer.api.globus.org"],
     )
 
-def refresh_transfer_tokens(client: globus_sdk.NativeAppAuthClient, stored_tokens: dict):
+def refresh_globus_transfer_tokens(client: globus_sdk.NativeAppAuthClient, stored_tokens: dict):
     """Refresh the separately persisted IRI and Globus Transfer API tokens."""
     globus_auth_data = stored_tokens.get("globus_transfer")
     if not globus_auth_data or not globus_auth_data.get("refresh_token"):
         return None
 
-    iri_auth_data = refresh_tokens(
+    iri_auth_data = refresh_globus_tokens(
         client, stored_tokens["refresh_token"], IRI_TRANSFER_RESOURCE_SERVER
     )
-    globus_auth_data = refresh_tokens(
+    globus_auth_data = refresh_globus_tokens(
         client, globus_auth_data["refresh_token"], "transfer.api.globus.org"
     )
     if iri_auth_data is None or globus_auth_data is None:
         return None
     return iri_auth_data, globus_auth_data
 
-def setupIRIapiTransfer(key_path):
+def setupIRIapiGlobusTransfer(key_path):
     client =  globus_sdk.NativeAppAuthClient(GLOBUS_CLIENT_ID)
 
-    wfapiLog("setupIRIapiTransfer checking stored tokens at",key_path)
-    stored = load_tokens(Path(key_path))
+    wfapiLog("setupIRIapiGlobusTransfer checking stored tokens at",key_path)
+    stored = load_globus_tokens(Path(key_path))
     auth_data = None
     globus_auth_data = None
     if stored and stored.get("refresh_token"):
-        refreshed = refresh_transfer_tokens(client, stored)
+        refreshed = refresh_globus_transfer_tokens(client, stored)
         if refreshed is not None:
             auth_data, globus_auth_data = refreshed
 
     if auth_data == None:
-        auth_data, globus_auth_data = interactive_login_transfer(client)
+        auth_data, globus_auth_data = interactive_globus_transfer_login(client)
 
     stored_tokens = dict(auth_data)
     stored_tokens["globus_transfer"] = globus_auth_data
-    save_tokens(Path(key_path), stored_tokens)
+    save_globus_tokens(Path(key_path), stored_tokens)
 
     expires_at = auth_data.get("expires_at_seconds")
     if expires_at:

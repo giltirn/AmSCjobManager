@@ -33,12 +33,16 @@ class IRIComputeClient:
     """Authenticated compute/filesystem connection for one IRI implementation."""
 
     implementation: str
-    access_token: str
+    access_token: str = field(repr=False)
     http_client: httpx.Client = field(default_factory=httpx.Client)
     resource_map: dict[str, dict[str, Union[str, dict[str, str]]]] = field(
         default_factory=dict
     )
     project_map: dict[str, dict[str, str]] = field(default_factory=dict)
+    token_type: str = "globus"
+    project: str | None = None
+    description: str | None = None
+    token_id: str | None = None
 
     def close(self):
         self.http_client.close()
@@ -95,15 +99,17 @@ def _configure_personal_globus_endpoint(configuration) -> None:
     }
     special_globus_endpoints["personal"] = globus_personal_endpoint["endpoint_uuid"]
 
-def setupWorkflowAgent(iri_implementations: dict, iriapi_transfer_key_path: str,
+def setupWorkflowAgent(iri_implementations: dict, iriapi_transfer_key_path: str | None,
                        work_dir: dict, globus_personal_endpoint_config=None):
     """
     Setup the workflow agent
     Args:
        iri_implementations: Mapping of implementation names to configuration
-           objects containing a token_path. Each implementation stores its
-           authentication token independently.
-       iriapi_transfer_key_path: The full path to the IRI transfer API key file. This will be generated automatically if it doesn't currently exist.
+           objects containing a token_path and an optional token_type
+           (globus by default, or amsc_pat). Implementations may share a PAT.
+       iriapi_transfer_key_path: Optional IRI transfer token file path. None
+           disables transfer authentication; a configured file is generated
+           if it does not currently exist.
        work_dir: The remote work directories, by machine as a dict, e.g. { "perlmutter" : "/path/to/dir" }. Use a list of directories if more than one. The API is only allowed to modify the contents of files within this directory or its children
        globus_personal_endpoint_config: Optional personal endpoint UUID and
            staging-directory paths used by blocking Globus file transfers.
@@ -123,14 +129,21 @@ def setupWorkflowAgent(iri_implementations: dict, iriapi_transfer_key_path: str,
             if hasattr(settings, "token_path")
             else settings["token_path"]
         )
+        token_type = (
+            settings.token_type
+            if hasattr(settings, "token_type")
+            else settings.get("token_type", "globus")
+        )
         iri_compute_clients[implementation] = setupIRIapiCompute(
-            implementation, token_path
+            implementation, token_path, token_type=token_type
         )
 
     normalized_work_dir = {
         machine.lower(): directory for machine, directory in work_dir.items()
     }
-    setupIRIapiTransfer(iriapi_transfer_key_path)
+    tokens.update(iriapi_transfer_base=None, globus_transfer=None)
+    if iriapi_transfer_key_path is not None:
+        setupIRIapiGlobusTransfer(iriapi_transfer_key_path)
     configured_machines = {"local"}
     for implementation in iri_compute_clients:
         configured_machines.update(
@@ -163,5 +176,5 @@ def _personal_staging_configuration() -> dict[str, str]:
 
 
 # Import after the connection state is defined: auth uses that shared state.
-from .auth import setupIRIapiCompute, setupIRIapiTransfer
+from .auth import setupIRIapiCompute, setupIRIapiGlobusTransfer
 from .filesystem import _filesystem_operation_handling

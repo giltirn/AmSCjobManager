@@ -1,0 +1,419 @@
+"""IRI filesystem operations and their configured Globus fallbacks."""
+
+import base64
+import io
+import json
+import pathlib
+import re
+import shutil
+from typing import List
+
+from .. import local_api
+from ..globals import checkSafePath
+from ..logging import wfapiLog
+from .config import IRI_IMPLEMENTATIONS
+from .state import _configured_implementation_name, _get_compute_client, _require_globus_fallback
+from .rest import get, post, put, submitTask
+
+
+def _mounted_filesystems(machine: str) -> dict[str, dict]:
+    """Return the named facility filesystems mounted on ``machine``."""
+    machine = machine.lower()
+    implementation = _configured_implementation_name(machine)
+    implementation_specification = IRI_IMPLEMENTATIONS[implementation]
+    filesystems = implementation_specification.get("filesystems", {})
+    mounted_names = implementation_specification["machines"][machine].get(
+        "mounted_filesystems", []
+    )
+    unknown_filesystems = set(mounted_names) - filesystems.keys()
+    if unknown_filesystems:
+        raise RuntimeError(
+            f"Machine {machine!r} references unknown filesystem definitions: "
+            f"{sorted(unknown_filesystems)}"
+        )
+    return {name: filesystems[name] for name in mounted_names}
+
+
+def _matching_filesystems(
+    machine: str, path: pathlib.PurePosixPath, mapping: str
+) -> dict[str, dict]:
+    """Return facility filesystems whose storage or Globus roots include path."""
+    machine = machine.lower()
+    implementation = _configured_implementation_name(machine)
+    matches = {}
+    for name, filesystem in IRI_IMPLEMENTATIONS[implementation].get(
+        "filesystems", {}
+    ).items():
+        if mapping == "storage_resource_paths":
+            roots = {
+                root
+                for storage_mapping in filesystem.get(mapping, [])
+                for root in storage_mapping["filesystem_roots"]
+            }
+        elif mapping == "globus_filesystems":
+            roots = {
+                root
+                for filesystem_mapping in filesystem.get(mapping, [])
+                for root in filesystem_mapping["filesystem_roots"]
+            }
+        else:
+            raise ValueError(f"Unknown filesystem mapping type: {mapping!r}")
+        if any(
+            path.is_relative_to(pathlib.PurePosixPath(root)) for root in roots
+        ):
+            matches[name] = filesystem
+    return matches
+
+
+def _machine_storage_resource_paths(machine: str) -> list[dict]:
+    """Return one IRI storage routing entry per alias on mounted filesystems."""
+    return [
+        {
+            **{
+                key: value
+                for key, value in storage_mapping.items()
+                if key != "filesystem_roots"
+            },
+            "filesystem_root": filesystem_root,
+        }
+        for filesystem in _mounted_filesystems(machine).values()
+        for storage_mapping in filesystem.get("storage_resource_paths", [])
+        for filesystem_root in storage_mapping["filesystem_roots"]
+    ]
+
+
+def _unmounted_filesystem_error(
+    machine: str, path: pathlib.PurePosixPath, mapping: str
+) -> ValueError | None:
+    """Describe a path belonging to a known but unmounted filesystem."""
+    matching_filesystems = _matching_filesystems(machine, path, mapping)
+    mounted_filesystems = _mounted_filesystems(machine)
+    unmounted_names = set(matching_filesystems) - set(mounted_filesystems)
+    if not unmounted_names:
+        return None
+    descriptions = "; ".join(
+        f"{name!r} ({matching_filesystems[name]['description']})"
+        for name in sorted(unmounted_names)
+    )
+    return ValueError(
+        f"Path {path!s} belongs to filesystem(s) not mounted on {machine!r}: "
+        f"{descriptions}"
+    )
+
+def _filesystem_operation_handling(machine: str, operation: str) -> str | None:
+    implementation = _configured_implementation_name(machine)
+    return IRI_IMPLEMENTATIONS[implementation].get(
+        "unsupported_filesystem_operations", {}
+    ).get(operation)
+
+
+def _require_filesystem_operation(machine: str, operation: str) -> None:
+    if _filesystem_operation_handling(machine, operation) == "skip":
+        implementation = _configured_implementation_name(machine)
+        raise NotImplementedError(
+            f"{operation} is not implemented by the {implementation!r} IRI API"
+        )
+
+
+
+def remoteLs(machine: str, path: str)-> List[str]:
+    """
+    Query the contents of a path on a given machine
+    Args:
+       machine - The name of the machine. Valid values are 'Perlmutter'
+       path - The absolute path
+    Return:
+       A list of files in the directory
+
+    TODO: Explore behavior of trailing slashes, and the fact that the directory name itself seems to be listed among the directory content; should we unify the behavior with SFAPI?
+    """
+    machine = machine.lower()
+    _get_compute_client(machine)
+
+    wfapiLog(f"Listing contents of directory {machine}:{path}")
+    
+    rid = getResourceID(machine, rtype="storage", path=path)
+
+    def submit_ls_task() -> str:
+        response = get(machine, f"filesystem/ls/{rid}", params={"path": path})
+        return response["task_id"]
+
+    j = submitTask(machine, submit_ls_task)
+
+    files = [ f['name'] for f in j['result']['output'] ]
+    return files
+
+
+
+
+
+def remoteChmod(machine: str, path : str, mode : str, allow_unsafe = False):
+    machine = machine.lower()
+    wfapiLog(f"Changing permissions of file {machine}:{path} to {mode}")
+    
+    if not allow_unsafe and not checkSafePath(machine, path):
+        raise Exception("Path is not a subdirectory of the sandbox path")
+
+    if not pathlib.Path(path).is_absolute():
+        raise Exception("Path must be absolute")
+
+    rid = getResourceID(machine, rtype="storage", path=path)
+
+    def submit_chmod_task() -> str:
+        response, _ = put(
+            machine, f"filesystem/chmod/{rid}", data={"path": path, "mode": mode}
+        )
+        return response["task_id"]
+
+    j = submitTask(machine, submit_chmod_task)
+    
+    if j["status"] != "completed":        
+        raise Exception(f"Permission change failed: {json.dumps(j,indent=2)}")        
+    
+
+
+    
+def remoteMkdir(machine: str, path: str, create_parents = True, allow_unsafe = False):
+    """
+    Create a directory on the remote machine. This is an unsafe action as it is not confined to the sandbox directory, and thus should not be exposed as a tool without safeguards
+    Args:
+           allow_unsafe - Allow uploading to directories other than within the sandbox
+    """
+    machine = machine.lower()
+    if machine == "local":
+        return local_api.localMkdir(path, create_parents, allow_unsafe)
+
+
+    wfapiLog(f"Creating directory {machine}:{path}")
+    
+    if not allow_unsafe and not checkSafePath(machine, path):
+        raise Exception(f"Path {path} is not a subdirectory of the sandbox path")
+
+    if not pathlib.Path(path).is_absolute():
+        raise Exception("Path must be absolute")
+
+    rid = getResourceID(machine, rtype="storage", path=path)
+
+    def submit_mkdir_task() -> str:
+        response, _ = post(
+            machine,
+            f"filesystem/mkdir/{rid}",
+            data={"path": path, "parent": create_parents},
+        )
+        return response["task_id"]
+
+    j = submitTask(machine, submit_mkdir_task)
+
+    if j["status"] != "completed":
+        raise Exception(f"Directory creation failed, response: {json.dumps(j, indent=2)}")
+
+
+def pathStat(machine: str, remote_path: str, dereference=True)->str:
+    """
+    Run stat on the provided path
+    Args:
+       machine - The name of the machine.
+       remote_path - The absolute path on the remote machine
+    """
+    machine = machine.lower()    
+
+    if machine == "local":
+        raise NotImplementedError()
+
+    _require_filesystem_operation(machine, "pathStat")
+       
+    if not pathlib.Path(remote_path).is_absolute():
+        raise Exception("Path must be absolute")
+    
+    rid = getResourceID(machine, rtype="storage", path=remote_path)
+
+    def submit_stat_task() -> str:
+        response = get(
+            machine,
+            f"filesystem/stat/{rid}",
+            params={"path": remote_path, "dereference": dereference},
+        )
+        return response["task_id"]
+
+    j = submitTask(machine, submit_stat_task)
+
+    if j["status"] == "completed":
+        return j["result"]["output"]
+    else:
+        raise Exception(f"Download failed, response: { json.dumps(j,indent=2)}")        
+
+
+def pathType(machine: str, remote_path: str)->str:
+    """
+    Run 'file' on the provided path, identifying whether a file or directory
+    Args:
+       machine - The name of the machine. Valid values are 'Perlmutter'
+       remote_path - The absolute path on the remote machine
+    """
+    machine = machine.lower()    
+
+    if machine == "local":
+        return local_api.localPathType(remote_path)
+
+    if not pathlib.Path(remote_path).is_absolute():
+        raise Exception("Path must be absolute")
+    
+    rid = getResourceID(machine, rtype="storage", path=remote_path)
+
+    def submit_file_task() -> str:
+        response = get(machine, f"filesystem/file/{rid}", params={"path": remote_path})
+        return response["task_id"]
+
+    j = submitTask(machine, submit_file_task)
+
+    if j["status"] == "completed":
+        return j["result"]["output"]
+    else:
+        raise Exception(f"Download failed, response: { json.dumps(j,indent=2)}")        
+
+    
+
+
+def uploadBytes(machine: str, remote_path: str, content: io.BytesIO, allow_unsafe = False):
+    """
+    Upload file contents as bytes to a remote path (max 5242880 Bytes)
+    Args:
+       machine - The name of the machine. Valid values are 'Perlmutter'
+       remote_path - The absolute path to the resulting file on the remote machine
+       content - The file contents as binary
+       allow_unsafe - Allow uploading to directories other than within the sandbox
+    """
+    machine = machine.lower()
+    if machine == "local":
+        return local_api.writeBytes(remote_path, content, allow_unsafe)
+
+    wfapiLog(f"Uploading binary data to {machine}:{remote_path}")
+    
+    if not allow_unsafe and not checkSafePath(machine, remote_path):
+        raise Exception("Path is not below the privileged directory")
+    
+    if not pathlib.Path(remote_path).is_absolute():
+        raise Exception("Path must be absolute")
+
+    if _filesystem_operation_handling(machine, "uploadBytes") == "globus":
+        _require_globus_fallback(machine, "uploadBytes")
+        staging = _personal_staging_configuration()
+        remote_filename = pathlib.PurePosixPath(remote_path).name
+        if not remote_filename:
+            raise ValueError(f"Remote upload path must name a file: {remote_path!r}")
+        temporary_directory, _ = _temporary_staging_directory(staging)
+        staging_file = temporary_directory / remote_filename
+        try:
+            with staging_file.open("wb") as file_handle:
+                file_handle.write(content.getbuffer())
+            return uploadFileGlobus(machine, remote_path, str(staging_file))
+        finally:
+            shutil.rmtree(temporary_directory, ignore_errors=True)
+   
+    rid = getResourceID(machine, rtype="storage", path=remote_path)
+
+    def submit_upload_task() -> str:
+        content.seek(0)
+        response, _ = post(
+            machine,
+            f"filesystem/upload/{rid}",
+            params={"path": remote_path},
+            files={"file": content},
+        )
+        return response["task_id"]
+
+    j = submitTask(machine, submit_upload_task)
+
+    if j["status"] != "completed":
+        raise Exception(f"Upload failed, status: {j["status"]},  response: {json.dumps(j,indent=2)}")        
+
+
+def downloadFileContents(machine: str, remote_path: str)->str:
+    """
+    Download a (small) remote file. Returns the file contents as a string (base64 or plaintext encoded, depending on the file)
+    Args:
+       machine - The name of the machine.
+       remote_path - The absolute path on the remote machine
+    """
+    machine = machine.lower()
+
+    _require_filesystem_operation(machine, "downloadFileContents")
+
+    if _filesystem_operation_handling(machine, "downloadFileContents") == "globus":
+        _require_globus_fallback(machine, "downloadFileContents")
+        staging = _personal_staging_configuration()
+        remote_filename = pathlib.PurePosixPath(remote_path).name
+        if not remote_filename:
+            raise ValueError(f"Remote download path must name a file: {remote_path!r}")
+        temporary_directory, _ = _temporary_staging_directory(staging)
+        staging_file = temporary_directory / remote_filename
+        try:
+            downloadFileGlobus(machine, remote_path, str(staging_file))
+            file_description = local_api.localPathType(str(staging_file)).lower()
+            contents = staging_file.read_bytes()
+            if "text" in file_description or "empty" in file_description:
+                try:
+                    return contents.decode("utf-8")
+                except UnicodeDecodeError:
+                    pass
+            return base64.b64encode(contents).decode("ascii")
+        finally:
+            shutil.rmtree(temporary_directory, ignore_errors=True)
+
+    wfapiLog(f"Downloading file contents {machine}:{remote_path}")    
+
+    if not pathlib.Path(remote_path).is_absolute():
+        raise Exception("Path must be absolute")
+    
+    rid = getResourceID(machine, rtype="storage", path=remote_path)
+
+    def submit_download_task() -> str:
+        response = get(
+            machine, f"filesystem/download/{rid}", params={"path": remote_path}
+        )
+        return response["task_id"]
+
+    j = submitTask(machine, submit_download_task)
+    
+    if j["status"] == "completed":
+        return j["result"]["output"]
+    else:
+        raise Exception(f"Download failed, response: { json.dumps(j,indent=2)}")        
+
+def downloadFile(machine: str, local_path_out: str, remote_path_in: str)->str:
+    from ..api_general import isDirectory
+
+    if machine.lower() != "local" and _filesystem_operation_handling(
+        machine, "downloadFile"
+    ) == "globus":
+        _require_globus_fallback(machine, "downloadFile")
+        return downloadFileGlobus(machine, remote_path_in, local_path_out)
+
+    if isDirectory("local", local_path_out):
+        local_path_out = local_api.getAbsoluteLocalPath(local_path_out) + "/" + pathlib.Path(remote_path_in).name
+
+    if machine.lower() == "local":
+        wfapiLog(f"Copying local file {remote_path_in} to {local_path_out}")    
+        local_api.localCopyFile(local_path_out, remote_path_in, allow_unsafe=True)
+    else:
+        content = downloadFileContents(machine, remote_path_in)
+        #Need to manually identify whether it is text or base64-binary encoded
+        if re.match(r'^([A-Za-z0-9+/]{4})*([A-Za-z0-9+/]{3}=|[A-Za-z0-9+/]{2}==)?$', content[:4096]):
+            wfapiLog(f"Writing *binary* file contents to {local_path_out}")    
+            with open(local_path_out, 'wb') as f:
+                f.write(base64.b64decode(content))
+        else:
+            wfapiLog(f"Writing *plaintext* file contents to {local_path_out}")    
+            with open(local_path_out, 'w') as f:
+                f.write(content)
+    return local_path_out
+
+
+# Resolve cross-module operations after the routing helpers above exist.
+from .resources import getResourceID
+from .globus import (
+    _personal_staging_configuration,
+    _temporary_staging_directory,
+    downloadFileGlobus,
+    uploadFileGlobus,
+)

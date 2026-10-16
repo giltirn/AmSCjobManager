@@ -2,6 +2,7 @@ import random
 import time as timemodule
 import io
 import shlex
+from pathlib import Path, PurePosixPath
 from . import globals
 from .logging import wfapiLog
 from typing import Literal, Union, List, Optional, Tuple
@@ -82,7 +83,7 @@ def _recordSpoofActionEvent(event, action_type, api_key, name=None, details=None
 def _fakeGlobusCopy(label=None, details=None):
     #Assign the transfer a fake active time
     active_time = (
-        random.randint(3, 8)
+        random.randint(1, 3)
         if _spoof_completion_delay is None
         else _spoof_completion_delay
     )
@@ -148,6 +149,39 @@ def remoteMkdir(machine: str, path: str, create_parents = True, allow_unsafe = F
     wfapiLog(f"Creating directory {machine}:{path}")
     return 1
 
+def remoteLs(machine: str, path: str) -> List[str]:
+    """Return fixed illustrative filenames, regardless of earlier filesystem calls."""
+    wfapiLog(f"Listing fake directory {machine}:{path}")
+    return [str(PurePosixPath(path) / name) for name in
+            ("calculate.py", "settings.json", "result.txt", "run.log", "err.log")]
+
+def remoteChmod(machine: str, path: str, mode: str, allow_unsafe=False):
+    """Log a fake permission change without modifying any files."""
+    wfapiLog(f"Changing fake permissions of {machine}:{path} to {mode}")
+
+def pathStat(machine: str, remote_path: str, dereference=True) -> str:
+    """Return illustrative stat output without inspecting a remote filesystem."""
+    wfapiLog(f"Inspecting fake file metadata {machine}:{remote_path}")
+    return f"File: {remote_path}\nSize: 128\nAccess: (0644/-rw-r--r--)\nUid: 1000\nGid: 1000"
+
+def pathType(machine: str, remote_path: str) -> str:
+    """Guess a fake remote type by suffix; use the real file command locally.
+
+    Remote paths without a filename suffix are treated as directories. This
+    deliberately does not track existence or represent actual file contents.
+    """
+    if machine.lower() == "local":
+        from .local_api import localPathType
+        return localPathType(remote_path)
+    wfapiLog(f"Identifying fake path {machine}:{remote_path}")
+    kind = "ASCII text" if PurePosixPath(remote_path).suffix else "directory"
+    return f"{remote_path}: {kind}"
+
+def downloadFileContents(machine: str, remote_path: str) -> str:
+    """Return placeholder contents, not data produced by the simulated compute job."""
+    wfapiLog(f"Downloading fake file contents {machine}:{remote_path}")
+    return "FAKE CONTENTS\n"
+
 def uploadBytes(machine: str, remote_path: str, content: io.BytesIO, allow_unsafe = False) -> bool:
     wfapiLog(f"Uploading binary data to {machine}:{remote_path}")
     return True
@@ -207,7 +241,7 @@ def executeBatchJobCompat(machine: str, script_body: str,
    
     #Assign the job a fake active time
     active_time = (
-        random.randint(3, 8)
+        random.randint(1, 3)
         if _spoof_completion_delay is None
         else _spoof_completion_delay
     )
@@ -253,9 +287,13 @@ def findJobByName(machine: str, name: str) -> str | None:
             return job_id
     return None
 
-def downloadFile(machine: str, remote_path: str)->str:
-    wfapiLog(f"Downloading file {machine}:{remote_path}")
-    return "FAKE CONTENTS"
+def downloadFile(machine: str, local_path_out: str, remote_path_in: str) -> str:
+    """Write placeholder contents locally using the same signature as the IRI API."""
+    output_path = Path(local_path_out).expanduser()
+    if output_path.is_dir():
+        output_path /= PurePosixPath(remote_path_in).name
+    output_path.write_text(downloadFileContents(machine, remote_path_in), encoding="utf-8")
+    return str(output_path)
 
 def remoteRun(machine: str, args : str | List[str] ):
     cmd = "bash -c \""

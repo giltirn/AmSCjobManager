@@ -7,6 +7,7 @@ import os
 os.environ["AMSC_JOB_MANAGER_API_IMPL"] = "SPOOF"
 
 import unittest
+from unittest.mock import call, patch
 
 from amscjobmanager import spoof_api
 from amscjobmanager.action_manager import ActionStatus
@@ -24,6 +25,24 @@ class SpoofWorkflowTests(unittest.TestCase):
 
     def tearDown(self):
         self.job_data.conn.close()
+
+    def test_default_compute_and_transfer_durations_are_random_and_not_immediate(self):
+        spoof_api.resetSpoofActionState()
+        with patch.object(spoof_api.random, "randint", side_effect=[1, 3]) as duration, patch.object(spoof_api.timemodule, "time", return_value=100) as clock:
+            compute_id = spoof_api.executeJob(
+                "perlmutter", "/bin/true", [], nodes=1, ranks_per_node=1,
+                gpus_per_rank=1, time="300", queue="debug", account="my_proj1",
+                job_run_dir="/fake/run",
+            )
+            transfer_id = spoof_api.globusCopy("perlmutter", "/fake/destination/", "polaris", "/fake/source.txt")
+            self.assertEqual(duration.call_args_list, [call(1, 3), call(1, 3)])
+            self.assertEqual(spoof_api.getJobState("perlmutter", compute_id), "active")
+            self.assertEqual(spoof_api.globusTransferStatus(transfer_id), "ACTIVE")
+            clock.return_value = 101
+            self.assertEqual(spoof_api.getJobState("perlmutter", compute_id), "completed")
+            self.assertEqual(spoof_api.globusTransferStatus(transfer_id), "ACTIVE")
+            clock.return_value = 103
+            self.assertEqual(spoof_api.globusTransferStatus(transfer_id), "SUCCEEDED")
 
     @staticmethod
     def _compute_action(marker):

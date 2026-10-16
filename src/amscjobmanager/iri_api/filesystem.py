@@ -11,7 +11,7 @@ from typing import List
 from .. import local_api
 from ..globals import checkSafePath
 from ..logging import wfapiLog
-from .config import IRI_IMPLEMENTATIONS
+from .config import IRI_IMPLEMENTATIONS, getImplementationAPIVersion
 from .state import getMachineImplementation, requireGlobusFallback
 from .rest import get, post, put, submitTask
 
@@ -122,15 +122,24 @@ def remoteLs(machine: str, path: str)-> List[str]:
     Return:
        A list of files in the directory
 
+    Uses GET with query parameters for API v1, or POST with a JSON body for
+    API v2. Both versions submit an asynchronous directory-listing task.
+
     TODO: Explore behavior of trailing slashes, and the fact that the directory name itself seems to be listed among the directory content; should we unify the behavior with SFAPI?
     """
     machine = machine.lower()
     wfapiLog(f"Listing contents of directory {machine}:{path}")
     
     rid = getResourceID(machine, rtype="storage", path=path)
+    version = getImplementationAPIVersion(getMachineImplementation(machine))
 
     def submit_ls_task() -> str:
-        response = get(machine, f"filesystem/ls/{rid}", params={"path": path})
+        if version == 2:
+            response, status = post(machine, f"filesystem/ls/{rid}", data={"path": path})
+            if not 200 <= status < 300:
+                raise RuntimeError(f"Directory listing submission failed with HTTP {status}: {json.dumps(response)}")
+        else:
+            response = get(machine, f"filesystem/ls/{rid}", params={"path": path})
         return response["task_id"]
 
     j = submitTask(machine, submit_ls_task)

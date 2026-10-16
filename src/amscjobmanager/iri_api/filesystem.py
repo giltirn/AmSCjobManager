@@ -117,7 +117,7 @@ def remoteLs(machine: str, path: str)-> List[str]:
     """
     Query the contents of a path on a given machine
     Args:
-       machine - The name of the machine. Valid values are 'Perlmutter'
+       machine - The name of the machine.
        path - The absolute path
     Return:
        A list of files in the directory

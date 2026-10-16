@@ -9,6 +9,17 @@ from typing import Literal, Union, List, Optional, Tuple
 def listSpecialGlobusEndpoints():
     return ["fake_endpoint1","fake_endpoint2"]
 
+def getUsername(machine: str | None = None, *, implementation: str | None = None) -> str:
+    """Return a simulated remote username, or run whoami for the local machine."""
+    if machine is not None and machine.lower() == "local":
+        if implementation is not None:
+            raise ValueError("Cannot specify an IRI implementation for machine='local'")
+        from .local_api import localUsername
+        return localUsername()
+    if machine is None and implementation is None:
+        raise ValueError("Specify machine or implementation")
+    return "spoof_user"
+
 def setupWorkflowAgentFromConfig(config) -> dict:
     """Initialize the spoof agent from a manager configuration and return sandboxes."""
     return setupWorkflowAgent(

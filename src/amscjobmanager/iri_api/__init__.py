@@ -22,6 +22,7 @@ from .rest import delete, get, post, put, submitTask, waitTask
 from .resources import (
     getKnownMachines, getMachineQueues, getProjectAllocation, getResource,
     getResourceID, getResources, getUserAccountProjects, getUserProjectIDmap,
+    getUsername,
     queryMachineStatus,
 )
 from .filesystem import (
@@ -49,7 +50,7 @@ __all__ = [
     "get", "put", "post", "delete", "submitTask", "waitTask",
     "getKnownMachines", "getMachineQueues", "getProjectAllocation",
     "getResource", "getResourceID", "getResources", "getUserAccountProjects",
-    "getUserProjectIDmap", "queryMachineStatus", "downloadFile",
+    "getUserProjectIDmap", "getUsername", "queryMachineStatus", "downloadFile",
     "downloadFileContents", "getMountedFilesystems", "getStorageResourcePaths",
     "pathStat", "pathType", "remoteChmod", "remoteLs", "remoteMkdir",
     "uploadBytes", "createGlobusStagingDirectory", "downloadFileGlobus",

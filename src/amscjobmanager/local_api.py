@@ -8,6 +8,15 @@ from pathlib import Path
 import sqlite3
 import threading
 
+def localUsername() -> str:
+    """Return the local operating-system username by executing whoami.
+
+    Command execution failures propagate as subprocess exceptions.
+    """
+    result = subprocess.run(["whoami"], text=True, capture_output=True, check=True)
+    return result.stdout.strip()
+
+
 def localMkdir(path: str, create_parents = True, allow_unsafe = False):        
     if not allow_unsafe and not checkSafePath("local", path):
         raise Exception("Path is not a subdirectory of the sandbox path")

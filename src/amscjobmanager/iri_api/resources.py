@@ -6,6 +6,7 @@ from typing import List, Optional, Tuple
 from urllib.parse import quote
 
 from ..logging import wfapiLog
+from .. import local_api
 from .config import IRI_IMPLEMENTATIONS, getImplementationAPIVersion
 from .rest import get
 from .state import (
@@ -87,6 +88,24 @@ def getResource(
         suburl=f"status/resources/{quote(resource_id, safe='')}",
         implementation=implementation,
     )
+
+
+def getUsername(machine: str | None = None, *, implementation: str | None = None) -> str:
+    """Return the authenticated caller's username for a machine or implementation.
+
+    Remote queries require API v2 and use GET account/whoami with the configured
+    client. API v1 raises NotImplementedError before authentication or HTTP I/O.
+    machine='local' runs local whoami without IRI setup or authentication;
+    an implementation cannot also be specified for the local machine.
+    """
+    if machine is not None and machine.lower() == "local":
+        if implementation is not None:
+            raise ValueError("Cannot specify an IRI implementation for machine='local'")
+        return local_api.localUsername()
+    implementation = resolveImplementation(machine=machine, implementation=implementation)
+    if getImplementationAPIVersion(implementation) != 2:
+        raise NotImplementedError(f"getUsername requires IRI API v2; {implementation!r} uses API v1")
+    return get(implementation=implementation, suburl="account/whoami")["username"]
 
 
 def getUserProjectIDmap(machine=None, *, implementation=None):

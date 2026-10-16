@@ -8,10 +8,12 @@ if globals.api_impl == "IRI":
     #Pure IRI
     print("Using IRI API")
     from .iri_api import setupWorkflowAgentFromConfig
+    from .iri_api import getUsername
     from .iri_api import setupWorkflowAgent, remoteLs, remoteMkdir, uploadBytes, uploadFileGlobus, executeJob, executeBatchJobCompat, remoteChmod, getJobState, findJobByName, cancelJob, queryMachineStatus, globusTransferStatus, findGlobusTransferByLabel, findGlobusTransfersByLabel, getUserAccountProjects, getProjectAllocation, getKnownMachines, getMachineQueues, downloadFile, downloadFileGlobus, listSpecialGlobusEndpoints, globusCopy, pathType
 elif globals.api_impl == "SPOOF":
     print("Using Spoof API")
     from .spoof_api import setupWorkflowAgentFromConfig
+    from .spoof_api import getUsername
     from .spoof_api import setupWorkflowAgent, remoteMkdir, uploadBytes, uploadFileGlobus, executeJob, executeBatchJobCompat, getJobState, findJobByName, globusTransferStatus, findGlobusTransferByLabel, findGlobusTransfersByLabel, queryMachineStatus, getUserAccountProjects, getProjectAllocation, getKnownMachines, getMachineQueues, remoteRun, downloadFile, downloadFileGlobus, listSpecialGlobusEndpoints, globusCopy
 else:
     raise Exception("Unknown API implementation")

@@ -40,29 +40,11 @@ def run(name, operation):
 
 
 config = readManagerConfigFile(sys.argv[1])
-if config.iri_config_cache_directory is not None:
-    iri_api.loadCachedImplementations(config.iri_config_cache_directory)
 machine = sys.argv[2].lower()
-try:
-    implementation = iri_api.MACHINE_IMPLEMENTATIONS[machine]
-except KeyError as exc:
-    raise SystemExit(f"Unknown IRI machine: {machine!r}") from exc
-
-try:
-    implementation_config = config.iri_implementations[implementation]
-except KeyError as exc:
-    raise SystemExit(
-        f"Configuration must provide an IRI token for {implementation!r}, "
-        f"which serves machine {machine!r}"
-    ) from exc
-
-sandbox_directories = iri_api.setupWorkflowAgent(
-    {implementation: implementation_config},
-    config.transferapi_key_path,
-    config.sandbox_directories,
-    config.globus_personal_endpoint,
-    iri_config_cache_directory=config.iri_config_cache_directory,
-)
+sandbox_directories = iri_api.setupWorkflowAgentFromConfig(config)
+if machine not in iri_api.getKnownMachines():
+    raise SystemExit(f"IRI machine is unknown or not configured: {machine!r}")
+implementation = iri_api.getMachineImplementation(machine)
 
 # Account/resource/status endpoints.
 run("getKnownMachines", iri_api.getKnownMachines)

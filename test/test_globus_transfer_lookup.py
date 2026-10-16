@@ -18,7 +18,7 @@ from amscjobmanager.api_general import (
     findGlobusTransfersByLabel,
     globusCopy,
     remoteMkdir,
-    setupWorkflowAgent,
+    setupWorkflowAgentFromConfig,
     uploadBytes,
 )
 from amscjobmanager.manager_config import readManagerConfigFile
@@ -33,13 +33,7 @@ if len(sys.argv) != 2:
     )
 
 config = readManagerConfigFile(sys.argv[1])
-sandbox_directories = setupWorkflowAgent(
-    config.iri_implementations,
-    config.transferapi_key_path,
-    config.sandbox_directories,
-    config.globus_personal_endpoint,
-    iri_config_cache_directory=config.iri_config_cache_directory,
-)
+sandbox_directories = setupWorkflowAgentFromConfig(config)
 
 perlmutter_sandbox = PurePosixPath(sandbox_directories["perlmutter"][0])
 test_id = uuid.uuid4().hex

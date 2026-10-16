@@ -35,13 +35,7 @@ if config.globus_personal_endpoint is None:
         "Configuration must provide globus_personal_endpoint to run this test"
     )
 
-sandbox_directories = iri_api.setupWorkflowAgent(
-    config.iri_implementations,
-    config.transferapi_key_path,
-    config.sandbox_directories,
-    config.globus_personal_endpoint,
-    iri_config_cache_directory=config.iri_config_cache_directory,
-)
+sandbox_directories = iri_api.setupWorkflowAgentFromConfig(config)
 
 test_id = uuid.uuid4().hex
 selected_targets: dict[str, tuple[str, PurePosixPath]] = {}

@@ -1,12 +1,15 @@
 """Process-wide authenticated IRI connection state."""
 
 from dataclasses import dataclass, field
-from typing import Union
+from typing import TYPE_CHECKING, Union
 
 import httpx
 from .config import MACHINE_IMPLEMENTATIONS,IRI_IMPLEMENTATIONS
 from .discovery import configureImplementation, loadCachedImplementations
 from ..globals import addSandboxDirs, validateSandboxDirs
+
+if TYPE_CHECKING:
+    from ..manager_config_models import ManagerConfig
 
 tokens = { "iriapi_transfer_base" : None, "globus_transfer" : None }
 
@@ -194,6 +197,21 @@ def _configure_personal_globus_endpoint(configuration) -> None:
         "staging_directory_local": value("staging_directory_local"),
     }
     special_globus_endpoints["personal"] = globus_personal_endpoint["endpoint_uuid"]
+
+def setupWorkflowAgentFromConfig(config: "ManagerConfig") -> dict:
+    """Initialize from a manager configuration and return its sandbox mapping.
+
+    Preserves lazy authentication and deferred remote sandbox validation.
+    The field-based setupWorkflowAgent remains available for explicit setup.
+    """
+    return setupWorkflowAgent(
+        config.iri_implementations,
+        config.transferapi_key_path,
+        config.sandbox_directories,
+        config.globus_personal_endpoint,
+        iri_config_cache_directory=config.iri_config_cache_directory,
+    )
+
 
 def setupWorkflowAgent(iri_implementations: dict, iriapi_transfer_key_path: str | None,
                        work_dir: dict, globus_personal_endpoint_config=None,

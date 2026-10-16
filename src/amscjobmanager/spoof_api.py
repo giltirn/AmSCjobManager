@@ -9,6 +9,16 @@ from typing import Literal, Union, List, Optional, Tuple
 def listSpecialGlobusEndpoints():
     return ["fake_endpoint1","fake_endpoint2"]
 
+def setupWorkflowAgentFromConfig(config) -> dict:
+    """Initialize the spoof agent from a manager configuration and return sandboxes."""
+    return setupWorkflowAgent(
+        config.iri_implementations,
+        config.transferapi_key_path,
+        config.sandbox_directories,
+        config.globus_personal_endpoint,
+        iri_config_cache_directory=config.iri_config_cache_directory,
+    )
+
 def setupWorkflowAgent(iri_implementations: dict, iriapi_transfer_key_path: str,
                        work_dir: dict, globus_personal_endpoint_config=None,
                        iri_config_cache_directory: str | None = None):

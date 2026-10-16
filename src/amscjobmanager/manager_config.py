@@ -1,18 +1,12 @@
 from pathlib import Path
 from pydantic import BaseModel, Field, ValidationError
-from .api_general import setupWorkflowAgent
+from .api_general import setupWorkflowAgentFromConfig
 from . import globals
 from .manager_config_models import ManagerConfig
 
 if globals.api_impl in ("SPOOF", "IRI"):
     def setupManager(config : ManagerConfig):
-        setupWorkflowAgent(
-            config.iri_implementations,
-            config.transferapi_key_path,
-            config.sandbox_directories,
-            config.globus_personal_endpoint,
-            iri_config_cache_directory=config.iri_config_cache_directory,
-        )
+        setupWorkflowAgentFromConfig(config)
 else:
     raise Exception("Unknown API implementation")
    

@@ -48,13 +48,7 @@ def sandbox_for_filesystem(
 
 
 config = readManagerConfigFile(sys.argv[1])
-sandbox_directories = iri_api.setupWorkflowAgent(
-    config.iri_implementations,
-    config.transferapi_key_path,
-    config.sandbox_directories,
-    config.globus_personal_endpoint,
-    iri_config_cache_directory=config.iri_config_cache_directory,
-)
+sandbox_directories = iri_api.setupWorkflowAgentFromConfig(config)
 
 targets: list[tuple[str, str, PurePosixPath, dict]] = []
 missing_sandboxes = []

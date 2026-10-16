@@ -13,6 +13,7 @@ from .state import (
     getConfiguredImplementations, getImplementationClient,
     getMachineImplementation, getPersonalStagingConfiguration,
     listSpecialGlobusEndpoints, replaceSpecialGlobusEndpoint, setupWorkflowAgent,
+    setupWorkflowAgentFromConfig,
 )
 from .discovery import (
     discoverImplementation, loadCachedImplementation, loadCachedImplementations,
@@ -40,7 +41,7 @@ from .compute import (
 __all__ = [
     "IRI_IMPLEMENTATIONS", "MACHINE_IMPLEMENTATIONS",
     "getImplementationAPIVersion", "registerImplementation",
-    "setupWorkflowAgent", "getConfiguredImplementations",
+    "setupWorkflowAgent", "setupWorkflowAgentFromConfig", "getConfiguredImplementations",
     "getImplementationClient", "getMachineImplementation",
     "getPersonalStagingConfiguration", "listSpecialGlobusEndpoints",
     "replaceSpecialGlobusEndpoint", "discoverImplementation",

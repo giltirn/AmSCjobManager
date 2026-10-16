@@ -48,8 +48,6 @@ if len(sys.argv) != 4:
     )
 
 config = readManagerConfigFile(sys.argv[1])
-if config.iri_config_cache_directory is not None:
-    iri_api.loadCachedImplementations(config.iri_config_cache_directory)
 machine = sys.argv[2].lower()
 account = sys.argv[3]
 try:
@@ -59,22 +57,9 @@ except KeyError as exc:
         f"This test currently supports: {', '.join(MACHINE_TESTS)}"
     ) from exc
 
-try:
-    implementation = iri_api.MACHINE_IMPLEMENTATIONS[machine]
-    implementation_config = config.iri_implementations[implementation]
-except KeyError as exc:
-    raise SystemExit(
-        f"Configuration must provide IRI credentials for {machine!r} "
-        f"({iri_api.MACHINE_IMPLEMENTATIONS.get(machine, 'unknown implementation')!r})"
-    ) from exc
-
-sandbox_directories = iri_api.setupWorkflowAgent(
-    {implementation: implementation_config},
-    config.transferapi_key_path,
-    config.sandbox_directories,
-    config.globus_personal_endpoint,
-    iri_config_cache_directory=config.iri_config_cache_directory,
-)
+sandbox_directories = iri_api.setupWorkflowAgentFromConfig(config)
+if machine not in iri_api.getKnownMachines():
+    raise SystemExit(f"IRI machine is unknown or not configured: {machine!r}")
 if not sandbox_directories.get(machine):
     raise SystemExit(f"Configuration must provide a sandbox directory for {machine!r}")
 

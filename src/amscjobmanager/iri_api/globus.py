@@ -14,27 +14,16 @@ from ..globals import checkSafePath
 from ..logging import wfapiLog
 from ..utils import queryYesNo
 from .config import TRANSFER_API_BASE
-from .filesystem import _mounted_filesystems, _unmounted_filesystem_error
+from .filesystem import getMountedFilesystems, getUnmountedFilesystemError
 from .state import (
-    _personal_staging_configuration,
+    getPersonalStagingConfiguration,
+    getTransferToken,
     iri_transfer_client,
     special_globus_endpoints,
-    tokens,
 )
 
-def _machine_globus_filesystems(machine: str) -> list[dict]:
-    """Return one Globus routing entry per alias on mounted filesystems."""
-    return [
-        {**globus_filesystem, "filesystem_root": filesystem_root}
-        for filesystem in _mounted_filesystems(machine).values()
-        for globus_filesystem in filesystem.get("globus_filesystems", [])
-        for filesystem_root in globus_filesystem["filesystem_roots"]
-    ]
-
 def _transfer_get(suburl, params=None):
-    token = tokens["iriapi_transfer_base"]
-    if token is None:
-        raise RuntimeError("IRI transfer API token is not initialized")
+    token = getTransferToken("iriapi_transfer_base")
     response = iri_transfer_client.get(
         TRANSFER_API_BASE + "/" + suburl,
         headers={"accept": "application/json", "Authorization": f"Bearer {token}"},
@@ -50,9 +39,7 @@ def _transfer_get(suburl, params=None):
 
 
 def _transfer_post(suburl, data=None, params=None, files=None, data_is_json=True):
-    token = tokens["iriapi_transfer_base"]
-    if token is None:
-        raise RuntimeError("IRI transfer API token is not initialized")
+    token = getTransferToken("iriapi_transfer_base")
     response = iri_transfer_client.post(
         TRANSFER_API_BASE + "/" + suburl,
         headers={"accept": "application/json", "Authorization": f"Bearer {token}"},
@@ -81,9 +68,7 @@ def globusTransferStatus(transfer_id)-> str:
 
 def findGlobusTransfersByLabel(label: str) -> str | None:
     """Return the unique Globus task ID bearing an exact task label."""
-    token = tokens["globus_transfer"]
-    if token is None:
-        raise RuntimeError("Globus Transfer API token is not initialized")
+    token = getTransferToken("globus_transfer")
     client = globus_sdk.TransferClient(
         authorizer=globus_sdk.AccessTokenAuthorizer(token)
     )
@@ -97,23 +82,28 @@ def findGlobusTransferByLabel(label: str) -> str | None:
     return findGlobusTransfersByLabel(label)
 
 
-def _globus_path(root: str, relative_path: pathlib.PurePosixPath) -> str:
-    return str(pathlib.PurePosixPath(root).joinpath(relative_path))
+def getRemoteGlobusLocation(machine: str, remote_path: str) -> tuple[str, str]:
+    """Translate an absolute machine path to a Globus endpoint tag/UUID and path.
 
-
-def _remote_globus_location(machine: str, remote_path: str) -> tuple[str, str]:
-    """Translate a machine filesystem path to its Globus collection and path."""
+    Uses the longest matching root alias among mounted filesystems. Raises
+    ValueError if the path is relative, unmounted, or has no configured route.
+    """
     path = pathlib.PurePosixPath(remote_path)
     if not path.is_absolute():
         raise ValueError(f"Remote Globus path must be absolute: {remote_path!r}")
 
-    filesystems = _machine_globus_filesystems(machine)
+    filesystems = [
+        {**route, "filesystem_root": root}
+        for filesystem in getMountedFilesystems(machine).values()
+        for route in filesystem.get("globus_filesystems", [])
+        for root in route["filesystem_roots"]
+    ]
     matches = [
         filesystem for filesystem in filesystems
         if path.is_relative_to(pathlib.PurePosixPath(filesystem["filesystem_root"]))
     ]
     if not matches:
-        if error := _unmounted_filesystem_error(
+        if error := getUnmountedFilesystemError(
             machine, path, "globus_filesystems"
         ):
             raise error
@@ -123,9 +113,7 @@ def _remote_globus_location(machine: str, remote_path: str) -> tuple[str, str]:
         key=lambda item: len(pathlib.PurePosixPath(item["filesystem_root"]).parts),
     )
     root = pathlib.PurePosixPath(filesystem["filesystem_root"])
-    return filesystem["endpoint"], _globus_path(
-        filesystem["globus_root"], path.relative_to(root)
-    )
+    return filesystem["endpoint"], str(pathlib.PurePosixPath(filesystem["globus_root"]) / path.relative_to(root))
 
 
 def _staging_globus_path(local_path: Path, staging: dict[str, str]) -> str | None:
@@ -134,17 +122,24 @@ def _staging_globus_path(local_path: Path, staging: dict[str, str]) -> str | Non
         relative_path = local_path.expanduser().resolve().relative_to(staging_local)
     except ValueError:
         return None
-    return _globus_path(staging["staging_directory_globus"], relative_path)
+    return str(pathlib.PurePosixPath(staging["staging_directory_globus"]) / relative_path)
 
 
-def _temporary_staging_directory(staging: dict[str, str]) -> tuple[Path, str]:
+def createGlobusStagingDirectory() -> tuple[Path, str]:
+    """Create a unique directory inside the personal endpoint's staging area.
+
+    Uses the configured personal endpoint. Return its local Path and
+    corresponding Globus path. The caller owns the
+    temporary directory and must remove it after the transfer finishes.
+    """
+    staging = getPersonalStagingConfiguration()
     staging_local = Path(staging["staging_directory_local"]).expanduser().resolve()
     staging_local.mkdir(parents=True, exist_ok=True)
     temporary_directory = staging_local / f".amsc-globus-{uuid.uuid4().hex}"
     temporary_directory.mkdir()
-    return temporary_directory, _globus_path(
-        staging["staging_directory_globus"],
-        temporary_directory.relative_to(staging_local),
+    return temporary_directory, str(
+        pathlib.PurePosixPath(staging["staging_directory_globus"])
+        / temporary_directory.relative_to(staging_local)
     )
 
 
@@ -156,8 +151,8 @@ def uploadFileGlobus(machine: str, remote_path: str, local_path: str) -> str:
     if not checkSafePath(machine, remote_path):
         raise Exception(f"Attempting to copy data to a disallowed location on {machine}")
 
-    staging = _personal_staging_configuration()
-    remote_endpoint, remote_globus_path = _remote_globus_location(machine, remote_path)
+    staging = getPersonalStagingConfiguration()
+    remote_endpoint, remote_globus_path = getRemoteGlobusLocation(machine, remote_path)
     remote_globus_file = pathlib.PurePosixPath(remote_globus_path)
     remote_filename = remote_globus_file.name
     if not remote_filename:
@@ -166,8 +161,8 @@ def uploadFileGlobus(machine: str, remote_path: str, local_path: str) -> str:
     staged_path = _staging_globus_path(source_path, staging)
     temporary_directory = None
     if staged_path is None or source_path.name != remote_filename:
-        temporary_directory, staging_directory = _temporary_staging_directory(staging)
-        staged_path = _globus_path(staging_directory, pathlib.PurePosixPath(remote_filename))
+        temporary_directory, staging_directory = createGlobusStagingDirectory()
+        staged_path = str(pathlib.PurePosixPath(staging_directory) / remote_filename)
         shutil.copy2(source_path, temporary_directory / remote_filename)
 
     try:
@@ -183,14 +178,14 @@ def uploadFileGlobus(machine: str, remote_path: str, local_path: str) -> str:
 
 def downloadFileGlobus(machine: str, remote_path: str, local_path: str) -> str:
     """Blocking download of one remote file through the configured personal endpoint."""
-    staging = _personal_staging_configuration()
+    staging = getPersonalStagingConfiguration()
     output_path = Path(local_path).expanduser()
     if output_path.is_dir():
         output_path /= pathlib.PurePosixPath(remote_path).name
     output_path = output_path.resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    remote_endpoint, remote_globus_path = _remote_globus_location(machine, remote_path)
+    remote_endpoint, remote_globus_path = getRemoteGlobusLocation(machine, remote_path)
     remote_globus_file = pathlib.PurePosixPath(remote_globus_path)
     remote_filename = remote_globus_file.name
     if not remote_filename:
@@ -201,7 +196,7 @@ def downloadFileGlobus(machine: str, remote_path: str, local_path: str) -> str:
     if staged_path is not None and output_path.name == remote_filename:
         staging_destination = str(pathlib.PurePosixPath(staged_path).parent)
     else:
-        temporary_directory, staging_destination = _temporary_staging_directory(staging)
+        temporary_directory, staging_destination = createGlobusStagingDirectory()
 
     try:
         globusCopy(
@@ -220,28 +215,6 @@ def downloadFileGlobus(machine: str, remote_path: str, local_path: str) -> str:
         if temporary_directory is not None:
             shutil.rmtree(temporary_directory, ignore_errors=True)
 
-
-def _globusCopy(source_endpoint, dest_endpoint, source_path, dest_path,
-                block_until_complete=False, label: str | None = None):
-    trans_args = { "source_uuid" : source_endpoint, "source_path": source_path,
-                   "destination_uuid" : dest_endpoint, "destination_path" : dest_path,
-                   "label" : label or "FemtoMeas transfer" }
-    
-    j, status = _transfer_post("movement/transfer/globus", data=trans_args)
-    if status == 200:
-        tid = j["transfer_uuid"]
-
-        if block_until_complete:
-            while (status := globusTransferStatus(tid)) == "ACTIVE":
-                print(".", end="")
-                time.sleep(20)
-            print(status)
-            if status != "SUCCEEDED":
-                raise RuntimeError(f"Globus transfer {tid} finished with status {status}")
-
-        return tid
-    else:
-        raise Exception("Globus transfer failed, response content: " + json.dumps(j))
 
 def _checkSafePathTagOrUUID(machine_or_uuid: str, path: str)->bool:
     machine_or_uuid = machine_or_uuid.lower()
@@ -300,4 +273,20 @@ def globusCopy(dest_uuid: str, dest_path: str,
         wfapiLog(f"Source tag {source_uuid} replaced by UUID {special_globus_endpoints[source_uuid]}")
         source_uuid = special_globus_endpoints[source_uuid]        
 
-    return _globusCopy(source_endpoint=source_uuid, dest_endpoint=dest_uuid, source_path=source_path, dest_path=dest_path, block_until_complete=block_until_complete, label=label)
+    trans_args = {
+        "source_uuid": source_uuid, "source_path": source_path,
+        "destination_uuid": dest_uuid, "destination_path": dest_path,
+        "label": label or "FemtoMeas transfer",
+    }
+    response, status = _transfer_post("movement/transfer/globus", data=trans_args)
+    if status != 200:
+        raise Exception("Globus transfer failed, response content: " + json.dumps(response))
+    transfer_id = response["transfer_uuid"]
+    if block_until_complete:
+        while (status := globusTransferStatus(transfer_id)) == "ACTIVE":
+            print(".", end="")
+            time.sleep(20)
+        print(status)
+        if status != "SUCCEEDED":
+            raise RuntimeError(f"Globus transfer {transfer_id} finished with status {status}")
+    return transfer_id

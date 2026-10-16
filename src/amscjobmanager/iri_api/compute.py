@@ -12,18 +12,7 @@ from ..logging import wfapiLog
 from .config import IRI_IMPLEMENTATIONS
 from .resources import getResourceID
 from .rest import delete, get, post
-from .state import _configured_implementation_name, _get_compute_client
-
-
-def _require_compute_operation(machine: str, operation: str) -> None:
-    implementation = _configured_implementation_name(machine)
-    handling = IRI_IMPLEMENTATIONS[implementation].get(
-        "unsupported_compute_operations", {}
-    ).get(operation)
-    if handling == "skip":
-        raise NotImplementedError(
-            f"{operation} is not implemented by the {implementation!r} IRI API"
-        )
+from .state import getMachineImplementation
 
 def _alcf_post_launch_wrapper(
     job_run_dir: str,
@@ -127,8 +116,9 @@ def executeJob(machine: str, executable: str, arguments: List[str], nodes: int, 
     if not allow_unsafe and not checkSafePath(machine, job_run_dir):
         raise Exception("Path is not below the privileged directory")
 
-    _, machine_specification = _get_compute_client(machine)
-    if _configured_implementation_name(machine) == "alcf":
+    implementation = getMachineImplementation(machine)
+    machine_specification = IRI_IMPLEMENTATIONS[implementation]["machines"][machine]
+    if implementation == "alcf":
         ranks = nodes * ranks_per_node
         if post_launch is None:
             launch_command = shlex.join([executable, *arguments])
@@ -230,7 +220,8 @@ def executeBatchJobCompat(machine: str, script_body: str,
     if not allow_unsafe and not checkSafePath(machine, job_run_dir):
         raise Exception("Path is not below the privileged directory")
 
-    _, machine_specification = _get_compute_client(machine)
+    implementation = getMachineImplementation(machine)
+    machine_specification = IRI_IMPLEMENTATIONS[implementation]["machines"][machine]
     attributes = {
         "duration" : time,
         "account": account,
@@ -239,7 +230,7 @@ def executeBatchJobCompat(machine: str, script_body: str,
     if custom_attributes := machine_specification.get("custom_attributes"):
         attributes["custom_attributes"] = custom_attributes
 
-    if _configured_implementation_name(machine) == "alcf":
+    if implementation == "alcf":
         encoded_script = base64.b64encode(script_body.encode()).decode()
         spec = {
             "executable": "/bin/bash",

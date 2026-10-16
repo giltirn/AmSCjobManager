@@ -11,6 +11,7 @@ if globals.api_impl in ("SPOOF", "IRI"):
             config.transferapi_key_path,
             config.sandbox_directories,
             config.globus_personal_endpoint,
+            iri_config_cache_directory=config.iri_config_cache_directory,
         )
 else:
     raise Exception("Unknown API implementation")

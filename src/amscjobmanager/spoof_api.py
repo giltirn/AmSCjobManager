@@ -10,7 +10,8 @@ def listSpecialGlobusEndpoints():
     return ["fake_endpoint1","fake_endpoint2"]
 
 def setupWorkflowAgent(iri_implementations: dict, iriapi_transfer_key_path: str,
-                       work_dir: dict, globus_personal_endpoint_config=None):
+                       work_dir: dict, globus_personal_endpoint_config=None,
+                       iri_config_cache_directory: str | None = None):
     globals.remote_workdir={ machine.lower() : directory for machine, directory in work_dir.items() }
     wfapiLog("Using SPOOF api with workdir", globals.remote_workdir)
     return globals.remote_workdir

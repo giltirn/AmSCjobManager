@@ -2,6 +2,7 @@
 
 IRI_IMPLEMENTATIONS = {
     "nersc": {
+        "api_version": 1,
         "resource_server": "ed3e577d-f7f3-4639-b96e-ff5a8445d699",
         "api_base": "https://api.iri.nersc.gov/api/v1",
         "status_resources_supports_filters": True,
@@ -45,6 +46,7 @@ IRI_IMPLEMENTATIONS = {
         },
     },
     "alcf": {
+        "api_version": 1,
         "resource_server": "6be511f6-a071-471f-9bc0-02a0d0836723",
         "api_base": "https://api.alcf.anl.gov/api/v1",
         "status_resources_supports_filters": False,
@@ -154,5 +156,33 @@ MACHINE_IMPLEMENTATIONS = {
 
 
 TRANSFER_API_BASE = "https://amsc-data-api.nersc.gov"
+
+
+def registerImplementation(name: str, definition: dict) -> None:
+    """Register configuration and update the machine index in place.
+
+    Discovery supplies a validated definition. Existing imported references
+    to these dictionaries continue to see the updated configuration.
+    """
+    version = definition["api_version"]
+    if type(version) is not int or version not in {1, 2}:
+        raise ValueError(f"Implementation {name!r} must have integer api_version 1 or 2")
+    machines = definition["machines"]
+    for machine in machines:
+        owner = MACHINE_IMPLEMENTATIONS.get(machine)
+        if owner is not None and owner != name:
+            raise ValueError(
+                f"Machine {machine!r} already belongs to implementation {owner!r}"
+            )
+    for machine in list(MACHINE_IMPLEMENTATIONS):
+        if MACHINE_IMPLEMENTATIONS[machine] == name:
+            del MACHINE_IMPLEMENTATIONS[machine]
+    IRI_IMPLEMENTATIONS[name] = definition
+    MACHINE_IMPLEMENTATIONS.update({machine: name for machine in machines})
+
+
+def getImplementationAPIVersion(name: str) -> int:
+    """Read the explicitly configured integer IRI version."""
+    return IRI_IMPLEMENTATIONS[name]["api_version"]
 
 

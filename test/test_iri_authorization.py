@@ -16,6 +16,8 @@ that requires a protected API request such as the existing smoke test.
 import argparse
 
 from amscjobmanager.iri_api.auth import setupIRIapiCompute
+from amscjobmanager.iri_api.config import IRI_IMPLEMENTATIONS
+from amscjobmanager.iri_api.discovery import configureImplementation, loadCachedImplementations
 from amscjobmanager.manager_config import readManagerConfigFile
 
 
@@ -28,9 +30,16 @@ def main() -> int:
         parser.error("No IRI implementations are configured")
 
     failures = []
+    if config.iri_config_cache_directory is not None:
+        loadCachedImplementations(config.iri_config_cache_directory)
     for implementation, settings in config.iri_implementations.items():
         implementation = implementation.lower()
         try:
+            if implementation not in IRI_IMPLEMENTATIONS:
+                configureImplementation(
+                    implementation, settings, config.iri_config_cache_directory,
+                    cache_only=True,
+                )
             client = setupIRIapiCompute(
                 implementation, settings.token_path, token_type=settings.token_type
             )

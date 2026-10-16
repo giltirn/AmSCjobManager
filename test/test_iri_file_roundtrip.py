@@ -53,6 +53,7 @@ sandbox_directories = iri_api.setupWorkflowAgent(
     config.transferapi_key_path,
     config.sandbox_directories,
     config.globus_personal_endpoint,
+    iri_config_cache_directory=config.iri_config_cache_directory,
 )
 
 targets: list[tuple[str, str, PurePosixPath, dict]] = []
@@ -61,7 +62,7 @@ for machine, directories in sandbox_directories.items():
     machine = machine.lower()
     if machine not in iri_api.MACHINE_IMPLEMENTATIONS:
         continue
-    for filesystem_name, filesystem in iri_api._mounted_filesystems(machine).items():
+    for filesystem_name, filesystem in iri_api.getMountedFilesystems(machine).items():
         sandbox = sandbox_for_filesystem(directories, filesystem)
         if sandbox is None:
             roots = [

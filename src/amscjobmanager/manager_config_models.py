@@ -5,6 +5,14 @@ from typing import Literal
 
 if globals.api_impl in ("SPOOF", "IRI"):
     class IRIImplementationConfig(BaseModel):
+        api_url: str | None = Field(
+            None,
+            description="Optional IRI API root or Swagger page URL used for configuration discovery",
+        )
+        api_version: int | None = Field(
+            None, strict=True, ge=1, le=2,
+            description="IRI API version (1 or 2); prompted for an unknown provider if omitted",
+        )
         token_type: Literal["globus", "amsc_pat"] = Field(
             "globus",
             description="Authentication method for this implementation's token file",
@@ -30,6 +38,10 @@ if globals.api_impl in ("SPOOF", "IRI"):
 
 
     class ManagerConfig(BaseModel):
+        iri_config_cache_directory: str | None = Field(
+            None,
+            description="Directory for discovered IRI implementation configuration; required when discovery is used",
+        )
         iri_implementations: dict[str, IRIImplementationConfig] = Field(
             ...,
             description="IRI compute/filesystem implementations to initialize",
@@ -57,6 +69,7 @@ if globals.api_impl in ("SPOOF", "IRI"):
                 return output_path
 
             template = cls(
+                iri_config_cache_directory="/path/to/iri-config-cache",
                 iri_implementations={
                     "nersc": IRIImplementationConfig(
                         token_type="globus",

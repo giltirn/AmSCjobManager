@@ -12,14 +12,18 @@ from .. import local_api
 from ..globals import checkSafePath
 from ..logging import wfapiLog
 from .config import IRI_IMPLEMENTATIONS
-from .state import _configured_implementation_name, _get_compute_client, _require_globus_fallback
+from .state import getMachineImplementation, requireGlobusFallback
 from .rest import get, post, put, submitTask
 
 
-def _mounted_filesystems(machine: str) -> dict[str, dict]:
-    """Return the named facility filesystems mounted on ``machine``."""
+def getMountedFilesystems(machine: str) -> dict[str, dict]:
+    """Return named facility filesystem definitions mounted on a machine.
+
+    Rejects unknown filesystem references in the machine configuration. Values
+    reference the shared definitions and should be treated as read-only.
+    """
     machine = machine.lower()
-    implementation = _configured_implementation_name(machine)
+    implementation = getMachineImplementation(machine)
     implementation_specification = IRI_IMPLEMENTATIONS[implementation]
     filesystems = implementation_specification.get("filesystems", {})
     mounted_names = implementation_specification["machines"][machine].get(
@@ -34,39 +38,13 @@ def _mounted_filesystems(machine: str) -> dict[str, dict]:
     return {name: filesystems[name] for name in mounted_names}
 
 
-def _matching_filesystems(
-    machine: str, path: pathlib.PurePosixPath, mapping: str
-) -> dict[str, dict]:
-    """Return facility filesystems whose storage or Globus roots include path."""
-    machine = machine.lower()
-    implementation = _configured_implementation_name(machine)
-    matches = {}
-    for name, filesystem in IRI_IMPLEMENTATIONS[implementation].get(
-        "filesystems", {}
-    ).items():
-        if mapping == "storage_resource_paths":
-            roots = {
-                root
-                for storage_mapping in filesystem.get(mapping, [])
-                for root in storage_mapping["filesystem_roots"]
-            }
-        elif mapping == "globus_filesystems":
-            roots = {
-                root
-                for filesystem_mapping in filesystem.get(mapping, [])
-                for root in filesystem_mapping["filesystem_roots"]
-            }
-        else:
-            raise ValueError(f"Unknown filesystem mapping type: {mapping!r}")
-        if any(
-            path.is_relative_to(pathlib.PurePosixPath(root)) for root in roots
-        ):
-            matches[name] = filesystem
-    return matches
+def getStorageResourcePaths(machine: str) -> list[dict]:
+    """Expand mounted IRI storage routes into one entry per root alias.
 
-
-def _machine_storage_resource_paths(machine: str) -> list[dict]:
-    """Return one IRI storage routing entry per alias on mounted filesystems."""
+    Entries contain filesystem_root and resource_name for resource selection,
+    with an optional authoritative resource_id for discovered routes.
+    Unmounted facility filesystems are excluded.
+    """
     return [
         {
             **{
@@ -76,18 +54,33 @@ def _machine_storage_resource_paths(machine: str) -> list[dict]:
             },
             "filesystem_root": filesystem_root,
         }
-        for filesystem in _mounted_filesystems(machine).values()
+        for filesystem in getMountedFilesystems(machine).values()
         for storage_mapping in filesystem.get("storage_resource_paths", [])
         for filesystem_root in storage_mapping["filesystem_roots"]
     ]
 
 
-def _unmounted_filesystem_error(
+def getUnmountedFilesystemError(
     machine: str, path: pathlib.PurePosixPath, mapping: str
 ) -> ValueError | None:
-    """Describe a path belonging to a known but unmounted filesystem."""
-    matching_filesystems = _matching_filesystems(machine, path, mapping)
-    mounted_filesystems = _mounted_filesystems(machine)
+    """Return a descriptive ValueError for a known but unmounted path, or None.
+
+    mapping selects storage_resource_paths or globus_filesystems. Checks the
+    facility's filesystem definitions against the machine's mounted list.
+    """
+    if mapping not in {"storage_resource_paths", "globus_filesystems"}:
+        raise ValueError(f"Unknown filesystem mapping type: {mapping!r}")
+    implementation = getMachineImplementation(machine)
+    matching_filesystems = {
+        name: filesystem
+        for name, filesystem in IRI_IMPLEMENTATIONS[implementation].get("filesystems", {}).items()
+        if any(
+            path.is_relative_to(pathlib.PurePosixPath(root))
+            for route in filesystem.get(mapping, [])
+            for root in route["filesystem_roots"]
+        )
+    }
+    mounted_filesystems = getMountedFilesystems(machine)
     unmounted_names = set(matching_filesystems) - set(mounted_filesystems)
     if not unmounted_names:
         return None
@@ -100,16 +93,20 @@ def _unmounted_filesystem_error(
         f"{descriptions}"
     )
 
-def _filesystem_operation_handling(machine: str, operation: str) -> str | None:
-    implementation = _configured_implementation_name(machine)
+def getFilesystemOperationHandling(machine: str, operation: str) -> str | None:
+    """Return a configured filesystem exception: 'globus', 'skip', or None.
+
+    None means the implementation uses the native IRI operation.
+    """
+    implementation = getMachineImplementation(machine)
     return IRI_IMPLEMENTATIONS[implementation].get(
         "unsupported_filesystem_operations", {}
     ).get(operation)
 
 
 def _require_filesystem_operation(machine: str, operation: str) -> None:
-    if _filesystem_operation_handling(machine, operation) == "skip":
-        implementation = _configured_implementation_name(machine)
+    if getFilesystemOperationHandling(machine, operation) == "skip":
+        implementation = getMachineImplementation(machine)
         raise NotImplementedError(
             f"{operation} is not implemented by the {implementation!r} IRI API"
         )
@@ -128,8 +125,6 @@ def remoteLs(machine: str, path: str)-> List[str]:
     TODO: Explore behavior of trailing slashes, and the fact that the directory name itself seems to be listed among the directory content; should we unify the behavior with SFAPI?
     """
     machine = machine.lower()
-    _get_compute_client(machine)
-
     wfapiLog(f"Listing contents of directory {machine}:{path}")
     
     rid = getResourceID(machine, rtype="storage", path=path)
@@ -295,13 +290,12 @@ def uploadBytes(machine: str, remote_path: str, content: io.BytesIO, allow_unsaf
     if not pathlib.Path(remote_path).is_absolute():
         raise Exception("Path must be absolute")
 
-    if _filesystem_operation_handling(machine, "uploadBytes") == "globus":
-        _require_globus_fallback(machine, "uploadBytes")
-        staging = _personal_staging_configuration()
+    if getFilesystemOperationHandling(machine, "uploadBytes") == "globus":
+        requireGlobusFallback(machine, "uploadBytes")
         remote_filename = pathlib.PurePosixPath(remote_path).name
         if not remote_filename:
             raise ValueError(f"Remote upload path must name a file: {remote_path!r}")
-        temporary_directory, _ = _temporary_staging_directory(staging)
+        temporary_directory, _ = createGlobusStagingDirectory()
         staging_file = temporary_directory / remote_filename
         try:
             with staging_file.open("wb") as file_handle:
@@ -339,13 +333,12 @@ def downloadFileContents(machine: str, remote_path: str)->str:
 
     _require_filesystem_operation(machine, "downloadFileContents")
 
-    if _filesystem_operation_handling(machine, "downloadFileContents") == "globus":
-        _require_globus_fallback(machine, "downloadFileContents")
-        staging = _personal_staging_configuration()
+    if getFilesystemOperationHandling(machine, "downloadFileContents") == "globus":
+        requireGlobusFallback(machine, "downloadFileContents")
         remote_filename = pathlib.PurePosixPath(remote_path).name
         if not remote_filename:
             raise ValueError(f"Remote download path must name a file: {remote_path!r}")
-        temporary_directory, _ = _temporary_staging_directory(staging)
+        temporary_directory, _ = createGlobusStagingDirectory()
         staging_file = temporary_directory / remote_filename
         try:
             downloadFileGlobus(machine, remote_path, str(staging_file))
@@ -383,10 +376,10 @@ def downloadFileContents(machine: str, remote_path: str)->str:
 def downloadFile(machine: str, local_path_out: str, remote_path_in: str)->str:
     from ..api_general import isDirectory
 
-    if machine.lower() != "local" and _filesystem_operation_handling(
+    if machine.lower() != "local" and getFilesystemOperationHandling(
         machine, "downloadFile"
     ) == "globus":
-        _require_globus_fallback(machine, "downloadFile")
+        requireGlobusFallback(machine, "downloadFile")
         return downloadFileGlobus(machine, remote_path_in, local_path_out)
 
     if isDirectory("local", local_path_out):
@@ -412,8 +405,7 @@ def downloadFile(machine: str, local_path_out: str, remote_path_in: str)->str:
 # Resolve cross-module operations after the routing helpers above exist.
 from .resources import getResourceID
 from .globus import (
-    _personal_staging_configuration,
-    _temporary_staging_directory,
+    createGlobusStagingDirectory,
     downloadFileGlobus,
     uploadFileGlobus,
 )

@@ -48,6 +48,8 @@ if len(sys.argv) != 4:
     )
 
 config = readManagerConfigFile(sys.argv[1])
+if config.iri_config_cache_directory is not None:
+    iri_api.loadCachedImplementations(config.iri_config_cache_directory)
 machine = sys.argv[2].lower()
 account = sys.argv[3]
 try:
@@ -71,6 +73,7 @@ sandbox_directories = iri_api.setupWorkflowAgent(
     config.transferapi_key_path,
     config.sandbox_directories,
     config.globus_personal_endpoint,
+    iri_config_cache_directory=config.iri_config_cache_directory,
 )
 if not sandbox_directories.get(machine):
     raise SystemExit(f"Configuration must provide a sandbox directory for {machine!r}")

@@ -40,6 +40,8 @@ def run(name, operation):
 
 
 config = readManagerConfigFile(sys.argv[1])
+if config.iri_config_cache_directory is not None:
+    iri_api.loadCachedImplementations(config.iri_config_cache_directory)
 machine = sys.argv[2].lower()
 try:
     implementation = iri_api.MACHINE_IMPLEMENTATIONS[machine]
@@ -59,7 +61,16 @@ sandbox_directories = iri_api.setupWorkflowAgent(
     config.transferapi_key_path,
     config.sandbox_directories,
     config.globus_personal_endpoint,
+    iri_config_cache_directory=config.iri_config_cache_directory,
 )
+
+# Account/resource/status endpoints.
+run("getKnownMachines", iri_api.getKnownMachines)
+run("listSpecialGlobusEndpoints", iri_api.listSpecialGlobusEndpoints)
+run("getMachineQueues", lambda: iri_api.getMachineQueues(machine))
+run("getUserAccountProjects", lambda: iri_api.getUserAccountProjects(machine))
+run("getResourceID(compute)", lambda: iri_api.getResourceID(machine, "compute"))
+run("queryMachineStatus(compute)", lambda: iri_api.queryMachineStatus(machine, "compute"))
 
 if machine not in sandbox_directories or not sandbox_directories[machine]:
     raise SystemExit(
@@ -72,14 +83,6 @@ sandbox = PurePosixPath(sandbox_directories[machine][0])
 test_id = uuid.uuid4().hex
 test_dir = sandbox / "amsc-job-manager-iri-api-smoke" / test_id
 test_file = test_dir / "smoke.txt"
-
-# Account/resource/status endpoints.
-run("getKnownMachines", iri_api.getKnownMachines)
-run("listSpecialGlobusEndpoints", iri_api.listSpecialGlobusEndpoints)
-run("getMachineQueues", lambda: iri_api.getMachineQueues(machine))
-run("getUserAccountProjects", lambda: iri_api.getUserAccountProjects(machine))
-run("getResourceID(compute)", lambda: iri_api.getResourceID(machine, "compute"))
-run("queryMachineStatus(compute)", lambda: iri_api.queryMachineStatus(machine, "compute"))
 
 #Filesystem task endpoints.  All remote writes are confined to the configured
 #sandbox, and subsequent calls use the artifacts created by the earlier ones.

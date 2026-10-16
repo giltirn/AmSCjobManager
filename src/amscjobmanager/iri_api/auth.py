@@ -1,4 +1,8 @@
-"""IRI and Globus authentication, token persistence, and client setup."""
+"""Internal IRI/Globus authentication, token persistence, and client factories.
+
+Normal operations obtain clients through state.getImplementationClient;
+these explicit factories also support bootstrap and authorization-only tests.
+"""
 
 import json
 import os
@@ -13,16 +17,9 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from ..logging import wfapiLog, wfapiUserQuery
 from .config import IRI_IMPLEMENTATIONS
-from .state import IRIComputeClient, iri_compute_clients, tokens
+from .state import IRIComputeClient, getConfiguredImplementations, tokens
 from .state import special_globus_endpoints
-from .filesystem import _mounted_filesystems
-
-def parse_globus_scope_string(scope_string: str) -> set[str]:
-    return set(scope_string.split()) if scope_string else set()
-
-def ensure_private_parent_dir(path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    os.chmod(path.parent, 0o700)
+from .filesystem import getMountedFilesystems
 
 def load_globus_tokens(token_file: Path) -> dict | None:
     if not token_file.exists():
@@ -31,7 +28,8 @@ def load_globus_tokens(token_file: Path) -> dict | None:
         return json.load(f)
 
 def save_globus_tokens(token_file: Path, tokens: dict) -> None:
-    ensure_private_parent_dir(token_file)
+    token_file.parent.mkdir(parents=True, exist_ok=True)
+    os.chmod(token_file.parent, 0o700)
     tmp = token_file.with_suffix(".tmp")
     with os.fdopen(
         os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600),
@@ -65,13 +63,9 @@ GLOBUS_CLIENT_ID = "eb18f0bb-4c76-43b5-88f1-750782be30ad" #Femtomeas, ckelly@bnl
 
 RESOURCE_SERVER = "auth.globus.org"
 
-def _globus_implementation_scopes(implementation: str) -> set[str]:
-    return set(IRI_IMPLEMENTATIONS[implementation]["required_scopes"])
-
-
 def interactive_globus_login(client: globus_sdk.NativeAppAuthClient, implementation: str) -> dict:
     resource_server = IRI_IMPLEMENTATIONS[implementation]["resource_server"]
-    required_scopes = _globus_implementation_scopes(implementation)
+    required_scopes = set(IRI_IMPLEMENTATIONS[implementation]["required_scopes"])
     client.oauth2_start_flow(
         requested_scopes=" ".join(sorted(required_scopes)),
         refresh_tokens=True,
@@ -162,7 +156,7 @@ def _create_globus_client(implementation: str, key_path: str) -> IRIComputeClien
     """Create an IRI client through Globus login or token refresh."""
     auth_client = globus_sdk.NativeAppAuthClient(GLOBUS_CLIENT_ID)
     resource_server = IRI_IMPLEMENTATIONS[implementation]["resource_server"]
-    required_scopes = _globus_implementation_scopes(implementation)
+    required_scopes = set(IRI_IMPLEMENTATIONS[implementation]["required_scopes"])
 
     wfapiLog(f"setupIRIapi({implementation}) checking stored tokens at", key_path)
     stored = load_globus_tokens(Path(key_path))
@@ -173,7 +167,7 @@ def _create_globus_client(implementation: str, key_path: str) -> IRIComputeClien
     if auth_data == None:
         auth_data = interactive_globus_login(auth_client, implementation)
 
-    granted = parse_globus_scope_string(auth_data.get("scope", ""))
+    granted = set((auth_data.get("scope") or "").split())
     missing = required_scopes - granted
     if missing:
         raise RuntimeError(f"Missing required scopes: {sorted(missing)}")
@@ -201,12 +195,12 @@ IRI_TRANSFER_DEFAULT_SCOPE = f"https://auth.globus.org/scopes/{IRI_TRANSFER_RESO
 def _globus_data_access_collections() -> set[str]:
     """Return every collection for which the transfer login needs access."""
     collections = set()
-    for implementation in iri_compute_clients:
+    for implementation in getConfiguredImplementations():
         specification = IRI_IMPLEMENTATIONS[implementation]
         filesystems = [
             globus_filesystem
             for machine in specification["machines"]
-            for filesystem in _mounted_filesystems(machine).values()
+            for filesystem in getMountedFilesystems(machine).values()
             for globus_filesystem in filesystem.get("globus_filesystems", [])
         ]
         for filesystem in filesystems:

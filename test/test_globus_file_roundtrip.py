@@ -40,6 +40,7 @@ sandbox_directories = iri_api.setupWorkflowAgent(
     config.transferapi_key_path,
     config.sandbox_directories,
     config.globus_personal_endpoint,
+    iri_config_cache_directory=config.iri_config_cache_directory,
 )
 
 test_id = uuid.uuid4().hex
@@ -52,7 +53,7 @@ for machine, directories in sandbox_directories.items():
     for directory in directories:
         sandbox = PurePosixPath(directory)
         remote_directory = sandbox / "amsc-job-manager-globus-roundtrip" / test_id
-        endpoint, _ = iri_api._remote_globus_location(machine, str(remote_directory))
+        endpoint, _ = iri_api.getRemoteGlobusLocation(machine, str(remote_directory))
         endpoint_uuid = iri_api.replaceSpecialGlobusEndpoint(endpoint)
         selected_targets.setdefault(endpoint_uuid, (machine, remote_directory))
 

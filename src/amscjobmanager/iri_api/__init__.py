@@ -1,35 +1,59 @@
-"""IRI API compatibility facade.
+"""Public IRI API.
 
-The public API remains available from ``amscjobmanager.iri_api`` while the
-implementation is split into focused modules within this package.
+Authentication and lifecycle helpers remain in their owning modules rather
+than being re-exported here. Setup supplies configuration; subsequent
+operations retrieve the state they need internally.
 """
 
-from . import state
-from .config import *
-from .state import (
-    IRIComputeClient,
-    iri_compute_clients,
-    iri_transfer_client,
-    listSpecialGlobusEndpoints,
-    replaceSpecialGlobusEndpoint,
-    setupWorkflowAgent,
-    special_globus_endpoints,
-    tokens,
+from .config import (
+    IRI_IMPLEMENTATIONS, MACHINE_IMPLEMENTATIONS,
+    getImplementationAPIVersion, registerImplementation,
 )
-from .auth import *
-from .rest import *
-from .resources import *
-from .filesystem import *
-from .globus import *
-from .compute import *
+from .state import (
+    getConfiguredImplementations, getImplementationClient,
+    getMachineImplementation, getPersonalStagingConfiguration,
+    listSpecialGlobusEndpoints, replaceSpecialGlobusEndpoint, setupWorkflowAgent,
+)
+from .discovery import (
+    discoverImplementation, loadCachedImplementation, loadCachedImplementations,
+)
+from .rest import delete, get, post, put, submitTask, waitTask
+from .resources import (
+    getKnownMachines, getMachineQueues, getProjectAllocation, getResource,
+    getResourceID, getResources, getUserAccountProjects, getUserProjectIDmap,
+    queryMachineStatus,
+)
+from .filesystem import (
+    downloadFile, downloadFileContents, getMountedFilesystems,
+    getStorageResourcePaths, pathStat, pathType, remoteChmod, remoteLs,
+    remoteMkdir, uploadBytes,
+)
+from .globus import (
+    createGlobusStagingDirectory, downloadFileGlobus, findGlobusTransferByLabel,
+    findGlobusTransfersByLabel, getRemoteGlobusLocation, globusCopy,
+    globusTransferStatus, uploadFileGlobus,
+)
+from .compute import (
+    cancelJob, executeBatchJobCompat, executeJob, findJobByName, getJobState,
+)
 
-# Retain the routing helpers used by the integration scripts and unit tests.
-from .filesystem import _machine_storage_resource_paths, _mounted_filesystems
-from .globus import _machine_globus_filesystems, _remote_globus_location
-
-
-def __getattr__(name):
-    # Read reassigned configuration from its owner rather than caching a copy.
-    if name == "globus_personal_endpoint":
-        return state.globus_personal_endpoint
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+__all__ = [
+    "IRI_IMPLEMENTATIONS", "MACHINE_IMPLEMENTATIONS",
+    "getImplementationAPIVersion", "registerImplementation",
+    "setupWorkflowAgent", "getConfiguredImplementations",
+    "getImplementationClient", "getMachineImplementation",
+    "getPersonalStagingConfiguration", "listSpecialGlobusEndpoints",
+    "replaceSpecialGlobusEndpoint", "discoverImplementation",
+    "loadCachedImplementation", "loadCachedImplementations",
+    "get", "put", "post", "delete", "submitTask", "waitTask",
+    "getKnownMachines", "getMachineQueues", "getProjectAllocation",
+    "getResource", "getResourceID", "getResources", "getUserAccountProjects",
+    "getUserProjectIDmap", "queryMachineStatus", "downloadFile",
+    "downloadFileContents", "getMountedFilesystems", "getStorageResourcePaths",
+    "pathStat", "pathType", "remoteChmod", "remoteLs", "remoteMkdir",
+    "uploadBytes", "createGlobusStagingDirectory", "downloadFileGlobus",
+    "findGlobusTransferByLabel", "findGlobusTransfersByLabel",
+    "getRemoteGlobusLocation", "globusCopy", "globusTransferStatus",
+    "uploadFileGlobus", "cancelJob", "executeBatchJobCompat", "executeJob",
+    "findJobByName", "getJobState",
+]

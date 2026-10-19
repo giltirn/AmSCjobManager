@@ -101,23 +101,35 @@ def _fakeGlobusCopy(label=None, details=None):
     
     return key
 
-def globusCopy(dest_uuid: str, dest_path: str,
-               source_uuid: str, source_path: str,
+def globusCopy(dest_endpoint: str, dest_globus_path: str,
+               source_endpoint: str, source_globus_path: str,
                allow_unsafe=False,
                block_until_complete=False,
                label: str | None = None)-> str:
-    wfapiLog(f"Initiating globus copy from {source_uuid}:{source_path} to {dest_uuid}:{dest_path} to ")
+    """Simulate a transfer: both paths are Globus-visible, not filesystem paths.
+
+    Endpoint arguments may be UUIDs or tags. SPOOF only records the request;
+    it does not resolve collections, translate paths or enforce sandbox bounds.
+    dest_globus_path names a directory; source_globus_path names a file or directory.
+    """
+    wfapiLog(f"Initiating globus copy from {source_endpoint}:{source_globus_path} to {dest_endpoint}:{dest_globus_path}")
     return _fakeGlobusCopy(label, {
-        "source_endpoint": source_uuid,
-        "source_path": source_path,
-        "dest_endpoint": dest_uuid,
-        "dest_path": dest_path,
+        "source_endpoint": source_endpoint,
+        "source_path": source_globus_path,
+        "dest_endpoint": dest_endpoint,
+        "dest_path": dest_globus_path,
     })
 
-def uploadFileGlobus(machine: str, remote_path: str, local_path: str) -> str:
+def uploadFileGlobus(machine: str, remote_path: str, local_filesystem_path: str, *,
+                     remote_path_type: Literal["filesystem", "globus"] = "filesystem",
+                     remote_endpoint: str | None = None) -> str:
+    """Match IRI's selectable remote namespace; file staging is not spoofed."""
     raise NotImplementedError("Globus file staging is unavailable with the SPOOF API")
 
-def downloadFileGlobus(machine: str, remote_path: str, local_path: str) -> str:
+def downloadFileGlobus(machine: str, remote_path: str, local_filesystem_path: str, *,
+                       remote_path_type: Literal["filesystem", "globus"] = "filesystem",
+                       remote_endpoint: str | None = None) -> str:
+    """Match IRI's selectable remote namespace; file staging is not spoofed."""
     raise NotImplementedError("Globus file staging is unavailable with the SPOOF API")
    
 def globusTransferStatus(transfer_id):

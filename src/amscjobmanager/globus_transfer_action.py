@@ -6,6 +6,12 @@ import sqlite3
 
 @dataclass
 class GlobusTransfer(TransferActionBase):
+    """Transfer between collections using Globus-visible paths at both ends.
+
+    source_path is a file or directory in the source collection; dest_path is
+    a directory in the destination collection. Endpoint UUIDs/tags do not
+    change the path namespace. No machine-filesystem translation occurs here.
+    """
     #The <JOBID> substring will be replaced by the job index if present in the path strings
     dest_endpoint: str
     dest_path: str
@@ -13,12 +19,12 @@ class GlobusTransfer(TransferActionBase):
     source_path: str
 
     def initiateAction(self, job_id, name: str | None = None)-> str:
-        source_path = replaceJobIdSubstring(self.source_path, job_id)
-        dest_path = replaceJobIdSubstring(self.dest_path, job_id)
-        if not dest_path.endswith("/"):
-            dest_path += "/"
+        source_globus_path = replaceJobIdSubstring(self.source_path, job_id)
+        dest_globus_path = replaceJobIdSubstring(self.dest_path, job_id)
+        if not dest_globus_path.endswith("/"):
+            dest_globus_path += "/"
         
-        return globusCopy(self.dest_endpoint, dest_path, self.source_endpoint, source_path, allow_unsafe=False, block_until_complete=True, label=name)
+        return globusCopy(self.dest_endpoint, dest_globus_path, self.source_endpoint, source_globus_path, allow_unsafe=False, block_until_complete=True, label=name)
 
     def getInfo(self)->dict:
         """

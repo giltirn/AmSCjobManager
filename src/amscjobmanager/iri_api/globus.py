@@ -231,16 +231,18 @@ def uploadFileGlobus(machine: str, remote_path: str, local_filesystem_path: str,
             shutil.rmtree(temporary_directory, ignore_errors=True)
 
 
-def downloadFileGlobus(machine: str, remote_path: str, local_filesystem_path: str, *,
+def downloadFileGlobus(machine: str, local_filesystem_path: str, remote_path: str, *,
                        remote_path_type: Literal["filesystem", "globus"] = "filesystem",
                        remote_endpoint: str | None = None) -> str:
     """Download through the personal endpoint, blocking until the file is local.
 
-    remote_path names the source FILE, in the machine filesystem by default.
-    Set remote_path_type='globus' for a Globus-visible path; remote_endpoint
-    selects its collection UUID/tag if the machine has overlapping namespaces.
     local_filesystem_path is an OS-accessible destination filename or existing
-    directory. Staging and renaming are automatic. Returns the local file path.
+    directory within a configured local sandbox or the personal-endpoint staging
+    directory. remote_path names the source FILE, in the machine filesystem by
+    default. Set remote_path_type='globus' for a Globus-visible path;
+    remote_endpoint selects its collection UUID/tag if the machine has
+    overlapping namespaces. Staging and renaming are automatic. Returns the
+    local file path.
     """
     staging = getPersonalStagingConfiguration()
     remote_endpoint, remote_globus_path = _file_transfer_location(
@@ -250,6 +252,14 @@ def downloadFileGlobus(machine: str, remote_path: str, local_filesystem_path: st
     if output_filesystem_path.is_dir():
         output_filesystem_path /= pathlib.PurePosixPath(remote_path).name
     output_filesystem_path = output_filesystem_path.resolve()
+    staged_globus_path = _staging_globus_path(output_filesystem_path, staging)
+    if staged_globus_path is None and not checkSafePath(
+        "local", str(output_filesystem_path), allow_tmp=False
+    ):
+        raise ValueError(
+            f"Local download destination is outside the configured local sandbox and staging directory: "
+            f"{local_filesystem_path!r}"
+        )
     output_filesystem_path.parent.mkdir(parents=True, exist_ok=True)
 
     remote_globus_file = pathlib.PurePosixPath(remote_globus_path)
@@ -257,7 +267,6 @@ def downloadFileGlobus(machine: str, remote_path: str, local_filesystem_path: st
     if not remote_filename:
         raise ValueError(f"Remote download path must name a file: {remote_path!r}")
 
-    staged_globus_path = _staging_globus_path(output_filesystem_path, staging)
     temporary_directory = None
     if staged_globus_path is not None and output_filesystem_path.name == remote_filename:
         staging_destination_globus_path = str(pathlib.PurePosixPath(staged_globus_path).parent)

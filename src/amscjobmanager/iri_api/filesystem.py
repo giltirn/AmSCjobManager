@@ -350,7 +350,7 @@ def downloadFileContents(machine: str, remote_path: str)->str:
         temporary_directory, _ = createGlobusStagingDirectory()
         staging_file = temporary_directory / remote_filename
         try:
-            downloadFileGlobus(machine, remote_path, str(staging_file))
+            downloadFileGlobus(machine, str(staging_file), remote_path)
             file_description = local_api.localPathType(str(staging_file)).lower()
             contents = staging_file.read_bytes()
             if "text" in file_description or "empty" in file_description:
@@ -389,7 +389,7 @@ def downloadFile(machine: str, local_path_out: str, remote_path_in: str)->str:
         machine, "downloadFile"
     ) == "globus":
         requireGlobusFallback(machine, "downloadFile")
-        return downloadFileGlobus(machine, remote_path_in, local_path_out)
+        return downloadFileGlobus(machine, local_path_out, remote_path_in)
 
     if isDirectory("local", local_path_out):
         local_path_out = local_api.getAbsoluteLocalPath(local_path_out) + "/" + pathlib.Path(remote_path_in).name

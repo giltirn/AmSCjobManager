@@ -5,8 +5,9 @@ Run manually with a manager configuration containing ``globus_personal_endpoint`
     python3 test/test_globus_file_roundtrip.py path/to/manager-config.json
 
 Each configured IRI sandbox is mapped to its Globus collection. Sandboxes that
-share a collection are tested only once. The script leaves its remote test
-files in the configured sandboxes for inspection.
+share a collection are tested only once. The configuration also needs a local
+sandbox for the final downloaded files. The script leaves its remote test files
+in the configured sandboxes for inspection.
 """
 
 from pathlib import Path, PurePosixPath
@@ -54,9 +55,15 @@ for machine, directories in sandbox_directories.items():
 if not selected_targets:
     raise SystemExit("No configured IRI sandbox maps to a Globus endpoint")
 
+local_sandboxes = sandbox_directories.get("local", [])
+if not local_sandboxes:
+    raise SystemExit("A configured local sandbox is required for Globus downloads")
+
 payload = os.urandom(32 * 1024)
 payload_digest = hashlib.sha256(payload).hexdigest()
-with tempfile.TemporaryDirectory(prefix="amsc-globus-roundtrip-") as temporary_directory:
+with tempfile.TemporaryDirectory(
+    prefix="amsc-globus-roundtrip-", dir=local_sandboxes[0]
+) as temporary_directory:
     temporary_directory = Path(temporary_directory)
     source_file = temporary_directory / "upload-source.bin"
     source_file.write_bytes(payload)
@@ -70,7 +77,7 @@ with tempfile.TemporaryDirectory(prefix="amsc-globus-roundtrip-") as temporary_d
             machine, str(remote_file), str(source_file)
         )
         download_transfer = iri_api.downloadFileGlobus(
-            machine, str(remote_file), str(downloaded_file)
+            machine, str(downloaded_file), str(remote_file)
         )
 
         downloaded_digest = hashlib.sha256(downloaded_file.read_bytes()).hexdigest()

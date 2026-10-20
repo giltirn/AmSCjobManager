@@ -138,7 +138,7 @@ def uploadFileGlobus(machine: str, remote_path: str, local_filesystem_path: str,
     """Match IRI's selectable remote namespace; file staging is not spoofed."""
     raise NotImplementedError("Globus file staging is unavailable with the SPOOF API")
 
-def downloadFileGlobus(machine: str, remote_path: str, local_filesystem_path: str, *,
+def downloadFileGlobus(machine: str, local_filesystem_path: str, remote_path: str, *,
                        remote_path_type: Literal["filesystem", "globus"] = "filesystem",
                        remote_endpoint: str | None = None) -> str:
     """Match IRI's selectable remote namespace; file staging is not spoofed."""

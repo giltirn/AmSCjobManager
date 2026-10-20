@@ -8,9 +8,12 @@ _pending_sandbox_checks: dict[str, list[str]] = {}
 _validating_sandboxes: set[str] = set()
 api_impl = os.getenv("AMSC_JOB_MANAGER_API_IMPL", "IRI") #Control which API implementation is used
 
-def checkSafePath(machine: str, path: str)->bool:
+def checkSafePath(machine: str, path: str, *, allow_tmp: bool = True)->bool:
     """
-    Check if a path is within the sandbox directory structure on the machine
+    Check if a path is within the sandbox directory structure on the machine.
+
+    Set allow_tmp=False to require a configured sandbox directory even for
+    paths under /tmp.
     """
     machine = machine.lower()
     if remote_workdir is None:
@@ -20,7 +23,7 @@ def checkSafePath(machine: str, path: str)->bool:
     
     path_p = pathlib.Path(path).resolve()
     tmp_p = pathlib.Path("/tmp")
-    if path_p.is_relative_to(tmp_p):
+    if allow_tmp and path_p.is_relative_to(tmp_p):
         return True
 
     for sp in remote_workdir[machine]:            

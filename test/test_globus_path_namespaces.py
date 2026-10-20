@@ -27,6 +27,7 @@ class GlobusPathNamespaceTests(unittest.TestCase):
         }))
         self.stack.enter_context(patch.dict(state.special_globus_endpoints, {"personal": "personal-uuid"}))
         self.stack.enter_context(patch.object(manager_globals, "remote_workdir", {
+            "local": [str(self.directory)],
             "polaris": ["/home/alice/safe", "/eagle/project/safe"],
             "aurora": ["/flare/project/safe"],
             "perlmutter": ["/global/safe"], "perlmutter_login": ["/global/login-safe"],
@@ -201,9 +202,70 @@ class GlobusPathNamespaceTests(unittest.TestCase):
         with patch.object(globus, "globusCopy", side_effect=transfer):
             for remote_path, mode in (("/lus/flare/projects/project/safe/result.bin", "filesystem"), ("/project/safe/result.bin", "globus")):
                 with self.subTest(mode=mode):
-                    self.assertEqual(globus.downloadFileGlobus("aurora", remote_path, str(output), remote_path_type=mode), str(output))
+                    self.assertEqual(globus.downloadFileGlobus("aurora", str(output), remote_path, remote_path_type=mode), str(output))
                     self.assertEqual(output.read_bytes(), b"downloaded")
                     self.assertEqual(list(self.staging.iterdir()), [])
+
+    def test_download_rejects_destinations_outside_configured_local_sandbox(self):
+        outside = Path(self.stack.enter_context(tempfile.TemporaryDirectory()))
+        escaped = self.directory / "escape"
+        escaped.symlink_to(outside, target_is_directory=True)
+        for destination in (
+            outside / "output.bin",
+            outside,
+            escaped / "output.bin",
+        ):
+            with self.subTest(destination=destination):
+                with self.assertRaisesRegex(ValueError, "outside the configured local sandbox"):
+                    globus.downloadFileGlobus(
+                        "aurora", str(destination), "/project/safe/result.bin",
+                        remote_path_type="globus",
+                    )
+        self.submit.assert_not_called()
+        self.assertFalse((outside / "output.bin").exists())
+
+    def test_download_accepts_directory_inside_configured_local_sandbox(self):
+        output_directory = self.directory / "downloads"
+        output_directory.mkdir()
+
+        def transfer(dest_endpoint, dest_path, source_endpoint, source_path, **kwargs):
+            relative = PurePosixPath(dest_path).relative_to("/windows/staging")
+            (self.staging / str(relative) / "result.bin").write_bytes(b"downloaded")
+
+        with patch.object(globus, "globusCopy", side_effect=transfer):
+            result = globus.downloadFileGlobus(
+                "aurora", str(output_directory), "/project/safe/result.bin",
+                remote_path_type="globus",
+            )
+        self.assertEqual(result, str(output_directory / "result.bin"))
+        self.assertEqual((output_directory / "result.bin").read_bytes(), b"downloaded")
+
+    def test_download_allows_configured_staging_outside_local_sandbox(self):
+        outside = Path(self.stack.enter_context(tempfile.TemporaryDirectory()))
+        with patch.object(state, "globus_personal_endpoint", {
+            "endpoint_uuid": "personal-uuid",
+            "staging_directory_local": str(outside / "staging"),
+            "staging_directory_globus": "/windows/staging",
+        }):
+            def transfer(dest_endpoint, dest_path, source_endpoint, source_path, **kwargs):
+                relative = PurePosixPath(dest_path).relative_to("/windows/staging")
+                (outside / "staging" / str(relative) / "result.bin").write_bytes(b"downloaded")
+
+            with patch.object(globus, "globusCopy", side_effect=transfer):
+                result = globus.downloadFileGlobus(
+                    "aurora", str(self.directory / "output.bin"), "/project/safe/result.bin",
+                    remote_path_type="globus",
+                )
+                staged_result = globus.downloadFileGlobus(
+                    "aurora", str(outside / "staging" / "result.bin"),
+                    "/project/safe/result.bin", remote_path_type="globus",
+                )
+        self.assertEqual(result, str(self.directory / "output.bin"))
+        self.assertEqual((self.directory / "output.bin").read_bytes(), b"downloaded")
+        self.assertEqual(staged_result, str(outside / "staging" / "result.bin"))
+        self.assertEqual((outside / "staging" / "result.bin").read_bytes(), b"downloaded")
+        self.submit.assert_not_called()
+        self.assertEqual(list((outside / "staging").iterdir()), [outside / "staging" / "result.bin"])
 
     def test_namespace_and_collection_selection_are_validated(self):
         for options in (
@@ -212,7 +274,7 @@ class GlobusPathNamespaceTests(unittest.TestCase):
             {"remote_path_type": "filesystem", "remote_endpoint": HOME_ENDPOINT},
         ):
             with self.subTest(options=options), self.assertRaises(ValueError):
-                globus.downloadFileGlobus("polaris", "/alice/safe/result.bin", str(self.directory / "output.bin"), **options)
+                globus.downloadFileGlobus("polaris", str(self.directory / "output.bin"), "/alice/safe/result.bin", **options)
         self.submit.assert_not_called()
 
 

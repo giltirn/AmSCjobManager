@@ -13,7 +13,6 @@ import globus_sdk
 from .. import globals as manager_globals
 from ..globals import checkSafePath
 from ..logging import wfapiLog
-from ..utils import queryYesNo
 from .config import MACHINE_IMPLEMENTATIONS, TRANSFER_API_BASE
 from .filesystem import getMountedFilesystems, getUnmountedFilesystemError
 from .state import (
@@ -161,7 +160,7 @@ def _staging_globus_path(local_filesystem_path: Path, staging: dict[str, str]) -
         relative_path = local_filesystem_path.expanduser().resolve().relative_to(staging_local)
     except ValueError:
         return None
-    return str(pathlib.PurePosixPath(staging["staging_directory_globus"]) / relative_path)
+    return str(_absolute_remote_path(staging["staging_directory_globus"]) / relative_path)
 
 
 def createGlobusStagingDirectory() -> tuple[Path, str]:
@@ -204,7 +203,7 @@ def uploadFileGlobus(machine: str, remote_path: str, local_filesystem_path: str,
     if remote_path_type == "filesystem":
         safe = checkSafePath(machine, remote_path)
     else:
-        safe = _check_globus_destination(remote_endpoint, remote_globus_path, machine=machine)
+        safe = checkSafeGlobusPath(remote_endpoint, remote_globus_path, machine=machine)
     if not safe:
         raise Exception(f"Attempting to copy data to a disallowed location on {machine}")
 
@@ -314,12 +313,106 @@ def _resolve_globus_endpoint(endpoint: str, globus_path: str) -> str:
     return endpoint
 
 
-def _check_globus_destination(endpoint: str, destination_globus_path: str, *, machine=None) -> bool:
-    """Compare a Globus destination with sandbox roots translated into Globus paths.
+def _resolve_transfer_path(endpoint: str, path: str, path_type: str) -> tuple[str, str]:
+    """Resolve one side of a transfer to a collection and its Globus path.
 
-    Known collections deny writes outside their configured boundaries. Unknown
-    collections retain the explicit permission prompt and need no IRI resource.
-    A machine context limits permission to that machine's own sandboxes.
+    Args:
+        endpoint: A machine name, configured endpoint tag, or collection UUID.
+            A machine name selects a collection using the path; a tag or UUID
+            selects that collection directly. Matching is case-insensitive.
+        path: An absolute path without ``..``. Its namespace is specified by
+            ``path_type``.
+        path_type: ``"globus"`` if ``path`` is already visible on the Globus
+            collection, or ``"filesystem"`` if it is a machine filesystem
+            path. Personal endpoint paths must be within the configured staging
+            root in the selected namespace.
+
+    Returns:
+        A ``(collection_id, globus_path)`` tuple of strings. The first value
+        is normally a collection UUID; with ``path_type="globus"``, an unknown
+        endpoint string is returned lowercased without validation. A Globus
+        path stays in that namespace. A filesystem path is translated using
+        the configured route with the longest matching filesystem root.
+
+    Raises:
+        ValueError: The path or path type is invalid, a personal endpoint path
+            is outside staging, or a filesystem route is missing or ambiguous.
+    """
+    if path_type not in {"filesystem", "globus"}:
+        raise ValueError("path type must be 'filesystem' or 'globus'")
+
+    validated_path = _absolute_remote_path(path)
+    endpoint = endpoint.lower()
+    personal_uuid = special_globus_endpoints.get("personal")
+    if endpoint == "personal" and personal_uuid is None:
+        raise ValueError("Personal Globus endpoint is not configured")
+    if personal_uuid is not None and replaceSpecialGlobusEndpoint(endpoint).lower() == personal_uuid.lower():
+        staging = getPersonalStagingConfiguration()
+        if path_type == "globus":
+            staging_root = _absolute_remote_path(staging["staging_directory_globus"])
+            if not validated_path.is_relative_to(staging_root):
+                raise ValueError(f"Personal Globus path is outside the staging directory: {path!r}")
+            return personal_uuid.lower(), str(validated_path)
+        globus_path = _staging_globus_path(Path(path), staging)
+        if globus_path is None:
+            raise ValueError(f"Personal filesystem path is outside the staging directory: {path!r}")
+        return personal_uuid.lower(), globus_path
+
+    if path_type == "globus":
+        globus_path = str(validated_path)
+        return _resolve_globus_endpoint(endpoint, globus_path), globus_path
+
+    filesystem_path = validated_path
+    machine_endpoint = endpoint in MACHINE_IMPLEMENTATIONS
+    collection = None if machine_endpoint else replaceSpecialGlobusEndpoint(endpoint)
+    matches = []
+    for machine in ([endpoint] if machine_endpoint else MACHINE_IMPLEMENTATIONS):
+        for filesystem in getMountedFilesystems(machine).values():
+            for route in filesystem.get("globus_filesystems", []):
+                route_collection = replaceSpecialGlobusEndpoint(route["endpoint"])
+                if collection is not None and route_collection != collection:
+                    continue
+                for root_name in route["filesystem_roots"]:
+                    root = pathlib.PurePosixPath(root_name)
+                    if filesystem_path.is_relative_to(root):
+                        globus_path = str(pathlib.PurePosixPath(route["globus_root"]) / filesystem_path.relative_to(root))
+                        matches.append((len(root.parts), route_collection, globus_path))
+    if not matches:
+        if machine_endpoint and (error := getUnmountedFilesystemError(endpoint, filesystem_path, "globus_filesystems")):
+            raise error
+        raise ValueError(f"No configured filesystem-to-Globus route for endpoint {endpoint!r} and path {path!r}")
+    longest_root = max(length for length, _, _ in matches)
+    locations = {(route_collection, globus_path) for length, route_collection, globus_path in matches if length == longest_root}
+    if len(locations) != 1:
+        raise ValueError(f"Ambiguous filesystem-to-Globus routes for endpoint {endpoint!r} and path {path!r}")
+    return locations.pop()
+
+
+def checkSafeGlobusPath(endpoint: str, destination_globus_path: str, *, machine=None) -> bool:
+    """Decide whether a write to a Globus path is allowed by configured sandboxes.
+
+    Note that, unlike checkSafePath, if an endpoint is not known (i.e. it cannot be mapped to a machine), this check will *allow* the Globus write. We
+    only enforce sandboxing on known machines.
+
+    Machine filesystem sandbox roots are translated to Globus paths before
+    comparison. Personal endpoint staging roots are validated separately by
+    _resolve_transfer_path for both sides of a transfer.
+
+    Args:
+        endpoint: Destination collection UUID, configured endpoint tag, or
+            machine name. It is resolved to a collection identifier for the
+            comparison.
+        destination_globus_path: Absolute destination path in that collection's
+            Globus namespace, rather than a machine filesystem path.
+        machine: Optional machine name that limits the check to that machine's
+            sandbox directories. When supplied, a path with no matching
+            sandbox is rejected.
+
+    Returns:
+        ``True`` if the destination lies within an applicable sandbox, or if
+        no configured sandbox applies and no machine was specified. ``False``
+        if a machine was specified or a sandbox matches the collection, but
+        the path lies outside the allowed roots. No permission prompt occurs.
     """
     endpoint_uuid = _resolve_globus_endpoint(endpoint, destination_globus_path)
     destination = _absolute_remote_path(destination_globus_path)
@@ -338,49 +431,49 @@ def _check_globus_destination(endpoint: str, destination_globus_path: str, *, ma
             known_endpoint = True
             if destination.is_relative_to(_absolute_remote_path(sandbox_globus_path)):
                 return True
-    if "personal" in special_globus_endpoints and endpoint_uuid == replaceSpecialGlobusEndpoint("personal"):
-        known_endpoint = True
-        staging = getPersonalStagingConfiguration()
-        if destination.is_relative_to(_absolute_remote_path(staging["staging_directory_globus"])):
-            return True
     if known_endpoint:
         return False
-    return queryYesNo(f"Do you give permission to write to Globus path {destination} on endpoint {endpoint_uuid}?")
+    return True
 
 
-def globusCopy(dest_endpoint: str, dest_globus_path: str,
-               source_endpoint: str, source_globus_path: str,
+def globusCopy(dest_endpoint: str, dest_path: str,
+               source_endpoint: str, source_path: str,
                allow_unsafe=False,
                block_until_complete=False,
-               label: str | None = None)-> str:
+               label: str | None = None, *,
+               source_path_type: Literal["filesystem", "globus"] = "globus",
+               dest_path_type: Literal["filesystem", "globus"] = "globus") -> str:
     """
-    Perform a transfer using Globus-visible paths, NEVER machine filesystem paths.
+    Transfer between collections, translating filesystem paths when requested.
     Args:
-       dest_endpoint: Destination collection UUID, endpoint tag, or unambiguous machine tag.
-       dest_globus_path: Globus-visible destination DIRECTORY; include its trailing '/'.
-       source_endpoint: Source collection UUID, endpoint tag, or unambiguous machine tag.
-       source_globus_path: Globus-visible source file or directory.
+       dest_endpoint: Destination collection UUID, endpoint tag, or machine name.
+       dest_path: Destination directory in the selected path namespace.
+       source_endpoint: Source collection UUID, endpoint tag, or machine name.
+       source_path: Source file or directory in the selected path namespace.
        allow_unsafe : Allow movement to paths outside of the sandbox or user permissions
        block_until_complete : Poll the transfer status every 20s until the transfer is complete before returning
+       source_path_type: Namespace of source_path; defaults to 'globus'.
+       dest_path_type: Namespace of dest_path; defaults to 'globus'.
     Return:
        The transfer ID as a string
 
     Notes:
-       Tags resolve collection identifiers only; paths remain in the Globus
-       namespace. Machine tags with multiple matching collections require an
-       explicit collection UUID instead. Sandbox filesystem roots are translated
-       before comparison; unknown collections require explicit user permission.
+       Filesystem paths require a configured route for the named machine or
+       collection; unknown or ambiguous routes raise ValueError. Personal
+       endpoint paths must be within the configured staging root in their
+       selected namespace. Local staging and file movement are handled by
+       uploadFileGlobus and downloadFileGlobus, not by this function.
+       Sandbox filesystem roots are translated before checking the destination.
        If the source is a file, its filename is preserved in the destination
        directory. For a directory source, only its contents are copied.
     """
        
-    dest_globus_path = str(_absolute_remote_path(dest_globus_path)).rstrip("/") + "/"
-    source_globus_path = str(_absolute_remote_path(source_globus_path))
-    destination_uuid = _resolve_globus_endpoint(dest_endpoint, dest_globus_path)
-    source_uuid = _resolve_globus_endpoint(source_endpoint, source_globus_path)
+    destination_uuid, dest_globus_path = _resolve_transfer_path(dest_endpoint, dest_path, dest_path_type)
+    source_uuid, source_globus_path = _resolve_transfer_path(source_endpoint, source_path, source_path_type)
+    dest_globus_path = dest_globus_path.rstrip("/") + "/"
     wfapiLog(f"Initiating globus copy from {source_uuid}:{source_globus_path} to {destination_uuid}:{dest_globus_path}")
     machine = dest_endpoint.lower() if dest_endpoint.lower() in MACHINE_IMPLEMENTATIONS else None
-    if not allow_unsafe and not _check_globus_destination(destination_uuid, dest_globus_path, machine=machine):
+    if not allow_unsafe and not checkSafeGlobusPath(destination_uuid, dest_globus_path, machine=machine):
         raise Exception(f"Attempting to copy data to a disallowed Globus location on {dest_endpoint}")
 
     trans_args = {

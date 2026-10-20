@@ -10,6 +10,7 @@ import unittest
 from unittest.mock import call, patch
 
 from amscjobmanager import spoof_api
+from amscjobmanager.iri_api import state
 from amscjobmanager.action_manager import ActionStatus
 from amscjobmanager.actions_base import ActionClass
 from amscjobmanager.compute_actions import ExecuteBatchScriptComputeAction
@@ -34,7 +35,10 @@ class SpoofWorkflowTests(unittest.TestCase):
                 gpus_per_rank=1, time="300", queue="debug", account="my_proj1",
                 job_run_dir="/fake/run",
             )
-            transfer_id = spoof_api.globusCopy("perlmutter", "/fake/destination/", "polaris", "/fake/source.txt")
+            transfer_id = spoof_api.globusCopy(
+                dest_endpoint="perlmutter", dest_path="/fake/destination/",
+                source_endpoint="polaris", source_path="/fake/source.txt",
+            )
             self.assertEqual(duration.call_args_list, [call(1, 3), call(1, 3)])
             self.assertEqual(spoof_api.getJobState("perlmutter", compute_id), "active")
             self.assertEqual(spoof_api.globusTransferStatus(transfer_id), "ACTIVE")
@@ -43,6 +47,26 @@ class SpoofWorkflowTests(unittest.TestCase):
             self.assertEqual(spoof_api.globusTransferStatus(transfer_id), "ACTIVE")
             clock.return_value = 103
             self.assertEqual(spoof_api.globusTransferStatus(transfer_id), "SUCCEEDED")
+
+    def test_personal_transfer_paths_follow_staging_rules(self):
+        staging = {
+            "endpoint_uuid": "personal-uuid",
+            "staging_directory_local": "/local/staging",
+            "staging_directory_globus": "/globus/staging",
+        }
+        with patch.object(state, "globus_personal_endpoint", staging), \
+             patch.dict(state.special_globus_endpoints, {"personal": "personal-uuid"}):
+            transfer_id = spoof_api.globusCopy(
+                "personal", "/globus/staging/output", "external-uuid", "/input.txt",
+            )
+            self.assertEqual(spoof_api.transfer_details[transfer_id]["dest_path"], "/globus/staging/output")
+            transfer_id = spoof_api.globusCopy(
+                "personal-uuid", "/local/staging/output", "external-uuid", "/input.txt",
+                dest_path_type="filesystem",
+            )
+            self.assertEqual(spoof_api.transfer_details[transfer_id]["dest_path"], "/globus/staging/output")
+            with self.assertRaisesRegex(ValueError, "outside the staging directory"):
+                spoof_api.globusCopy("personal", "/outside/output", "external-uuid", "/input.txt")
 
     @staticmethod
     def _compute_action(marker):

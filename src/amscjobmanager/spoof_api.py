@@ -34,6 +34,8 @@ def setupWorkflowAgentFromConfig(config) -> dict:
 def setupWorkflowAgent(iri_implementations: dict, iriapi_transfer_key_path: str,
                        work_dir: dict, globus_personal_endpoint_config=None,
                        iri_config_cache_directory: str | None = None):
+    from .iri_api.state import _configure_personal_globus_endpoint
+    _configure_personal_globus_endpoint(globus_personal_endpoint_config)
     globals.remote_workdir={ machine.lower() : directory for machine, directory in work_dir.items() }
     wfapiLog("Using SPOOF api with workdir", globals.remote_workdir)
     return globals.remote_workdir
@@ -101,23 +103,33 @@ def _fakeGlobusCopy(label=None, details=None):
     
     return key
 
-def globusCopy(dest_endpoint: str, dest_globus_path: str,
-               source_endpoint: str, source_globus_path: str,
+def globusCopy(dest_endpoint: str, dest_path: str,
+               source_endpoint: str, source_path: str,
                allow_unsafe=False,
                block_until_complete=False,
-               label: str | None = None)-> str:
-    """Simulate a transfer: both paths are Globus-visible, not filesystem paths.
+               label: str | None = None, *,
+               source_path_type: Literal["filesystem", "globus"] = "globus",
+               dest_path_type: Literal["filesystem", "globus"] = "globus") -> str:
+    """Simulate a transfer, translating configured filesystem paths if selected.
 
-    Endpoint arguments may be UUIDs or tags. SPOOF only records the request;
-    it does not resolve collections, translate paths or enforce sandbox bounds.
-    dest_globus_path names a directory; source_globus_path names a file or directory.
+    Endpoint arguments may be UUIDs or tags. SPOOF records the resolved request
+    but does not enforce sandbox bounds.
+    dest_path names a directory; source_path names a file or directory.
     """
-    wfapiLog(f"Initiating globus copy from {source_endpoint}:{source_globus_path} to {dest_endpoint}:{dest_globus_path}")
+    from .iri_api.state import special_globus_endpoints
+    personal_uuid = special_globus_endpoints.get("personal", "").lower()
+    personal_endpoints = {"personal", personal_uuid} if personal_uuid else {"personal"}
+    if (source_path_type != "globus" or dest_path_type != "globus"
+            or source_endpoint.lower() in personal_endpoints or dest_endpoint.lower() in personal_endpoints):
+        from .iri_api.globus import _resolve_transfer_path
+        dest_endpoint, dest_path = _resolve_transfer_path(dest_endpoint, dest_path, dest_path_type)
+        source_endpoint, source_path = _resolve_transfer_path(source_endpoint, source_path, source_path_type)
+    wfapiLog(f"Initiating globus copy from {source_endpoint}:{source_path} to {dest_endpoint}:{dest_path}")
     return _fakeGlobusCopy(label, {
         "source_endpoint": source_endpoint,
-        "source_path": source_globus_path,
+        "source_path": source_path,
         "dest_endpoint": dest_endpoint,
-        "dest_path": dest_globus_path,
+        "dest_path": dest_path,
     })
 
 def uploadFileGlobus(machine: str, remote_path: str, local_filesystem_path: str, *,

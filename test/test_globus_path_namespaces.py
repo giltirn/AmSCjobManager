@@ -33,18 +33,16 @@ class GlobusPathNamespaceTests(unittest.TestCase):
         }))
         self.stack.enter_context(patch.object(state, "setupIRIapiCompute", side_effect=AssertionError("Must not authenticate with IRI")))
         self.submit = self.stack.enter_context(patch.object(globus, "_transfer_post", return_value=({"transfer_uuid": "transfer-id"}, 200)))
-        self.permission = self.stack.enter_context(patch.object(globus, "queryYesNo", return_value=False))
 
     def test_copy_checks_translated_sandbox_and_preserves_globus_namespace(self):
         self.assertEqual(globus.globusCopy(
-            dest_endpoint=HOME_ENDPOINT, dest_globus_path="/alice/safe/nested",
-            source_endpoint="external-uuid", source_globus_path="/input.txt",
+            dest_endpoint=HOME_ENDPOINT, dest_path="/alice/safe/nested",
+            source_endpoint="external-uuid", source_path="/input.txt",
         ), "transfer-id")
         request = self.submit.call_args.kwargs["data"]
         self.assertEqual(request["destination_uuid"], HOME_ENDPOINT)
         self.assertEqual(request["destination_path"], "/alice/safe/nested/")
         self.assertEqual(request["source_path"], "/input.txt")
-        self.permission.assert_not_called()
         self.submit.reset_mock()
         # A filesystem path must not be compared against the filesystem sandbox
         # or translated silently when supplied to this Globus-path-only API.
@@ -62,24 +60,107 @@ class GlobusPathNamespaceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "collection UUID"):
             globus.globusCopy("polaris", "/alice/safe/", "external-uuid", "/input.txt")
 
+    def test_copy_translates_filesystem_paths_for_machine_and_collection(self):
+        self.assertEqual(globus.globusCopy(
+            "polaris", "/home/alice/safe/output", FLARE_ENDPOINT,
+            "/lus/flare/projects/project/input.bin",
+            dest_path_type="filesystem", source_path_type="filesystem",
+        ), "transfer-id")
+        request = self.submit.call_args.kwargs["data"]
+        self.assertEqual(request["destination_uuid"], HOME_ENDPOINT)
+        self.assertEqual(request["destination_path"], "/alice/safe/output/")
+        self.assertEqual(request["source_uuid"], FLARE_ENDPOINT)
+        self.assertEqual(request["source_path"], "/project/input.bin")
+
+        globus.globusCopy(
+            HOME_ENDPOINT, "/home/alice/safe/", "dtn", "/global/source.bin",
+            dest_path_type="filesystem", source_path_type="filesystem",
+        )
+        request = self.submit.call_args.kwargs["data"]
+        self.assertEqual(request["destination_path"], "/alice/safe/")
+        self.assertEqual(request["source_uuid"], state.replaceSpecialGlobusEndpoint("dtn"))
+
+    def test_filesystem_paths_require_a_known_unambiguous_route(self):
+        for endpoint, path, options in (
+            ("external-uuid", "/anywhere/file", {"source_path_type": "filesystem"}),
+            (HOME_ENDPOINT, "/outside/file", {"source_path_type": "filesystem"}),
+            ("aurora", "/home/alice/file", {"source_path_type": "filesystem"}),
+            (HOME_ENDPOINT, "/home/alice/../file", {"source_path_type": "filesystem"}),
+            (HOME_ENDPOINT, "/home/alice/file", {"source_path_type": "invalid"}),
+        ):
+            with self.subTest(endpoint=endpoint, path=path), self.assertRaises(ValueError):
+                globus.globusCopy(HOME_ENDPOINT, "/alice/safe/", endpoint, path, **options)
+        self.submit.assert_not_called()
+        with self.assertRaisesRegex(ValueError, "No configured filesystem-to-Globus route"):
+            globus.globusCopy(
+                "external-uuid", "/home/alice/safe/", "dtn", "/global/input.bin",
+                dest_path_type="filesystem",
+            )
+        self.submit.assert_not_called()
+
+        ambiguous_routes = {"one": {"globus_filesystems": [
+            {"endpoint": HOME_ENDPOINT, "filesystem_roots": ["/home"], "globus_root": "/first"},
+            {"endpoint": HOME_ENDPOINT, "filesystem_roots": ["/home"], "globus_root": "/second"},
+        ]}}
+        with patch.object(globus, "getMountedFilesystems", return_value=ambiguous_routes):
+            with self.assertRaisesRegex(ValueError, "Ambiguous filesystem-to-Globus routes"):
+                globus.globusCopy(
+                    HOME_ENDPOINT, "/alice/safe/", HOME_ENDPOINT, "/home/alice/input.bin",
+                    source_path_type="filesystem",
+                )
+        self.submit.assert_not_called()
+
     def test_known_roots_reject_sibling_prefixes_and_parent_traversal(self):
         for destination in ("/project/safe-elsewhere/", "/project/safe/../outside/", "relative/"):
             with self.subTest(destination=destination), self.assertRaises(Exception):
                 globus.globusCopy(EAGLE_ENDPOINT, destination, "external-uuid", "/input.txt")
         self.submit.assert_not_called()
-        self.permission.assert_not_called()
 
-    def test_personal_sandbox_uses_globus_staging_root_not_local_os_path(self):
-        globus.globusCopy("personal", "/windows/staging/results/", "external-uuid", "/input.txt")
-        self.assertEqual(self.submit.call_args.kwargs["data"]["destination_uuid"], "personal-uuid")
-        with self.assertRaisesRegex(Exception, "disallowed Globus"):
-            globus.globusCopy("personal", str(self.staging), "external-uuid", "/input.txt")
-        self.permission.assert_not_called()
+    def test_personal_paths_use_only_the_configured_staging_roots(self):
+        with patch.object(globus, "createGlobusStagingDirectory", side_effect=AssertionError("No staging creation expected")), \
+             patch.object(globus, "globusTransferStatus", side_effect=AssertionError("Nonblocking transfer must not poll")):
+            globus.globusCopy("personal", "/windows/staging/results/", "external-uuid", "/input.txt")
+            self.assertEqual(self.submit.call_args.kwargs["data"]["destination_uuid"], "personal-uuid")
+            globus.globusCopy(
+                "personal-uuid", str(self.staging / "results"), "external-uuid", "/input.txt",
+                dest_path_type="filesystem",
+            )
+            self.assertEqual(self.submit.call_args.kwargs["data"]["destination_path"], "/windows/staging/results/")
+            globus.globusCopy(
+                "external-uuid", "/output/", "personal", str(self.staging / "input.txt"),
+                source_path_type="filesystem",
+            )
+            self.assertEqual(self.submit.call_args.kwargs["data"]["source_path"], "/windows/staging/input.txt")
+        self.assertFalse(self.staging.exists())
 
-    def test_arbitrary_external_collections_keep_explicit_permission_prompt(self):
-        self.permission.return_value = True
+    def test_personal_paths_outside_staging_are_rejected_on_both_sides(self):
+        for endpoint, path, options in (
+            ("personal", "/other/visible/results/", {}),
+            ("personal-uuid", str(self.directory / "output"), {"dest_path_type": "filesystem"}),
+            ("personal", "/outside/output", {"allow_unsafe": True}),
+        ):
+            with self.subTest(endpoint=endpoint, path=path), self.assertRaisesRegex(ValueError, "outside the staging directory"):
+                globus.globusCopy(endpoint, path, "external-uuid", "/input.txt", **options)
+        for path, options in (
+            ("/outside/input.txt", {}),
+            (str(self.directory / "input.txt"), {"source_path_type": "filesystem"}),
+        ):
+            with self.subTest(path=path), self.assertRaisesRegex(ValueError, "outside the staging directory"):
+                globus.globusCopy("external-uuid", "/output/", "personal", path, **options)
+        self.submit.assert_not_called()
+
+    def test_personal_filesystem_path_cannot_escape_staging_through_symlink(self):
+        self.staging.mkdir()
+        (self.staging / "escape").symlink_to(self.directory, target_is_directory=True)
+        with self.assertRaisesRegex(ValueError, "outside the staging directory"):
+            globus.globusCopy(
+                "personal", str(self.staging / "escape" / "output"),
+                "external-uuid", "/input.txt", dest_path_type="filesystem",
+            )
+        self.submit.assert_not_called()
+
+    def test_arbitrary_external_collections_transfer_without_permission_prompt(self):
         globus.globusCopy("unknown-destination", "/external/output/", "unknown-source", "/external/input.txt")
-        self.permission.assert_called_once()
         self.assertEqual(self.submit.call_args.kwargs["data"]["destination_path"], "/external/output/")
 
     def test_upload_supports_both_namespaces_and_renames_staged_source(self):

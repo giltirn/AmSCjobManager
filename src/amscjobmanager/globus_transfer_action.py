@@ -31,7 +31,7 @@ class GlobusTransfer(TransferActionBase):
             dest_path += "/"
         
         return globusCopy(self.dest_endpoint, dest_path, self.source_endpoint, source_path,
-                          allow_unsafe=False, block_until_complete=True, label=name,
+                          allow_unsafe=False, block_until_complete=False, label=name,
                           source_path_type=self.source_path_type, dest_path_type=self.dest_path_type)
 
     def getInfo(self)->dict:

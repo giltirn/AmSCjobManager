@@ -67,6 +67,14 @@ def globusTransferStatus(transfer_id)-> str:
     j = _transfer_get(f"movement/transfer/globus/{transfer_id}")
     return j["status"]
 
+def cancelGlobusTransfer(transfer_id: str) -> None:
+    """Request cancellation of a transfer task by its Globus task ID."""
+    token = getTransferToken("globus_transfer")
+    client = globus_sdk.TransferClient(
+        authorizer=globus_sdk.AccessTokenAuthorizer(token)
+    )
+    client.cancel_task(transfer_id)
+
 def findGlobusTransfersByLabel(label: str) -> str | None:
     """Return the unique Globus task ID bearing an exact task label."""
     token = getTransferToken("globus_transfer")

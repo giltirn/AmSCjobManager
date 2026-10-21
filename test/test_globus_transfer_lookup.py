@@ -1,4 +1,4 @@
-"""Integration test for labeled Globus transfer discovery.
+"""Check that an IRI transfer ID matches its Globus label lookup ID.
 
 Run with an IRI manager configuration containing a Perlmutter sandbox:
 
@@ -14,13 +14,7 @@ import sys
 import time
 import uuid
 
-from amscjobmanager.api_general import (
-    findGlobusTransfersByLabel,
-    globusCopy,
-    remoteMkdir,
-    setupWorkflowAgentFromConfig,
-    uploadBytes,
-)
+from amscjobmanager import iri_api
 from amscjobmanager.manager_config import readManagerConfigFile
 from amscjobmanager.manager_config_models import ManagerConfig
 
@@ -33,7 +27,7 @@ if len(sys.argv) != 2:
     )
 
 config = readManagerConfigFile(sys.argv[1])
-sandbox_directories = setupWorkflowAgentFromConfig(config)
+sandbox_directories = iri_api.setupWorkflowAgentFromConfig(config)
 
 perlmutter_sandbox = PurePosixPath(sandbox_directories["perlmutter"][0])
 test_id = uuid.uuid4().hex
@@ -44,16 +38,17 @@ label = f"amscjm:transfer-wrapper-test:{test_id}"
 
 # NERSC recommends using its DTN collection for all transfers. The configured
 # Perlmutter sandbox path is shared with that collection.
-remoteMkdir("perlmutter", str(test_dir), allow_unsafe=False)
-remoteMkdir("perlmutter", str(destination_dir), allow_unsafe=False)
-uploadBytes(
+iri_api.remoteMkdir("perlmutter", str(test_dir), allow_unsafe=False)
+iri_api.remoteMkdir("perlmutter", str(destination_dir), allow_unsafe=False)
+iri_api.uploadBytes(
     "perlmutter",
     str(source_file),
     BytesIO(b"AmSC job manager Globus wrapper integration test\n"),
     allow_unsafe=False,
 )
 
-transfer_id = globusCopy(
+# Submit through IRI's movement API; discovery below uses Globus Transfer.
+transfer_id = iri_api.globusCopy(
     "dtn",
     f"{destination_dir}/",
     "dtn",
@@ -62,19 +57,22 @@ transfer_id = globusCopy(
     block_until_complete=False,
     label=label,
 )
-assert transfer_id
+if not transfer_id:
+    raise AssertionError("IRI did not return a transfer ID")
 
 # Task-list indexing can lag submission.  Completed tasks remain discoverable,
 # so this works whether the tiny transfer is active or already historical.
 deadline = time.monotonic() + 60
 found_transfer_id = None
 while time.monotonic() < deadline:
-    found_transfer_id = findGlobusTransfersByLabel(label)
+    found_transfer_id = iri_api.findGlobusTransferByLabel(label)
     if found_transfer_id is not None:
         break
     time.sleep(2)
 
-assert found_transfer_id == transfer_id, (
-    f"Transfer {transfer_id} was not found by label {label}; got {found_transfer_id}"
-)
+if found_transfer_id != transfer_id:
+    raise AssertionError(
+        f"IRI returned transfer ID {transfer_id!r} for label {label!r}, "
+        f"but Globus returned {found_transfer_id!r}"
+    )
 print(f"Found Globus transfer {transfer_id} by label {label}")

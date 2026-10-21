@@ -85,6 +85,120 @@ class JobData:
                                 ) )
             job_id = cur.lastrowid
             return job_id
+
+    def removeJob(self, job_id: int, cancel_running: bool = True) -> None:
+        """Mark a workflow canceled and optionally cancel its remote action.
+
+        ``job_id`` identifies the workflow. With the default
+        ``cancel_running=True``, the workflow first enters ``CANCELING`` and
+        cancellation is requested for its current compute or Globus action.
+        API failures propagate but leave that intent in place for retry. The
+        workflow and earlier action records remain in the database. Call this
+        through ``JobManager``
+        when its background thread is running so cancellation is serialized
+        with scheduling. Raise ``ValueError`` for an unknown job.
+        """
+        if type(job_id) is not int or job_id < 1:
+            raise ValueError("job_id must be a positive integer")
+        if type(cancel_running) is not bool:
+            raise TypeError("cancel_running must be a boolean")
+
+        job = self.conn.execute(
+            "SELECT head_action_id, head_action_class, head_action_status "
+            "FROM jobs WHERE job_id = ?", (job_id,),
+        ).fetchone()
+        if job is None:
+            raise ValueError(f"Unknown job_id: {job_id}")
+
+        if job["head_action_status"] == ActionStatus.CANCELED.name:
+            return
+        if job["head_action_status"] == ActionStatus.CANCELING.name:
+            self.reconcileCancelingActions([job_id], raise_errors=True)
+            return
+
+        action_class = ActionClass[job["head_action_class"]]
+        needs_cancellation = job["head_action_status"] in (
+            ActionStatus.SCHEDULING.name, ActionStatus.ACTIVE.name
+        ) or (action_class == ActionClass.TRANSFER and
+              job["head_action_status"] == ActionStatus.FAILED.name)
+        if cancel_running and needs_cancellation:
+            if job["head_action_id"] is None:
+                raise RuntimeError(f"Job {job_id} has no current action ID")
+            with self.conn as conn:
+                conn.execute(
+                    "UPDATE jobs SET head_action_status = ?, last_status_change = ? "
+                    "WHERE job_id = ?",
+                    (ActionStatus.CANCELING.name, int(time.time()), job_id),
+                )
+            self._maybeSimulateCrash("job_head_canceling_persisted")
+            self.reconcileCancelingActions([job_id], raise_errors=True)
+            return
+
+        with self.conn as conn:
+            conn.execute(
+                "UPDATE jobs SET head_action_status = ?, last_status_change = ? "
+                "WHERE job_id = ?",
+                (ActionStatus.CANCELED.name, int(time.time()), job_id),
+            )
+
+    def reconcileCancelingActions(self, job_ids=None, *, raise_errors=False):
+        """Reconcile canceling workflow heads through their action managers.
+
+        ``job_ids`` optionally limits reconciliation to specific workflows.
+        Recreate a missing action row if submission crashed before recording
+        it, then ask its ActionManager to record and reconcile cancellation.
+        Leave the workflow ``CANCELING`` while remote discovery may lag.
+        ``raise_errors`` propagates API errors to a direct caller; otherwise
+        failed requests remain ``CANCELING`` for the next manager pass.
+        """
+        with self.conn as conn:
+            if job_ids is None:
+                canceling_jobs = conn.execute(
+                    "SELECT job_id, workflow, workflow_stage, head_action_id, "
+                    "head_action_class FROM jobs WHERE head_action_status = ?",
+                    (ActionStatus.CANCELING.name,),
+                ).fetchall()
+            else:
+                placeholders = ",".join("?" for _ in job_ids)
+                canceling_jobs = conn.execute(
+                    "SELECT job_id, workflow, workflow_stage, head_action_id, "
+                    "head_action_class FROM jobs WHERE head_action_status = ? "
+                    f"AND job_id IN ({placeholders})",
+                    (ActionStatus.CANCELING.name, *job_ids),
+                ).fetchall()
+
+        for job in canceling_jobs:
+            try:
+                # A crash during submission may leave only the job head. Its
+                # action name lets us find remote work without submitting any.
+                action_id = job["head_action_id"]
+                if action_id is not None:
+                    action_class = ActionClass[job["head_action_class"]]
+                    action_manager = self.action_man[action_class]
+                    if not action_manager.hasAction(action_id):
+                        workflow = _unser(job["workflow"])
+                        action = workflow[job["workflow_stage"]]
+                        action_manager.recordSchedulingIntent(
+                            action, job["job_id"], action_id
+                        )
+                    action_manager.recordCancelingIntent(action_id)
+                    if action_manager.reconcileCancelingAction(action_id) is None:
+                        continue
+
+                self._maybeSimulateCrash("action_canceled_before_job_head_update")
+                with self.conn as conn:
+                    conn.execute(
+                        "UPDATE jobs SET head_action_status = ?, last_status_change = ? "
+                        "WHERE job_id = ? AND head_action_status = ?",
+                        (ActionStatus.CANCELED.name, int(time.time()), job["job_id"],
+                         ActionStatus.CANCELING.name),
+                    )
+            except SimulatedCrash:
+                raise
+            except Exception as exc:
+                if raise_errors:
+                    raise
+                wfmanLog(f"Could not reconcile cancellation for job {job['job_id']}: {exc}")
    
     def jobState(self, job_id):
         """Return the complete state of the workflow"""
@@ -101,6 +215,10 @@ class JobData:
             return ActionStatus.PENDING
         elif state['head_action_status'] == ActionStatus.FAILED:
             return ActionStatus.FAILED
+        elif state['head_action_status'] == ActionStatus.CANCELED:
+            return ActionStatus.CANCELED
+        elif state['head_action_status'] == ActionStatus.CANCELING:
+            return ActionStatus.CANCELING
         elif state['head_action_class'] == ActionClass.NONE and state['head_action_status'] == ActionStatus.COMPLETED:
             return ActionStatus.COMPLETED
         else:
@@ -206,7 +324,7 @@ class JobData:
 
         if job_ids == None:        
             with self.conn as conn:
-                count = int(conn.execute("SELECT COUNT(*) FROM jobs WHERE head_action_status IN (?, ?)", (ActionStatus.SCHEDULING.name, ActionStatus.ACTIVE.name) ).fetchone()[0])
+                count = int(conn.execute("SELECT COUNT(*) FROM jobs WHERE head_action_status IN (?, ?, ?)", (ActionStatus.SCHEDULING.name, ActionStatus.ACTIVE.name, ActionStatus.CANCELING.name) ).fetchone()[0])
                 rem =  self.max_workflows_active - count
 
                 if rem > 0:
@@ -301,6 +419,7 @@ class JobData:
         Updates knowledge of action state and then progresses the workflow for those actions that have completed
         poll_freq: control the minimum time lag between manager polls of the API for status updates. Queries within this period return only the cached status.
         force_poll: force the manager to poll the API for status updates, use wisely!"""
+        self.reconcileCancelingActions()
         self.reconcileSchedulingActions()
         self.progressActiveActions(poll_freq=poll_freq, force_poll=force_poll)
         self.progressActiveWorkflows()

@@ -1,7 +1,10 @@
 from dataclasses import dataclass
 from typing import Literal
 from .actions_base import replaceJobIdSubstring, TransferActionBase
-from .api_general import globusCopy, globusTransferStatus, findGlobusTransferByLabel
+from .api_general import (
+    cancelGlobusTransfer, findGlobusTransferByLabel, globusCopy,
+    globusTransferStatus,
+)
 from .action_manager import ActionManager, ActionStatus
 import sqlite3
 
@@ -39,6 +42,7 @@ class GlobusTransfer(TransferActionBase):
 
 class GlobusDataTransfers(ActionManager):
     """Action manager for Globus transfers"""
+    terminal_api_statuses = {"SUCCEEDED", "FAILED"}
     def __init__(self, connection : sqlite3.Connection, **kwargs):
         #"ACTIVE"  The task is in progress.
         #"INACTIVE" The task has been suspended and will not continue without intervention. Currently, only credential expiration will cause this state.
@@ -51,3 +55,6 @@ class GlobusDataTransfers(ActionManager):
 
     def _findRemoteActionByName(self, machine, name):
         return findGlobusTransferByLabel(name)
+
+    def _cancelActionInternal(self, machine, api_key):
+        cancelGlobusTransfer(api_key)

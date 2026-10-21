@@ -31,7 +31,8 @@ from .filesystem import (
     remoteMkdir, uploadBytes,
 )
 from .globus import (
-    createGlobusStagingDirectory, downloadFileGlobus, findGlobusTransferByLabel,
+    cancelGlobusTransfer, createGlobusStagingDirectory, downloadFileGlobus,
+    findGlobusTransferByLabel,
     findGlobusTransfersByLabel, getRemoteGlobusLocation, globusCopy,
     globusTransferStatus, uploadFileGlobus,
 )
@@ -53,7 +54,7 @@ __all__ = [
     "getUserProjectIDmap", "getUsername", "queryMachineStatus", "downloadFile",
     "downloadFileContents", "getMountedFilesystems", "getStorageResourcePaths",
     "pathStat", "pathType", "remoteChmod", "remoteLs", "remoteMkdir",
-    "uploadBytes", "createGlobusStagingDirectory", "downloadFileGlobus",
+    "uploadBytes", "cancelGlobusTransfer", "createGlobusStagingDirectory", "downloadFileGlobus",
     "findGlobusTransferByLabel", "findGlobusTransfersByLabel",
     "getRemoteGlobusLocation", "globusCopy", "globusTransferStatus",
     "uploadFileGlobus", "cancelJob", "executeBatchJobCompat", "executeJob",

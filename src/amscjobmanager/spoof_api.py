@@ -44,9 +44,11 @@ tid = 0
 transfers = { }
 transfer_labels = { }
 transfer_details = { }
+_canceled_transfers = set()
 compute_jobs = { }
 compute_job_names = { }
 compute_job_details = { }
+_canceled_compute_jobs = set()
 spoof_action_history = []
 _spoof_completion_delay = None
 
@@ -63,9 +65,11 @@ def resetSpoofActionState(completion_delay=None):
     transfers.clear()
     transfer_labels.clear()
     transfer_details.clear()
+    _canceled_transfers.clear()
     compute_jobs.clear()
     compute_job_names.clear()
     compute_job_details.clear()
+    _canceled_compute_jobs.clear()
     spoof_action_history.clear()
 
 def getSpoofActionHistory():
@@ -145,6 +149,8 @@ def downloadFileGlobus(machine: str, local_filesystem_path: str, remote_path: st
     raise NotImplementedError("Globus file staging is unavailable with the SPOOF API")
    
 def globusTransferStatus(transfer_id):
+    if transfer_id in _canceled_transfers:
+        return "FAILED"
     if timemodule.time() >= transfers[transfer_id]:
         status = "SUCCEEDED"
     else:
@@ -158,6 +164,16 @@ def globusTransferStatus(transfer_id):
             transfer_details[transfer_id],
         )
     return status
+
+def cancelGlobusTransfer(transfer_id: str) -> None:
+    """Mark a simulated Globus transfer canceled."""
+    if transfer_id not in transfers:
+        raise ValueError(f"Unknown transfer_id: {transfer_id}")
+    _canceled_transfers.add(transfer_id)
+    _recordSpoofActionEvent(
+        "canceled", "transfer", transfer_id, transfer_labels[transfer_id],
+        transfer_details[transfer_id],
+    )
 
 def findGlobusTransfersByLabel(label: str) -> str | None:
     matches = [transfer_id for transfer_id, task_label in transfer_labels.items() if task_label == label]
@@ -290,6 +306,8 @@ def executeBatchJobCompat(machine: str, script_body: str,
     return key
 
 def getJobState(machine: str, jobid: str) -> str:    
+    if jobid in _canceled_compute_jobs:
+        return "canceled"
     if timemodule.time() >= compute_jobs[jobid]:
         status = "completed"
     else:
@@ -304,6 +322,16 @@ def getJobState(machine: str, jobid: str) -> str:
         )
     wfapiLog(f"Queried job state {machine}:{jobid}, got {status}")
     return status
+
+def cancelJob(machine: str, jobid: str) -> None:
+    """Mark a simulated compute job canceled."""
+    if jobid not in compute_jobs:
+        raise ValueError(f"Unknown jobid: {jobid}")
+    _canceled_compute_jobs.add(jobid)
+    _recordSpoofActionEvent(
+        "canceled", "compute", jobid, compute_job_names[jobid],
+        compute_job_details[jobid],
+    )
 
 def findJobByName(machine: str, name: str) -> str | None:
     for job_id, job_name in compute_job_names.items():

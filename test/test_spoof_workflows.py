@@ -178,6 +178,37 @@ class SpoofWorkflowTests(unittest.TestCase):
             ],
         )
 
+    def test_canceled_queued_workflow_is_retained_and_never_starts(self):
+        job_id = self.job_data.enqueueJob(self._compute_action("queued"))
+        self.job_data.removeJob(job_id)
+
+        self.assertEqual(self.job_data.jobStatus(job_id), ActionStatus.CANCELED)
+        self.job_data.startWorkflows([job_id])
+        self.job_data.progressActiveState(force_poll=True)
+        self.assertEqual(spoof_api.getSpoofActionHistory(), [])
+
+    def test_canceled_active_workflow_is_retained_and_does_not_advance(self):
+        spoof_api.resetSpoofActionState(completion_delay=300)
+        job_id = self.job_data.enqueueJob([
+            self._compute_action("current"), self._compute_action("next"),
+        ])
+        self.job_data.startWorkflows([job_id])
+        action_id = self.job_data.jobState(job_id)["head_action_id"]
+
+        self.job_data.removeJob(job_id)
+        self.assertEqual(self.job_data.jobStatus(job_id), ActionStatus.CANCELED)
+        self.assertEqual(
+            self.job_data.action_man[ActionClass.COMPUTE].queryStatus(
+                action_id, force_update=True
+            )[0],
+            ActionStatus.CANCELED,
+        )
+        self.job_data.progressActiveState(force_poll=True)
+        self.assertEqual(
+            [event["event"] for event in spoof_api.getSpoofActionHistory()],
+            ["submitted", "canceled"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

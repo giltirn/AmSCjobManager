@@ -26,6 +26,9 @@ class TransferHarness:
         self.failed_submission_count = 0
         self.failed_status_lookup_count = 0
         self.failed_remote_lookup_count = 0
+        self.hidden_remote_lookup_count = 0
+        self.failed_cancellation_count = 0
+        self.cancellation_count = 0
 
     def submit(self, name):
         if self.failed_submission_count:
@@ -41,6 +44,9 @@ class TransferHarness:
         if self.failed_remote_lookup_count:
             self.failed_remote_lookup_count -= 1
             raise RuntimeError("simulated remote action lookup failure")
+        if self.hidden_remote_lookup_count:
+            self.hidden_remote_lookup_count -= 1
+            return None
         return self.by_name.get(name)
 
     def status(self, api_key):
@@ -48,6 +54,13 @@ class TransferHarness:
             self.failed_status_lookup_count -= 1
             raise RuntimeError("simulated remote status lookup failure")
         return self.status_by_api_key[api_key]
+
+    def cancel(self, api_key):
+        if self.failed_cancellation_count:
+            self.failed_cancellation_count -= 1
+            raise RuntimeError("simulated remote cancellation failure")
+        self.cancellation_count += 1
+        self.status_by_api_key[api_key] = "FAILED"
 
 
 @dataclass
@@ -71,6 +84,15 @@ class RaisingHarnessGlobusTransfer(HarnessGlobusTransfer):
         raise RuntimeError("simulated action-layer submission failure")
 
 
+@dataclass
+class AcceptedThenRaisingHarnessGlobusTransfer(HarnessGlobusTransfer):
+    """Simulate a response failure after the remote service accepts work."""
+
+    def initiateAction(self, job_id, name=None):
+        self.harness.submit(name)
+        raise RuntimeError("simulated response failure after acceptance")
+
+
 class HarnessGlobusDataTransfers(GlobusDataTransfers):
     """The real transfer manager with only its remote operations overridden."""
 
@@ -85,6 +107,9 @@ class HarnessGlobusDataTransfers(GlobusDataTransfers):
 
     def _findRemoteActionByName(self, machine, name):
         return self.harness.find(name)
+
+    def _cancelActionInternal(self, machine, api_key):
+        self.harness.cancel(api_key)
 
 
 class SchedulingReconciliationTests(unittest.TestCase):
@@ -121,6 +146,8 @@ class SchedulingReconciliationTests(unittest.TestCase):
         with self.assertRaises(SimulatedCrash) as crash:
             job_data.startWorkflows([job_id])
         self.assertEqual(crash.exception.point, point)
+
+        #job status (outer), action status (inner)
         crash_states = {
             "job_head_scheduling_persisted": (ActionStatus.SCHEDULING, None),
             "action_intent_persisted": (ActionStatus.SCHEDULING, ActionStatus.SCHEDULING),
@@ -208,10 +235,29 @@ class SchedulingReconciliationTests(unittest.TestCase):
         job_data.reconcileSchedulingActions()
 
         self.assertEqual(self.harness.submission_count, 0)
+        self._assert_persisted_states(
+            job_data, job_id, ActionStatus.SCHEDULING, ActionStatus.SCHEDULING
+        )
+
+        job_data.reconcileSchedulingActions()
         self.assertEqual(job_data.jobStatus(job_id), ActionStatus.FAILED)
         self._assert_persisted_states(
             job_data, job_id, ActionStatus.FAILED, ActionStatus.FAILED
         )
+
+    def test_final_attempt_is_reconciled_before_marking_failed(self):
+        job_data = self._new_job_data()
+        job_data.action_man[ActionClass.TRANSFER].max_submission_attempts = 1
+        job_id = job_data.enqueueJob(AcceptedThenRaisingHarnessGlobusTransfer())
+
+        job_data.startWorkflows([job_id])
+        self._assert_persisted_states(
+            job_data, job_id, ActionStatus.SCHEDULING, ActionStatus.SCHEDULING
+        )
+
+        job_data.reconcileSchedulingActions()
+        self.assertEqual(self.harness.submission_count, 1)
+        self._assert_reconciled_active(job_data, job_id)
 
     def test_initial_submission_failure_leaves_action_scheduling_for_retry(self):
         # A normal remote error must not terminate startWorkflows.  The action
@@ -229,6 +275,19 @@ class SchedulingReconciliationTests(unittest.TestCase):
 
         job_data.reconcileSchedulingActions()
         self.assertEqual(self.harness.submission_count, 1)
+        self._assert_reconciled_active(job_data, job_id)
+
+    def test_fresh_intent_submits_without_remote_lookup(self):
+        # No submission attempt has occurred, so there is no remote action
+        # to discover and a lookup outage should not block the first submit.
+        self.harness.failed_remote_lookup_count = 1 #force a failure if the manager attempts to look up the job
+        job_data = self._new_job_data()
+        job_id = job_data.enqueueJob(HarnessGlobusTransfer())
+
+        job_data.startWorkflows([job_id])
+
+        self.assertEqual(self.harness.submission_count, 1) #submission occurred
+        self.assertEqual(self.harness.failed_remote_lookup_count, 1) #no lookup occured
         self._assert_reconciled_active(job_data, job_id)
 
     def test_action_layer_submission_exception_is_persisted_for_retry(self):
@@ -269,8 +328,8 @@ class SchedulingReconciliationTests(unittest.TestCase):
 
     def test_reconciliation_lookup_error_leaves_action_scheduling(self):
         # An outage while looking up a remote action must be deferred as a
-        # retryable scheduling state, rather than terminating progression.
-        job_id = self._crash_while_starting("action_intent_persisted")
+        # retryable scheduling state after an ambiguous submission attempt.
+        job_id = self._crash_while_starting("before_remote_submission")
         self.harness.failed_remote_lookup_count = 1
         job_data = self._new_job_data()
 
@@ -281,7 +340,7 @@ class SchedulingReconciliationTests(unittest.TestCase):
         )
         self.assertEqual(self.harness.submission_count, 0)
 
-        job_data.reconcileSchedulingActions()
+        job_data.reconcileSchedulingActions() #this one should succeed
         self.assertEqual(self.harness.submission_count, 1)
         self._assert_reconciled_active(job_data, job_id)
 
@@ -368,6 +427,221 @@ class SchedulingReconciliationTests(unittest.TestCase):
         job_data = self._reopen_and_reconcile()
         self.assertEqual(self.harness.submission_count, 1)
         self._assert_reconciled_active(job_data, job_id)
+
+    def test_cancellation_recovers_after_job_intent_crash(self):
+        # The workflow records its cancellation intent before the action or
+        # remote task is touched. A restarted manager must finish the request.
+        job_data = self._new_job_data()
+        job_id = job_data.enqueueJob(HarnessGlobusTransfer())
+        job_data.startWorkflows([job_id])
+        job_data._test_crash_at = "job_head_canceling_persisted"
+
+        with self.assertRaises(SimulatedCrash):
+            job_data.removeJob(job_id)
+        self.assertEqual(job_data.jobStatus(job_id), ActionStatus.CANCELING)
+        self.assertEqual(self.harness.cancellation_count, 0)
+        job_data.conn.close()
+
+        recovered = self._new_job_data()
+        recovered.progressActiveState()
+        self.assertEqual(recovered.jobStatus(job_id), ActionStatus.CANCELED)
+        self.assertEqual(self.harness.cancellation_count, 1)
+
+    def test_cancellation_recovers_after_action_intent_crash(self):
+        # Both database rows reach CANCELING before the remote call. Recovery
+        # must cancel the task once and finalize both rows.
+        job_data = self._new_job_data()
+        job_id = job_data.enqueueJob(HarnessGlobusTransfer())
+        job_data.startWorkflows([job_id])
+        job_data.action_man[ActionClass.TRANSFER]._test_crash_at = (
+            "action_canceling_persisted"
+        )
+
+        with self.assertRaises(SimulatedCrash):
+            job_data.removeJob(job_id)
+        self._assert_persisted_states(
+            job_data, job_id, ActionStatus.CANCELING, ActionStatus.CANCELING
+        )
+        self.assertEqual(self.harness.cancellation_count, 0)
+        job_data.conn.close()
+
+        recovered = self._new_job_data()
+        recovered.progressActiveState()
+        self._assert_persisted_states(
+            recovered, job_id, ActionStatus.CANCELED, ActionStatus.CANCELED
+        )
+        self.assertEqual(self.harness.cancellation_count, 1)
+
+    def test_action_cancellation_intent_survives_without_job_intent(self):
+        # A direct action cancellation changes only the action row. Reconcile
+        # that row, then let workflow polling update the job head.
+        job_data = self._new_job_data()
+        job_id = job_data.enqueueJob(HarnessGlobusTransfer())
+        job_data.startWorkflows([job_id])
+        action_id = job_data.jobState(job_id)["head_action_id"]
+        action_manager = job_data.action_man[ActionClass.TRANSFER]
+        action_manager._test_crash_at = "action_canceling_persisted"
+
+        with self.assertRaises(SimulatedCrash):
+            action_manager.cancelAction(action_id)
+        self._assert_persisted_states(
+            job_data, job_id, ActionStatus.ACTIVE, ActionStatus.CANCELING
+        )
+        job_data.conn.close()
+
+        recovered = self._new_job_data()
+        recovered.action_man[ActionClass.TRANSFER].reconcileCancelingAction(action_id)
+        self.assertEqual(recovered.jobStatus(job_id), ActionStatus.ACTIVE)
+        recovered.progressActiveState()
+        self.assertEqual(recovered.jobStatus(job_id), ActionStatus.CANCELED)
+        self.assertEqual(self.harness.cancellation_count, 1)
+
+    def test_cancellation_recovers_after_remote_call_crash(self):
+        # The remote service accepts cancellation before either database row
+        # is finalized. Recovery must not issue a second remote call.
+        job_data = self._new_job_data()
+        job_id = job_data.enqueueJob(HarnessGlobusTransfer())
+        job_data.startWorkflows([job_id])
+        job_data.action_man[ActionClass.TRANSFER]._test_crash_at = (
+            "remote_cancellation_completed"
+        )
+
+        with self.assertRaises(SimulatedCrash):
+            job_data.removeJob(job_id)
+        self._assert_persisted_states(
+            job_data, job_id, ActionStatus.CANCELING, ActionStatus.CANCELING
+        )
+        self.assertEqual(self.harness.cancellation_count, 1)
+        job_data.conn.close()
+
+        recovered = self._new_job_data()
+        recovered.progressActiveState()
+        self.assertEqual(recovered.jobStatus(job_id), ActionStatus.CANCELED)
+        self.assertEqual(self.harness.cancellation_count, 1)
+
+    def test_cancellation_recovers_after_action_state_crash(self):
+        # The action is CANCELED, but the workflow head still says CANCELING.
+        # Recovery should finish the workflow without canceling again.
+        job_data = self._new_job_data()
+        job_id = job_data.enqueueJob(HarnessGlobusTransfer())
+        job_data.startWorkflows([job_id])
+        job_data._test_crash_at = "action_canceled_before_job_head_update"
+
+        with self.assertRaises(SimulatedCrash):
+            job_data.removeJob(job_id)
+        self._assert_persisted_states(
+            job_data, job_id, ActionStatus.CANCELING, ActionStatus.CANCELED
+        )
+        self.assertEqual(self.harness.cancellation_count, 1)
+        job_data.conn.close()
+
+        recovered = self._new_job_data()
+        recovered.progressActiveState()
+        self.assertEqual(recovered.jobStatus(job_id), ActionStatus.CANCELED)
+        self.assertEqual(self.harness.cancellation_count, 1)
+
+    def test_cancellation_api_failure_remains_retryable(self):
+        # A failed remote cancellation leaves both intents persisted so the
+        # next manager pass can retry the call.
+        job_data = self._new_job_data()
+        job_id = job_data.enqueueJob(HarnessGlobusTransfer())
+        job_data.startWorkflows([job_id])
+        self.harness.failed_cancellation_count = 1
+
+        with self.assertRaisesRegex(RuntimeError, "remote cancellation failure"):
+            job_data.removeJob(job_id)
+        self._assert_persisted_states(
+            job_data, job_id, ActionStatus.CANCELING, ActionStatus.CANCELING
+        )
+        self.assertEqual(self.harness.cancellation_count, 0)
+
+        job_data.progressActiveState()
+        self.assertEqual(job_data.jobStatus(job_id), ActionStatus.CANCELED)
+        self.assertEqual(self.harness.cancellation_count, 1)
+
+    def test_cancellation_status_lookup_failure_recovers_after_restart(self):
+        # A status lookup fails before cancellation reaches the remote task.
+        # The persisted intents allow a restarted manager to retry.
+        job_data = self._new_job_data()
+        job_id = job_data.enqueueJob(HarnessGlobusTransfer())
+        job_data.startWorkflows([job_id])
+        self.harness.failed_status_lookup_count = 1
+
+        with self.assertRaisesRegex(RuntimeError, "status lookup failure"):
+            job_data.removeJob(job_id)
+        self._assert_persisted_states(
+            job_data, job_id, ActionStatus.CANCELING, ActionStatus.CANCELING
+        )
+        job_data.conn.close()
+
+        recovered = self._new_job_data()
+        recovered.progressActiveState()
+        self.assertEqual(recovered.jobStatus(job_id), ActionStatus.CANCELED)
+        self.assertEqual(self.harness.cancellation_count, 1)
+
+    def test_cancellation_of_unsubmitted_action_does_not_submit(self):
+        # Submission stopped after saving the workflow head, before creating
+        # a remote task. Cancellation must not start that task.
+        job_id = self._crash_while_starting("job_head_scheduling_persisted")
+        job_data = self._new_job_data()
+
+        job_data.removeJob(job_id)
+
+        self.assertEqual(job_data.jobStatus(job_id), ActionStatus.CANCELED)
+        self.assertEqual(self.harness.submission_count, 0)
+
+    def test_cancellation_finds_submitted_action_without_saved_remote_id(self):
+        # The remote task was accepted, but its ID was not saved locally.
+        # Cancellation must find it by name and stop it once.
+        job_id = self._crash_while_starting("remote_submission_completed")
+        job_data = self._new_job_data()
+
+        job_data.removeJob(job_id)
+
+        self.assertEqual(job_data.jobStatus(job_id), ActionStatus.CANCELED)
+        self.assertEqual(self.harness.submission_count, 1)
+        self.assertEqual(self.harness.cancellation_count, 1)
+
+    def test_cancellation_waits_for_remote_name_indexing(self):
+        # The first name lookup cannot yet see an accepted remote task. Keep
+        # the cancellation intent until a later lookup can find and stop it.
+        job_id = self._crash_while_starting("remote_submission_completed")
+        self.harness.hidden_remote_lookup_count = 1
+        job_data = self._new_job_data(scheduling_retry_delay=60)
+
+        job_data.removeJob(job_id)
+        self._assert_persisted_states(
+            job_data, job_id, ActionStatus.CANCELING, ActionStatus.CANCELING
+        )
+        self.assertEqual(self.harness.cancellation_count, 0)
+        job_data.conn.close()
+
+        recovered = self._new_job_data(scheduling_retry_delay=60)
+        recovered.progressActiveState()
+        self.assertEqual(recovered.jobStatus(job_id), ActionStatus.CANCELED)
+        self.assertEqual(self.harness.submission_count, 1)
+        self.assertEqual(self.harness.cancellation_count, 1)
+
+    def test_cancellation_finishes_when_remote_stays_missing_after_delay(self):
+        # Submission was attempted but never reached the remote service.
+        # Wait for indexing, then finish cancellation without a remote call.
+        job_id = self._crash_while_starting("before_remote_submission")
+        job_data = self._new_job_data(scheduling_retry_delay=60)
+
+        job_data.removeJob(job_id)
+        self._assert_persisted_states(
+            job_data, job_id, ActionStatus.CANCELING, ActionStatus.CANCELING
+        )
+
+        # Simulate the retry delay expiring without sleeping in the test.
+        job_data.conn.execute(
+            "UPDATE transfers SET last_submission_attempt = 0 WHERE action_id = ?",
+            (job_data.jobState(job_id)["head_action_id"],),
+        )
+        job_data.progressActiveState()
+        self.assertEqual(job_data.jobStatus(job_id), ActionStatus.CANCELED)
+        self.assertEqual(self.harness.submission_count, 0)
+        self.assertEqual(self.harness.cancellation_count, 0)
 
 
 if __name__ == "__main__":

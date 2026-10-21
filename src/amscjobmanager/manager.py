@@ -29,14 +29,15 @@ class JobManager:
         self._thread = threading.Thread(target=self._run)
         self._thread.start()
 
-    def stop(self, wait_until_done=True):
+    def stop(self, wait_until_done=True, *, close_database=False):
         """
         Ask the manager thread to stop and wait until it does.
         wait_until_done : block until there are no more active or pending workflows before stopping (default True)
+        close_database : close the JobData connection after the thread stops
         """
         def __nincomplete():
             with self._lock:
-                return self.job_data.countWorkflowsWithStatus([ ActionStatus.PENDING, ActionStatus.SCHEDULING, ActionStatus.ACTIVE, ActionStatus.COMPLETED ]) #note, complete (non-null) actions are awaiting progression
+                return self.job_data.countWorkflowsWithStatus([ ActionStatus.PENDING, ActionStatus.SCHEDULING, ActionStatus.ACTIVE, ActionStatus.COMPLETED, ActionStatus.CANCELING ]) #note, complete (non-null) actions are awaiting progression
         
         if wait_until_done:
             while(__nincomplete() > 0):
@@ -46,6 +47,8 @@ class JobManager:
 
         if self._thread is not None:
             self._thread.join()
+        if close_database:
+            self.job_data.conn.close()
 
     def _run(self):
         """Performed on the background thread"""

@@ -321,9 +321,12 @@ def findJobByName(machine: str, name: str) -> str | None:
     
     
 def cancelJob(machine: str, jobid: str):
+    """Cancel a compute job; local jobs stop their subprocess group."""
     machine = machine.lower()
 
     wfapiLog(f"Canceling job {machine}:{jobid}")
+    if machine == "local":
+        return local_api.cancelJob(jobid)
     rid = getResourceID(machine, rtype="compute")
     j, status = delete(machine, f"compute/cancel/{rid}/{jobid}")
     if status != 204:

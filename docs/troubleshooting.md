@@ -85,7 +85,7 @@ the latter reports a scheduling workflow as `ACTIVE`.
 - `FAILED` or `CANCELED`: the manager does not automatically advance or restart
   these workflows.
 - `CANCELING`: check cancellation/status API errors and allow reconciliation to
-  retry. Local process cancellation is not supported.
+  retry. Local signaling errors also leave cancellation pending for retry.
 
 Deferred scheduling and cancellation consume automatic workflow slots. If all
 slots are occupied by a down machine's workflows, other pending workflows can
@@ -123,12 +123,13 @@ does not cancel remote tasks.
 
 The local runner uses a worker thread and Bash rather than a batch scheduler.
 Resource requests and `time` do not constrain the process. Missing run
-directories, permission errors, or other worker exceptions can leave status
-active because not all worker failures update the local status database.
+directories, permission errors, or other worker exceptions mark the job failed.
 Concurrent local jobs sharing a directory overwrite `exec_wrap.sh`.
 
-Local cancellation is unavailable, and durable local metadata does not track
-processes after application failure. `localCopyFile()` and native local downloads check the final output
+Local cancellation terminates the job's process group, including ordinary child
+processes. Detached processes are outside that group. Handles are held only in
+memory, so local jobs cannot be recovered or canceled after application restart.
+`localCopyFile()` and native local downloads check the final output
 filename, including a directory destination's child and any existing symlink.
 
 ## Persistence and version changes

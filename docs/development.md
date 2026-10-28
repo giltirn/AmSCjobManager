@@ -42,6 +42,7 @@ for suite in \
     test_path_validation.py \
     test_local_write_sandbox.py \
     test_local_filesystem.py \
+    test_local_cancellation.py \
     test_globus_path_namespaces.py \
     test_iri_discovery.py \
     test_iri_lazy_setup.py \
@@ -69,6 +70,8 @@ staging, and sandbox rules using controlled configuration.
 Local-write tests exercise checked output paths, directory destinations,
 symlink escapes, `/tmp`, explicit overrides, and the native/Globus download
 fallback contract. SPOOF filesystem tests also cover its real local writes.
+Local cancellation tests run real subprocesses and exercise queued cancellation,
+child processes, signal escalation, races, handle cleanup, and workflow retries.
 Path-validation tests ensure that `~` is rejected before filesystem writes,
 authentication, or submission, including unsafe overrides and configured paths.
 

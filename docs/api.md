@@ -155,7 +155,7 @@ remains confined to the configured staging root.
 | `api.executeBatchJobCompat(...)` | Direct counterpart of the script action with `job_run_dir`, optional `name`, and `allow_unsafe=False`. Returns a remote job ID. |
 | `api.getJobState(machine, jobid)` | Raw compute state, such as `queued`, `active`, `completed`, `failed`, or `canceled`. |
 | `api.findJobByName(machine, name)` | Matching remote ID or `None`. |
-| `api.cancelJob(machine, jobid)` | Sends a remote compute cancellation request. Local cancellation is unavailable. |
+| `api.cancelJob(machine, jobid)` | Sends a remote compute cancellation request. Locally, prevents launch or terminates the job's process group and waits before recording `canceled`; repeated cancellation preserves terminal statuses. Returns `None`. |
 
 Direct submissions are not added to JobData. Use actions when the manager
 should own ordering, monitoring, and cancellation. See [transfers](transfers.md)

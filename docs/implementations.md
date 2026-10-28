@@ -15,7 +15,7 @@ and backend selection are process-wide; use a fresh process to switch backends.
 | Filesystem operations | Provider-dependent, with some Globus fallbacks | Local listings, permissions, metadata, uploads, and downloads | Mostly logs and fixed illustrative responses |
 | Authentication | Provider tokens; separate transfer credentials | No remote token needed for local operations | No tokens read |
 | Resource availability | Queries IRI resource status | Reports up | Reports up |
-| Remote cancellation | Compute and Globus APIs | Local process cancellation is not implemented | Simulated cancellation |
+| Remote cancellation | Compute and Globus APIs | Terminates the local job's process group | Simulated cancellation |
 | State after process restart | Persistent workflow DB plus remote discovery | Limited local status tracking; see below | Simulated remote state is lost |
 | Sandbox enforcement | Supported writes are checked; see exceptions | Local data outputs and run directories are checked | Real local downloads are checked; remote mutations are simulated |
 
@@ -62,9 +62,12 @@ Permission changes check the resolved target against local sandboxes and `/tmp`
 unless `allow_unsafe=True`. File reads and metadata queries are unrestricted;
 `pathStat(..., dereference=False)` inspects the symlink itself.
 General IRI resource discovery still requires an IRI machine.
-`cancelJob("local", ...)` has no local
-cancellation implementation. Do not use local execution to test remote
-scheduler, launcher, or cancellation behavior.
+`cancelJob("local", jobid)` prevents a queued job from starting or terminates a
+running job's process group. It sends `SIGTERM`, escalates to `SIGKILL` after a
+one-second grace period, and waits for termination before recording `canceled`.
+Repeated cancellation leaves terminal jobs unchanged. Normal child processes
+are included; processes that deliberately detach into a new session are not.
+Do not use local execution to test facility scheduler or launcher behavior.
 
 Local job status uses a separate SQLite database, `localjobs.db` by default in
 the working directory. Set its path before the first local job/status operation:
@@ -77,8 +80,10 @@ setStatusManagerDatabasePath("/absolute/path/localjobs.sqlite")
 
 `None` selects an in-memory status database. Stored local statuses do not provide
 the remote scheduler's recovery guarantees: process IDs are not used to
-reconcile surviving jobs after an application crash, and a worker exception may
-leave a stale active status. See [troubleshooting](troubleshooting.md).
+reconcile surviving jobs after an application crash. Cancellation handles exist
+only in memory and cannot be recovered after a restart. Worker exceptions mark
+the job failed; signaling errors retain handles for cancellation retries.
+See [troubleshooting](troubleshooting.md).
 
 ## SPOOF
 

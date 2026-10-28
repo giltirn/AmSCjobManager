@@ -2,6 +2,7 @@ import pickle
 import sqlite3
 import time
 from enum import Enum
+from .logging import wfmanLog
 
 def _ser(obj):
     return pickle.dumps(obj, protocol=pickle.HIGHEST_PROTOCOL)
@@ -258,6 +259,32 @@ class ActionManager:
         # the permitted number of attempts.
         if api_key is None:
 
+            # Wait out the submission backoff before querying resource status
+            # for an attempt that is not yet due. A final exhausted attempt
+            # still checks the resource before it can be marked failed.
+            if 0 < action["submission_attempts"] < self.max_submission_attempts:
+                retry_delay = self.scheduling_retry_delay * (
+                    2 ** (action["submission_attempts"] - 1)
+                )
+                if int(time.time()) < action["last_submission_attempt"] + retry_delay:
+                    return None
+
+            submitted_action = _unser(action["details"])
+            self._maybeSimulateCrash("before_resource_status_check")
+            try:
+                resource_status = submitted_action.queryResourceStatus()
+            except SimulatedCrash:
+                raise
+            except Exception as exc:
+                wfmanLog(f"Could not query resource status for action {action_id}: {exc}")
+                return None
+            self._maybeSimulateCrash("resource_status_checked")
+            if resource_status is False:
+                wfmanLog(f"Resource for action {action_id} is down; deferring submission")
+                return None
+            if resource_status is not None and resource_status is not True:
+                raise TypeError("queryResourceStatus must return True, False, or None")
+
             #If we've maxed out our submission attempts we mark the workflow as failed
             if action["submission_attempts"] >= self.max_submission_attempts:
                 error = "Remote action was not found after the maximum number of submission attempts"
@@ -268,15 +295,6 @@ class ActionManager:
                         (error, ActionStatus.FAILED.name, error, int(time.time()), action_id),
                     )
                 return action_id
-
-            # After an attempt, give the remote lookup time to find work that
-            # may have been accepted before the local API key was saved.
-            if action["submission_attempts"] > 0:
-                retry_delay = self.scheduling_retry_delay * (
-                    2 ** (action["submission_attempts"] - 1)
-                )
-                if int(time.time()) < action["last_submission_attempt"] + retry_delay:
-                    return None
 
             # Persist the attempt before contacting the remote service. A
             # crash during submission then triggers lookup and retry backoff.
@@ -290,7 +308,6 @@ class ActionManager:
             self._maybeSimulateCrash("before_remote_submission")
             try:
                 #Do the submission!
-                submitted_action = _unser(action["details"])
                 api_key = submitted_action.initiateAction(
                     action["job_id"], name=self._remoteActionName(action_id)
                 )

@@ -293,6 +293,8 @@ class JobData:
             wfmanLog(f"Initiating action of type {action_class.name} for {job_id}")
             aman = self.action_man[action_class]
             action_id = aman.startAction(action, job_id, action_id)
+            if action_id is None:
+                continue
             action_status, _ = aman.queryStatus(action_id)
             head_action_updates.append( (job_id, action_id, action_status, action_class) )
 

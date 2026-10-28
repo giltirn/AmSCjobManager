@@ -9,7 +9,8 @@ dependencies = [
   "globus_sdk",
   "authlib",
   "httpx",
-  "pydantic"
+  "pydantic",
+  "asteval"
 ]
 
 [tool.setuptools]

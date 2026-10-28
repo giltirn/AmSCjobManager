@@ -12,6 +12,14 @@ def replaceJobIdSubstring(in_str, job_id):
 class TransferActionBase:
     """Base class of all transfer actions"""
 
+    def queryResourceStatus(self) -> bool | None:
+        """Return whether the transfer resource is up, if this can be queried.
+
+        ``None`` means no availability query is available for this action.
+        Transfer submission then relies on the normal API error handling.
+        """
+        return None
+
     def getInfo(self)->dict:
         """
         Return the transfer information in a common dictionary format with entries {"origin", "destination"}
@@ -28,6 +36,16 @@ class ComputeActionBase:
     account : str
     queue : str
     time : str
+
+    def queryResourceStatus(self) -> bool:
+        """Return whether this action's compute resource reports being up.
+
+        API failures propagate so scheduling can defer without recording a
+        remote submission attempt.
+        """
+        from .api_general import queryMachineStatus
+
+        return queryMachineStatus(self.machine)
 
     def getInfo(self)->dict:
         """

@@ -7,12 +7,15 @@ ActionManager implementation execute their normal database workflow.
 from dataclasses import dataclass
 from pathlib import Path
 import tempfile
+import threading
 import unittest
+from unittest.mock import patch
 
 from amscjobmanager.action_manager import ActionStatus, SimulatedCrash
 from amscjobmanager.actions_base import TransferActionBase
 from amscjobmanager.globus_transfer_action import GlobusDataTransfers
 from amscjobmanager.job_data import JobData
+from amscjobmanager.manager import JobManager
 from amscjobmanager.actions_base import ActionClass
 
 
@@ -360,6 +363,112 @@ class SchedulingReconciliationTests(unittest.TestCase):
         )
 
         self.assertEqual(action_status, ActionStatus.SCHEDULING)
+
+    def test_failed_active_polls_preserve_state_and_allow_other_workflows_to_finish(self):
+        # Both transfers have finished remotely, but one resource cannot be polled.
+        # Its next workflow step must wait while the other workflow completes.
+        job_data = self._new_job_data()
+        self.addCleanup(job_data.conn.close)
+        first = job_data.enqueueJob([HarnessGlobusTransfer(), HarnessGlobusTransfer()])
+        second = job_data.enqueueJob(HarnessGlobusTransfer())
+        job_data.startWorkflows([first, second])
+        first_state = job_data.jobState(first)
+        action_id = first_state["head_action_id"]
+        first_action = dict(job_data.conn.execute(
+            "SELECT * FROM transfers WHERE action_id = ?", (action_id,)
+        ).fetchone())
+        for api_key in self.harness.status_by_api_key:
+            self.harness.status_by_api_key[api_key] = "SUCCEEDED"
+        original_status = self.harness.status
+
+        def poll(api_key):
+            if api_key == first_action["api_key"]:
+                raise RuntimeError("temporary status outage")
+            return original_status(api_key)
+
+        with patch.object(self.harness, "status", side_effect=poll):
+            for _ in range(3):
+                job_data.progressActiveState(force_poll=True)
+                self.assertEqual(job_data.jobState(first), first_state)
+                self.assertEqual(dict(job_data.conn.execute(
+                    "SELECT * FROM transfers WHERE action_id = ?", (action_id,)
+                ).fetchone()), first_action)
+                self.assertEqual(job_data.jobStatus(second), ActionStatus.COMPLETED)
+                self.assertEqual(self.harness.submission_count, 2)
+
+        # Once polling succeeds, the retained workflow advances exactly once.
+        job_data.progressActiveState(force_poll=True)
+        self.assertEqual(job_data.jobState(first)["workflow_stage"], 1)
+        self.assertEqual(self.harness.submission_count, 3)
+
+    def test_failed_poll_after_submission_is_reconciled_without_resubmission(self):
+        # Submission has already saved its remote ID and action status. If the
+        # workflow's follow-up poll fails, retain its scheduling head for recovery.
+        job_data = self._new_job_data()
+        self.addCleanup(job_data.conn.close)
+        job_id = job_data.enqueueJob(HarnessGlobusTransfer())
+        manager = job_data.action_man[ActionClass.TRANSFER]
+        with patch.object(manager, "queryStatus", side_effect=RuntimeError("status outage")):
+            job_data.startWorkflows([job_id])
+            job_data.reconcileSchedulingActions()
+        self.assertEqual(job_data.jobState(job_id)["head_action_status"], ActionStatus.SCHEDULING)
+        self.assertEqual(self.harness.submission_count, 1)
+
+        job_data.reconcileSchedulingActions()
+        self._assert_reconciled_active(job_data, job_id)
+        self.assertEqual(self.harness.submission_count, 1)
+
+    def test_background_manager_survives_polling_failure(self):
+        # Run the actual background loop: the failed action stays active while
+        # another finishes, and the manager remains alive with an accessible lock.
+        manager = JobManager(filename=str(self.db_path), poll_freq=0, max_workflows_active=0)
+        job_data = manager.job_data
+        job_data.action_man[ActionClass.TRANSFER] = HarnessGlobusDataTransfers(
+            job_data.conn, self.harness
+        )
+        first = job_data.enqueueJob(HarnessGlobusTransfer())
+        second = job_data.enqueueJob(HarnessGlobusTransfer())
+        job_data.startWorkflows([first, second])
+        first_api_key = job_data.conn.execute(
+            "SELECT api_key FROM transfers WHERE action_id = ?",
+            (job_data.jobState(first)["head_action_id"],),
+        ).fetchone()[0]
+        for api_key in self.harness.status_by_api_key:
+            self.harness.status_by_api_key[api_key] = "SUCCEEDED"
+        job_data.conn.execute("UPDATE transfers SET last_update = 0")
+        job_data.conn.commit()
+        other_polled = threading.Event()
+
+        def poll(api_key):
+            if api_key == first_api_key:
+                raise RuntimeError("temporary status outage")
+            other_polled.set()
+            return self.harness.status_by_api_key[api_key]
+
+        with patch.object(self.harness, "status", side_effect=poll):
+            manager.start()
+            try:
+                self.assertTrue(other_polled.wait(timeout=5), "Other workflow was not polled")
+                self.assertTrue(manager.isAlive())
+                self.assertTrue(manager._lock.acquire(timeout=5), "Manager lock was left held")
+                try:
+                    self.assertEqual(job_data.jobStatus(first), ActionStatus.ACTIVE)
+                    self.assertEqual(job_data.jobStatus(second), ActionStatus.COMPLETED)
+                finally:
+                    manager._lock.release()
+            finally:
+                manager.stop(wait_until_done=False, close_database=True)
+
+    def test_polling_does_not_swallow_simulated_crashes(self):
+        # Fault injection must still stop execution rather than be logged as
+        # a routine remote outage.
+        job_data = self._new_job_data()
+        self.addCleanup(job_data.conn.close)
+        job_id = job_data.enqueueJob(HarnessGlobusTransfer())
+        job_data.startWorkflows([job_id])
+        with patch.object(self.harness, "status", side_effect=SimulatedCrash("status_poll")):
+            with self.assertRaises(SimulatedCrash):
+                job_data.progressActiveState(force_poll=True)
 
     def test_reconciliation_waits_for_retry_backoff_after_a_submission_attempt(self):
         # A crash immediately before submission is ambiguous: the process may

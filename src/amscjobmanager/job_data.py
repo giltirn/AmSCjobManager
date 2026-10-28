@@ -295,7 +295,14 @@ class JobData:
             action_id = aman.startAction(action, job_id, action_id)
             if action_id is None:
                 continue
-            action_status, _ = aman.queryStatus(action_id)
+            try:
+                action_status, _ = aman.queryStatus(action_id)
+            except SimulatedCrash:
+                raise
+            except Exception as exc:
+                # Keep the durable scheduling head until its status is readable.
+                wfmanLog(f"Could not poll action {action_id} for job {job_id}: {exc}")
+                continue
             head_action_updates.append( (job_id, action_id, action_status, action_class) )
 
         self._maybeSimulateCrash("action_state_persisted_before_job_head_update")
@@ -375,7 +382,13 @@ class JobData:
 
             action_id = aman.reconcileScheduledAction(action_id)
             if action_id is not None:
-                action_status, _ = aman.queryStatus(action_id)
+                try:
+                    action_status, _ = aman.queryStatus(action_id)
+                except SimulatedCrash:
+                    raise
+                except Exception as exc:
+                    wfmanLog(f"Could not poll action {action_id} for job {job['job_id']}: {exc}")
+                    continue
                 updates.append((job["job_id"], action_id, action_status))
 
         if updates:
@@ -388,9 +401,10 @@ class JobData:
         
     def progressActiveActions(self, poll_freq=30, force_poll=False):
         """
-        Find active actions nd try to progress their status.
+        Find active actions and try to progress their status.
         poll_freq: control the minimum time lag between manager polls of the API for status updates. Queries within this period return only the cached status.
         force_poll: force the manager to poll the API for status updates, use wisely!
+        Failed polls are logged and leave that workflow unchanged for a later pass.
 
         Return: dict  job_id -> new status
         """       
@@ -402,7 +416,14 @@ class JobData:
             job_id = t['job_id']
             action_class = getattr(ActionClass, t['head_action_class'], None)
             aman = self.action_man[action_class] 
-            action_status, _ = aman.queryStatus(t['head_action_id'], update_freq=poll_freq, force_update = force_poll)
+            # Poll independently so an unavailable resource cannot block other workflows.
+            try:
+                action_status, _ = aman.queryStatus(t['head_action_id'], update_freq=poll_freq, force_update = force_poll)
+            except SimulatedCrash:
+                raise
+            except Exception as exc:
+                wfmanLog(f"Could not poll action {t['head_action_id']} for job {job_id}: {exc}")
+                continue
             if action_status != ActionStatus.ACTIVE:
                 updates[job_id] = action_status
             if job_id in updates:

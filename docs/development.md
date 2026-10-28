@@ -63,6 +63,11 @@ check, and name recovery precedes availability checks. SPOOF tests verify mixed
 action ordering without remote credentials. Path tests exercise namespace,
 staging, and sandbox rules using controlled configuration.
 
+Polling tests verify that repeated status failures preserve action/workflow
+state, allow other workflows to finish, and recover without duplicate
+submission. They also run the actual background loop to check thread and lock
+availability, and confirm that simulated crashes are not swallowed as API errors.
+
 ## Manual live checks
 
 Read each script before running it. These commands can authenticate, create

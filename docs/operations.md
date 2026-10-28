@@ -52,10 +52,10 @@ finally:
     manager.stop(wait_until_done=False, close_database=True)
 ```
 
-An unexpected polling exception can currently terminate the manager thread and
-leave its lock held. `isAlive()` is useful for detection, but the separate check
-does not remove a race with a subsequent lock acquisition. See
-[troubleshooting](troubleshooting.md) for the current limitation.
+Failures from individual status polls are logged and deferred, allowing the
+manager to keep polling other workflows. Unexpected errors outside polling can
+still terminate the background thread; `isAlive()` helps detect those failures.
+See [troubleshooting](troubleshooting.md).
 
 ## Scheduling and polling parameters
 
@@ -69,6 +69,13 @@ The manager loop also sleeps between passes. Requests and blocking filesystem
 operations can take longer than a polling interval. Deferred compute submissions
 can occupy all active slots during maintenance and delay pending workflows for
 other resources.
+
+A failed status poll leaves the last known action/workflow state and successful
+update timestamp unchanged. It does not consume a submission attempt or add a
+failure state. The manager retries on a later pass using its existing cadence;
+no extra poll-failure counter or backoff is maintained. Only a successful status
+read can authorize the next workflow step. Direct status API calls can still
+raise errors to their callers.
 
 For manual starts, use `jobs.startWorkflows([job_id, ...])` under the lock. An
 explicit list starts eligible heads without applying the automatic concurrency

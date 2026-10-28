@@ -96,11 +96,17 @@ before choosing a recovery strategy.
 
 ## A stopped or unresponsive manager
 
-An API exception from polling an already active action currently propagates out
-of the background loop. The action's persisted status is left intact, but the
-manager thread can die and leave its lock held. `isAlive()` detects a dead
-thread without acquiring that lock. Lock-based status queries may block in this
-condition. Per-action polling exception handling is not implemented yet.
+Status polling errors are logged per action. The manager keeps the last known
+status, polls other workflows, and retries the failed query on a later pass.
+An outage can therefore leave a completed remote task appearing active until
+its status becomes readable; its workflow waits rather than advancing early.
+Polling errors after submission also leave the scheduling head available for
+reconciliation without submitting a duplicate job.
+
+If the manager thread has stopped, inspect its traceback for an error outside
+these handled status polls. Such uncaught errors can still leave its lock held.
+`isAlive()` detects a dead thread without acquiring the lock; lock-based status
+queries may block if an unexpected error left it held.
 
 After recording the error, restart the application with the same persistent
 workflow database and API configuration to recover remote work. Do not assume

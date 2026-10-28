@@ -35,7 +35,7 @@ support and sandbox enforcement are detailed in the linked guides.
 | `JobData.getActiveActions(action_class)` | Returns a list of info dictionaries for active actions of `ActionClass.COMPUTE` or `TRANSFER`. Entries include workflow ID, remote `api_key`, and raw `api_status`. |
 | `JobData.countWorkflowsWithStatus(statuses)` | Accepts one `ActionStatus` or a list; counts matching head statuses with a non-`NONE` head class. Fully completed workflows are excluded. |
 | `JobData.startWorkflows(job_ids=None)` | Reconciles submissions, then starts selected eligible workflows or fills automatic slots. |
-| `JobData.progressActiveState(poll_freq=30, force_poll=False)` | Reconciles cancellation/submission, polls active actions, and progresses successful workflows. Used by JobManager or an application driving JobData manually. |
+| `JobData.progressActiveState(poll_freq=30, force_poll=False)` | Reconciles cancellation/submission, polls active actions, and progresses successful workflows. Failed polls are logged and deferred per action while other workflows progress. Used by JobManager or an application driving JobData manually. |
 
 When a manager thread runs, call these JobData operations through its lock.
 See [operations](operations.md) for status semantics and recovery limits.

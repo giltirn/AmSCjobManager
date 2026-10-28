@@ -39,7 +39,9 @@ Globus path mode accepts collection UUIDs, configured tags, and machine names.
 A machine name must resolve to a unique collection for the supplied path. With
 overlapping collection namespaces, use a UUID or endpoint tag to select one
 explicitly. Unknown endpoint strings are passed through for the service to
-validate. Paths must be absolute and may not contain `..`.
+validate. Paths must be absolute and may not contain `..` or `~`. Local upload
+sources and download destinations also reject `~`; supply the intended user's
+explicit path rather than relying on the manager host's home directory.
 
 ## Destination and source semantics
 
@@ -113,6 +115,11 @@ existing local destination directory receives the remote source filename.
 These helpers can rename files while staging. They require a personal endpoint
 and are unavailable in SPOOF.
 
+`downloadFileGlobus(..., allow_unsafe=False)` checks its final local destination.
+Configured local sandboxes, `/tmp`, and the configured staging root are allowed.
+Set `allow_unsafe=True` to authorize another local destination explicitly. The
+same option on `downloadFile()` is forwarded when a provider uses this fallback.
+
 ## Personal staging rules
 
 For direct transfers, personal collection paths must stay within configured
@@ -126,7 +133,8 @@ Filesystem: /home/example/globus-staging/input.dat
 
 The blocking helpers bridge local paths outside staging by creating temporary
 `.amsc-globus-*` staging directories, transferring, and cleaning up in `finally`
-blocks. Downloads outside staging still require a configured local sandbox.
+blocks. Downloads outside staging require a configured local sandbox or `/tmp`,
+unless `allow_unsafe=True` explicitly permits the output path.
 See [sandboxing](sandboxing.md). A process crash can leave staging directories
 behind; check active transfers before removing them.
 

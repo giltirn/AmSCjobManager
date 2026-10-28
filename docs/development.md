@@ -39,6 +39,8 @@ Additional offline suites can be run explicitly:
 
 ```bash
 for suite in \
+    test_path_validation.py \
+    test_local_write_sandbox.py \
     test_globus_path_namespaces.py \
     test_iri_discovery.py \
     test_iri_lazy_setup.py \
@@ -62,6 +64,12 @@ that downtime/query failures consume no attempt, restart recovery repeats the
 check, and name recovery precedes availability checks. SPOOF tests verify mixed
 action ordering without remote credentials. Path tests exercise namespace,
 staging, and sandbox rules using controlled configuration.
+
+Local-write tests exercise checked output paths, directory destinations,
+symlink escapes, `/tmp`, explicit overrides, and the native/Globus download
+fallback contract. SPOOF filesystem tests also cover its real local writes.
+Path-validation tests ensure that `~` is rejected before filesystem writes,
+authentication, or submission, including unsafe overrides and configured paths.
 
 Polling tests verify that repeated status failures preserve action/workflow
 state, allow other workflows to finish, and recover without duplicate

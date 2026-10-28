@@ -5,6 +5,7 @@ import shlex
 from pathlib import Path, PurePosixPath
 from . import globals
 from .logging import wfapiLog
+from .local_api import getAbsoluteLocalPath
 from typing import Literal, Union, List, Optional, Tuple
 
 def listSpecialGlobusEndpoints():
@@ -34,6 +35,10 @@ def setupWorkflowAgentFromConfig(config) -> dict:
 def setupWorkflowAgent(iri_implementations: dict, iriapi_transfer_key_path: str,
                        work_dir: dict, globus_personal_endpoint_config=None,
                        iri_config_cache_directory: str | None = None):
+    for directories in work_dir.values():
+        for directory in ([directories] if isinstance(directories, str) else directories):
+            if "~" in str(directory):
+                raise ValueError("Sandbox paths containing '~' are not supported")
     from .iri_api.state import _configure_personal_globus_endpoint
     _configure_personal_globus_endpoint(globus_personal_endpoint_config)
     globals.remote_workdir={ machine.lower() : directory for machine, directory in work_dir.items() }
@@ -120,6 +125,8 @@ def globusCopy(dest_endpoint: str, dest_path: str,
     but does not enforce sandbox bounds.
     dest_path names a directory; source_path names a file or directory.
     """
+    if "~" in source_path or "~" in dest_path:
+        raise ValueError("Paths containing '~' are not supported; use an explicit path")
     from .iri_api.state import special_globus_endpoints
     personal_uuid = special_globus_endpoints.get("personal", "").lower()
     personal_endpoints = {"personal", personal_uuid} if personal_uuid else {"personal"}
@@ -144,7 +151,7 @@ def uploadFileGlobus(machine: str, remote_path: str, local_filesystem_path: str,
 
 def downloadFileGlobus(machine: str, local_filesystem_path: str, remote_path: str, *,
                        remote_path_type: Literal["filesystem", "globus"] = "filesystem",
-                       remote_endpoint: str | None = None) -> str:
+                       remote_endpoint: str | None = None, allow_unsafe=False) -> str:
     """Match IRI's selectable remote namespace; file staging is not spoofed."""
     raise NotImplementedError("Globus file staging is unavailable with the SPOOF API")
    
@@ -186,21 +193,29 @@ def findGlobusTransferByLabel(label: str) -> str | None:
     return findGlobusTransfersByLabel(label)
     
 def remoteMkdir(machine: str, path: str, create_parents = True, allow_unsafe = False)-> int:
+    if "~" in path:
+        raise ValueError("Paths containing '~' are not supported; use an explicit path")
     wfapiLog(f"Creating directory {machine}:{path}")
     return 1
 
 def remoteLs(machine: str, path: str) -> List[str]:
     """Return fixed illustrative filenames, regardless of earlier filesystem calls."""
+    if "~" in path:
+        raise ValueError("Paths containing '~' are not supported; use an explicit path")
     wfapiLog(f"Listing fake directory {machine}:{path}")
     return [str(PurePosixPath(path) / name) for name in
             ("calculate.py", "settings.json", "result.txt", "run.log", "err.log")]
 
 def remoteChmod(machine: str, path: str, mode: str, allow_unsafe=False):
     """Log a fake permission change without modifying any files."""
+    if "~" in path:
+        raise ValueError("Paths containing '~' are not supported; use an explicit path")
     wfapiLog(f"Changing fake permissions of {machine}:{path} to {mode}")
 
 def pathStat(machine: str, remote_path: str, dereference=True) -> str:
     """Return illustrative stat output without inspecting a remote filesystem."""
+    if "~" in remote_path:
+        raise ValueError("Paths containing '~' are not supported; use an explicit path")
     wfapiLog(f"Inspecting fake file metadata {machine}:{remote_path}")
     return f"File: {remote_path}\nSize: 128\nAccess: (0644/-rw-r--r--)\nUid: 1000\nGid: 1000"
 
@@ -210,6 +225,8 @@ def pathType(machine: str, remote_path: str) -> str:
     Remote paths without a filename suffix are treated as directories. This
     deliberately does not track existence or represent actual file contents.
     """
+    if "~" in remote_path:
+        raise ValueError("Paths containing '~' are not supported; use an explicit path")
     if machine.lower() == "local":
         from .local_api import localPathType
         return localPathType(remote_path)
@@ -219,10 +236,14 @@ def pathType(machine: str, remote_path: str) -> str:
 
 def downloadFileContents(machine: str, remote_path: str) -> str:
     """Return placeholder contents, not data produced by the simulated compute job."""
+    if "~" in remote_path:
+        raise ValueError("Paths containing '~' are not supported; use an explicit path")
     wfapiLog(f"Downloading fake file contents {machine}:{remote_path}")
     return "FAKE CONTENTS\n"
 
 def uploadBytes(machine: str, remote_path: str, content: io.BytesIO, allow_unsafe = False) -> bool:
+    if "~" in remote_path:
+        raise ValueError("Paths containing '~' are not supported; use an explicit path")
     wfapiLog(f"Uploading binary data to {machine}:{remote_path}")
     return True
 
@@ -261,6 +282,8 @@ def executeJob(machine: str, executable: str, arguments: List[str], nodes: int, 
                name: str | None = None, *, pre_launch: str | None = None,
                post_launch: str | None = None) -> str:
     """Spoof the native IRI pre-launch/executable/post-launch workflow."""
+    if "~" in job_run_dir or "~" in executable:
+        raise ValueError("Paths containing '~' are not supported; use an explicit path")
     script_body = "\n".join(
         command for command in (
             pre_launch, shlex.join([executable, *arguments]), post_launch
@@ -277,6 +300,8 @@ def executeBatchJobCompat(machine: str, script_body: str,
                     time : str, queue : str, account : str,
                     job_run_dir : str, exclusive=True, allow_unsafe=False,
                     name: str | None = None) -> str:
+    if "~" in job_run_dir:
+        raise ValueError("Paths containing '~' are not supported; use an explicit path")
     wfapiLog(f"Executing batch job on machine {machine} with nodes:{nodes}, ranks/node:{ranks_per_node}, gpus/rank:{gpus_per_rank}, time:{time}, queue:{queue}, account:{account}")
    
     #Assign the job a fake active time
@@ -339,11 +364,23 @@ def findJobByName(machine: str, name: str) -> str | None:
             return job_id
     return None
 
-def downloadFile(machine: str, local_path_out: str, remote_path_in: str) -> str:
-    """Write placeholder contents locally using the same signature as the IRI API."""
-    output_path = Path(local_path_out).expanduser()
-    if output_path.is_dir():
+def downloadFile(machine: str, local_path_out: str, remote_path_in: str, *,
+                 allow_unsafe=False) -> str:
+    """Write placeholder contents to a checked local destination, like IRI.
+
+    Configured local sandboxes and /tmp are permitted by default; allow_unsafe
+    explicitly bypasses this check on the real local write.
+    """
+    from .api_general import isDirectory
+
+    if "~" in remote_path_in:
+        raise ValueError("Paths containing '~' are not supported; use an explicit path")
+    output_path = Path(getAbsoluteLocalPath(local_path_out))
+    if isDirectory("local", str(output_path), check_exists=True):
         output_path /= PurePosixPath(remote_path_in).name
+    output_path = output_path.resolve()
+    if not allow_unsafe and not globals.checkSafePath("local", output_path):
+        raise ValueError("Local download destination is outside the sandbox directories and /tmp")
     output_path.write_text(downloadFileContents(machine, remote_path_in), encoding="utf-8")
     return str(output_path)
 

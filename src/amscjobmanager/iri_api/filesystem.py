@@ -338,6 +338,8 @@ def downloadFileContents(machine: str, remote_path: str)->str:
        machine - The name of the machine.
        remote_path - The absolute path on the remote machine
     """
+    if "~" in remote_path:
+        raise ValueError("Paths containing '~' are not supported; use an explicit path")
     machine = machine.lower()
 
     _require_filesystem_operation(machine, "downloadFileContents")
@@ -382,21 +384,36 @@ def downloadFileContents(machine: str, remote_path: str)->str:
     else:
         raise Exception(f"Download failed, response: { json.dumps(j,indent=2)}")        
 
-def downloadFile(machine: str, local_path_out: str, remote_path_in: str)->str:
+def downloadFile(machine: str, local_path_out: str, remote_path_in: str, *,
+                 allow_unsafe=False)->str:
+    """Download a source file to a local filename or existing directory.
+
+    Check the resolved output against local sandboxes and /tmp before reading
+    or copying data, unless allow_unsafe=True. A Globus fallback also permits
+    its configured staging directory. Return the final local filename.
+    """
     from ..api_general import isDirectory
 
     if machine.lower() != "local" and getFilesystemOperationHandling(
         machine, "downloadFile"
     ) == "globus":
         requireGlobusFallback(machine, "downloadFile")
-        return downloadFileGlobus(machine, local_path_out, remote_path_in)
+        return downloadFileGlobus(
+            machine, local_path_out, remote_path_in, allow_unsafe=allow_unsafe
+        )
 
-    if isDirectory("local", local_path_out):
-        local_path_out = local_api.getAbsoluteLocalPath(local_path_out) + "/" + pathlib.Path(remote_path_in).name
+    if "~" in remote_path_in:
+        raise ValueError("Paths containing '~' are not supported; use an explicit path")
+    output_path = pathlib.Path(local_api.getAbsoluteLocalPath(local_path_out))
+    if isDirectory("local", str(output_path), check_exists=True):
+        output_path /= pathlib.PurePosixPath(remote_path_in).name
+    local_path_out = str(output_path.resolve())
+    if not allow_unsafe and not checkSafePath("local", local_path_out):
+        raise ValueError("Local download destination is outside the sandbox directories and /tmp")
 
     if machine.lower() == "local":
         wfapiLog(f"Copying local file {remote_path_in} to {local_path_out}")    
-        local_api.localCopyFile(local_path_out, remote_path_in, allow_unsafe=True)
+        local_api.localCopyFile(local_path_out, remote_path_in, allow_unsafe=allow_unsafe)
     else:
         content = downloadFileContents(machine, remote_path_in)
         #Need to manually identify whether it is text or base64-binary encoded

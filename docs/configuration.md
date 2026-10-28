@@ -20,8 +20,10 @@ the selected implementation and returns `None`. The lower-level
 mapping instead. Use either setup entry point; calling both is unnecessary.
 
 Use absolute paths in configuration. Relative token, cache, or database paths
-otherwise depend on the application's working directory, and tilde expansion is
-not consistent across all entry points.
+otherwise depend on the application's working directory. Paths containing `~`
+are rejected, including sandbox/staging roots, credentials, cache directories,
+and database/configuration filenames. There is no username or home-directory
+inference on either local or remote machines.
 
 ## Example JSON
 

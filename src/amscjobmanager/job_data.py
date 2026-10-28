@@ -15,7 +15,9 @@ class JobData:
     def __init__(self, filename: str | None = None, max_workflows_active=10,
                  *, _test_crash_at: str | None = None,
                  _test_action_manager_factories=None):
-        db_path = ":memory:" if filename is None else str(Path(filename).expanduser())
+        if filename is not None and "~" in str(filename):
+            raise ValueError("Database paths containing '~' are not supported")
+        db_path = ":memory:" if filename is None else str(Path(filename))
         self.max_workflows_active = max_workflows_active
         self.conn = sqlite3.connect(db_path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row

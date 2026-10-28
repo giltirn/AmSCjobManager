@@ -199,6 +199,8 @@ def getResourceID(machine, rtype="compute", path: Optional[str] = None):
     rtype: "compute" or "storage". A storage path is required to select a
         named storage resource.
     """
+    if path is not None and "~" in str(path):
+        raise ValueError("Paths containing '~' are not supported; use an explicit path")
     machine = machine.lower()
     if rtype not in ["compute", "storage"]:
         raise Exception("Invalid resource type")

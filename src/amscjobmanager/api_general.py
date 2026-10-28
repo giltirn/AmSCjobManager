@@ -31,26 +31,37 @@ def testExecutablePrivileges(machine: str)-> bool:
     except Exception as e:
         return False    
 
-def isDirectory(machine:str, remote_path: str)->bool:
-    """
-    Check if a remote path is a directory
-    """
-    if remote_path == ".":
-        remote_path = "./" #pathlib treats as a filename otherwise
+def isDirectory(machine: str, remote_path: str, *, check_exists: bool = False)->bool:
+    """Return whether a path names a directory on the selected machine.
 
+    machine selects a configured remote machine or 'local'. remote_path must
+    be absolute remotely; relative local paths are resolved on the manager host.
+    With check_exists=False, a trailing '/' is accepted without querying its
+    existence. Set check_exists=True to query even those paths. Local queries
+    inspect filesystem metadata and follow symlinks; remote queries use pathType
+    and may incur an API call. Query errors propagate to the caller.
+    """
+    machine = machine.lower()
+    if "~" in remote_path:
+        raise ValueError("Paths containing '~' are not supported; use an explicit path")
     if not pathlib.Path(remote_path).is_absolute():
         if machine == "local":
             remote_path = str(pathlib.Path(remote_path).resolve())
         else:
             raise Exception("Path must be absolute")
 
-    if remote_path[-1] == '/':
+    if remote_path.endswith('/') and not check_exists:
         return True
+
+    if machine == "local":
+        return pathlib.Path(remote_path).is_dir()
 
     pt = pathType(machine, remote_path)
     return "directory" in pt and "cannot open" not in pt
 
 def pathExists(machine: str, remote_path: str)->bool:
+    if "~" in remote_path:
+        raise ValueError("Paths containing '~' are not supported; use an explicit path")
     if not pathlib.Path(remote_path).is_absolute():
         raise Exception("Path must be absolute")
 
@@ -68,6 +79,8 @@ def uploadSmallFile(machine: str, remote_path: str, local_path: str, allow_unsaf
        definitely_is_file - Assert that the remote path is an absolute file path, not a directory. Use to skip checking the type of the remote path.
     """
 
+    if "~" in remote_path or "~" in str(local_path):
+        raise ValueError("Paths containing '~' are not supported; use an explicit path")
     if not pathlib.Path(remote_path).is_absolute():
         raise Exception("Path must be absolute")
 

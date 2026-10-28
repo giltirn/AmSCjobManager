@@ -17,7 +17,7 @@ and backend selection are process-wide; use a fresh process to switch backends.
 | Resource availability | Queries IRI resource status | Reports up | Reports up |
 | Remote cancellation | Compute and Globus APIs | Local process cancellation is not implemented | Simulated cancellation |
 | State after process restart | Persistent workflow DB plus remote discovery | Limited local status tracking; see below | Simulated remote state is lost |
-| Sandbox enforcement | Supported writes are checked; see exceptions | Supported writes/run directories are checked; see exceptions | Not a sandbox validation backend |
+| Sandbox enforcement | Supported writes are checked; see exceptions | Local data outputs and run directories are checked | Real local downloads are checked; remote mutations are simulated |
 
 ## IRI
 
@@ -47,7 +47,9 @@ Select IRI, configure a `local` sandbox, and construct a compute action with
 There is no local batch scheduler: nodes, ranks, GPUs, account, queue, and time
 do not allocate or limit local resources.
 
-The runner writes `exec_wrap.sh` into the run directory and captures output in
+Before starting the worker, the runner checks the run directory and resolved
+wrapper/log destinations against local sandboxes and `/tmp`, unless explicitly
+overridden with `allow_unsafe=True`. It writes `exec_wrap.sh` into the run directory and captures output in
 `run.<remote-job-id>.log`. Give simultaneous local jobs distinct run directories
 because the wrapper filename is shared within a directory. A local executable
 action runs its pre-launch commands, executable, and post-launch commands in
@@ -82,11 +84,13 @@ canceled events for inspection.
 
 It does not execute commands or retain a remote filesystem. Listings, metadata,
 file types, project information, and downloaded contents are illustrative.
-`downloadFile()` writes placeholder contents to a real local destination, and
+`downloadFile()` writes placeholder contents to a checked real local destination, and
 `pathType("local", ...)` uses the real local `file` command. The reference example
 also creates real temporary input files and a workflow database.
 
-SPOOF does not enforce the general filesystem or known-endpoint sandbox policy.
+SPOOF does not enforce the sandbox policy for simulated remote filesystem or
+known-endpoint mutations. Its real local `downloadFile()` writes are checked
+against local sandboxes and `/tmp`, with the usual `allow_unsafe` override.
 It does apply personal staging/path translation rules for relevant transfers.
 The blocking `uploadFileGlobus()` and `downloadFileGlobus()` helpers raise
 `NotImplementedError` under SPOOF. Its simulated `globusCopy()` returns promptly

@@ -207,7 +207,9 @@ class GlobusPathNamespaceTests(unittest.TestCase):
                     self.assertEqual(list(self.staging.iterdir()), [])
 
     def test_download_rejects_destinations_outside_configured_local_sandbox(self):
-        outside = Path(self.stack.enter_context(tempfile.TemporaryDirectory()))
+        # /tmp is authorized independently of the configured sandbox, so use
+        # a non-temporary destination. Rejection must happen before any writes.
+        outside = Path("/unconfigured-local-downloads")
         escaped = self.directory / "escape"
         escaped.symlink_to(outside, target_is_directory=True)
         for destination in (
@@ -223,6 +225,52 @@ class GlobusPathNamespaceTests(unittest.TestCase):
                     )
         self.submit.assert_not_called()
         self.assertFalse((outside / "output.bin").exists())
+
+    def test_download_accepts_tmp_without_a_configured_local_sandbox(self):
+        output = self.directory / "output.bin"
+
+        def transfer(dest_endpoint, dest_path, source_endpoint, source_path, **kwargs):
+            relative = PurePosixPath(dest_path).relative_to("/windows/staging")
+            (self.staging / str(relative) / "result.bin").write_bytes(b"downloaded")
+
+        with patch.object(manager_globals, "remote_workdir", {}), \
+             patch.object(globus, "globusCopy", side_effect=transfer):
+            self.assertEqual(globus.downloadFileGlobus(
+                "aurora", str(output), "/project/safe/result.bin", remote_path_type="globus",
+            ), str(output))
+        self.assertEqual(output.read_bytes(), b"downloaded")
+
+    def test_download_unsafe_override_authorizes_only_final_local_output(self):
+        output = Path("/unconfigured-local-downloads/output.bin")
+
+        def transfer(dest_endpoint, dest_path, source_endpoint, source_path, **kwargs):
+            # The transfer itself must still land in the configured staging area.
+            self.assertEqual(dest_endpoint, "personal")
+            relative = PurePosixPath(dest_path).relative_to("/windows/staging")
+            (self.staging / str(relative) / "result.bin").write_bytes(b"downloaded")
+
+        with patch.object(globus, "globusCopy", side_effect=transfer), \
+             patch.object(Path, "mkdir"), \
+             patch.object(globus, "createGlobusStagingDirectory") as staging, \
+             patch.object(globus.shutil, "copy2") as copy:
+            with self.assertRaises(ValueError):
+                globus.downloadFileGlobus(
+                    "aurora", str(output), "/project/safe/result.bin", remote_path_type="globus",
+                )
+            staging.assert_not_called()
+            copy.assert_not_called()
+
+            # Provide a staging path and mock filesystem mutations so the test
+            # never creates files outside its temporary tree.
+            staged = self.staging / "unsafe-transfer-staging"
+            staging.return_value = (staged, "/windows/staging/unsafe-transfer-staging")
+            with patch.object(Path, "write_bytes"):
+                result = globus.downloadFileGlobus(
+                    "aurora", str(output), "/project/safe/result.bin",
+                    remote_path_type="globus", allow_unsafe=True,
+                )
+            self.assertEqual(result, str(output))
+            copy.assert_called_once_with(staged / "result.bin", output)
 
     def test_download_accepts_directory_inside_configured_local_sandbox(self):
         output_directory = self.directory / "downloads"
@@ -256,10 +304,11 @@ class GlobusPathNamespaceTests(unittest.TestCase):
                     "aurora", str(self.directory / "output.bin"), "/project/safe/result.bin",
                     remote_path_type="globus",
                 )
-                staged_result = globus.downloadFileGlobus(
-                    "aurora", str(outside / "staging" / "result.bin"),
-                    "/project/safe/result.bin", remote_path_type="globus",
-                )
+                with patch.object(globus, "checkSafePath", side_effect=AssertionError("Staging is authorized by configuration")):
+                    staged_result = globus.downloadFileGlobus(
+                        "aurora", str(outside / "staging" / "result.bin"),
+                        "/project/safe/result.bin", remote_path_type="globus",
+                    )
         self.assertEqual(result, str(self.directory / "output.bin"))
         self.assertEqual((self.directory / "output.bin").read_bytes(), b"downloaded")
         self.assertEqual(staged_result, str(outside / "staging" / "result.bin"))

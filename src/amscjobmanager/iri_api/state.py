@@ -181,8 +181,8 @@ globus_personal_endpoint: dict[str, str] | None = None
 def _configure_personal_globus_endpoint(configuration) -> None:
     """Configure the optional personal Globus endpoint for this process."""
     global globus_personal_endpoint
-    special_globus_endpoints.pop("personal", None)
     if configuration is None:
+        special_globus_endpoints.pop("personal", None)
         globus_personal_endpoint = None
         return
 
@@ -191,6 +191,9 @@ def _configure_personal_globus_endpoint(configuration) -> None:
             return getattr(configuration, name)
         return configuration[name]
 
+    for name in ("staging_directory_local", "staging_directory_globus"):
+        if "~" in value(name):
+            raise ValueError("Staging paths containing '~' are not supported")
     globus_personal_endpoint = {
         "endpoint_uuid": value("endpoint_uuid"),
         "staging_directory_globus": value("staging_directory_globus"),

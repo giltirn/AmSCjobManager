@@ -1,7 +1,9 @@
 from . import globals
 from pydantic import BaseModel, Field
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
+
+ExplicitPath = Annotated[str, Field(pattern=r"^[^~]*$")]
 
 if globals.api_impl in ("SPOOF", "IRI"):
     class IRIImplementationConfig(BaseModel):
@@ -17,7 +19,7 @@ if globals.api_impl in ("SPOOF", "IRI"):
             "globus",
             description="Authentication method for this implementation's token file",
         )
-        token_path: str = Field(
+        token_path: ExplicitPath = Field(
             ...,
             description="Path to a Globus token file or an AMSC PAT JSON file",
         )
@@ -27,18 +29,18 @@ if globals.api_impl in ("SPOOF", "IRI"):
             ...,
             description="UUID of the personal Globus endpoint",
         )
-        staging_directory_globus: str = Field(
+        staging_directory_globus: ExplicitPath = Field(
             ...,
             description="Staging directory path as seen by the Globus endpoint",
         )
-        staging_directory_local: str = Field(
+        staging_directory_local: ExplicitPath = Field(
             ...,
             description="Staging directory path as seen by the manager host OS",
         )
 
 
     class ManagerConfig(BaseModel):
-        iri_config_cache_directory: str | None = Field(
+        iri_config_cache_directory: ExplicitPath | None = Field(
             None,
             description="Directory for discovered IRI implementation configuration; required when discovery is used",
         )
@@ -46,11 +48,11 @@ if globals.api_impl in ("SPOOF", "IRI"):
             ...,
             description="IRI compute/filesystem implementations to initialize",
         )
-        transferapi_key_path: str | None = Field(
+        transferapi_key_path: ExplicitPath | None = Field(
             None,
             description="Optional Data Transfer API token path; omit to disable Globus transfer authentication",
         )
-        sandbox_directories: dict[str, list[str]] = Field(
+        sandbox_directories: dict[str, list[ExplicitPath]] = Field(
             ...,
             description="A map of machine names to base sandbox directories",
         )
@@ -64,6 +66,8 @@ if globals.api_impl in ("SPOOF", "IRI"):
             cls, output_path: str | Path = "manager-config-template.json"
         ) -> Path:
             """Write a non-destructive NERSC manager configuration template."""
+            if "~" in str(output_path):
+                raise ValueError("Configuration paths containing '~' are not supported")
             output_path = Path(output_path)
             if output_path.exists():
                 return output_path

@@ -11,6 +11,8 @@ else:
     raise Exception("Unknown API implementation")
    
 def readManagerConfigFile(filename):
+    if "~" in str(filename):
+        raise ValueError("Configuration paths containing '~' are not supported")
     try:
         config = ManagerConfig.model_validate_json(Path(filename).read_text())
     except ValidationError as e:

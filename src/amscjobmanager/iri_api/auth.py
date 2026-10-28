@@ -22,12 +22,16 @@ from .state import special_globus_endpoints
 from .filesystem import getMountedFilesystems
 
 def load_globus_tokens(token_file: Path) -> dict | None:
+    if "~" in str(token_file):
+        raise ValueError("Credential paths containing '~' are not supported")
     if not token_file.exists():
         return None
     with token_file.open("r", encoding="utf-8") as f:
         return json.load(f)
 
 def save_globus_tokens(token_file: Path, tokens: dict) -> None:
+    if "~" in str(token_file):
+        raise ValueError("Credential paths containing '~' are not supported")
     token_file.parent.mkdir(parents=True, exist_ok=True)
     os.chmod(token_file.parent, 0o700)
     tmp = token_file.with_suffix(".tmp")
@@ -105,7 +109,9 @@ class AMSCPersonalAccessToken(BaseModel):
 
 def _load_amsc_pat(key_path: str) -> dict[str, str]:
     """Read a PAT without exposing its contents in validation errors."""
-    path = Path(key_path).expanduser()
+    if "~" in str(key_path):
+        raise ValueError("Credential paths containing '~' are not supported")
+    path = Path(key_path)
     try:
         data = path.read_text(encoding="utf-8")
     except (UnicodeError, OSError) as exc:

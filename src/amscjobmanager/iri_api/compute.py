@@ -96,6 +96,8 @@ def executeJob(machine: str, executable: str, arguments: List[str], nodes: int, 
     a shared-filesystem barrier to run ``post_launch`` on MPI rank zero after
     every rank has completed the executable.
     """
+    if "~" in job_run_dir or "~" in executable:
+        raise ValueError("Paths containing '~' are not supported; use an explicit path")
     machine = machine.lower()
     if machine == "local":
         script_body = "\n".join(
@@ -209,6 +211,8 @@ def executeBatchJobCompat(machine: str, script_body: str,
 
     NOTE: This relies on hacking the API to bypass the automatic srun command in favor of the (more flexible) script contents. Hopefully they will allow arbitrary batch script submission as part of the API eventually!
     """
+    if "~" in job_run_dir:
+        raise ValueError("Paths containing '~' are not supported; use an explicit path")
     machine = machine.lower()
     if machine == "local":
         return local_api.executeJobScript(

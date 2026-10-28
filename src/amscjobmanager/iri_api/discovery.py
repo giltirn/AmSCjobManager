@@ -94,7 +94,9 @@ def _discovery_location(name: str, api_url: str, cache_directory: str | Path):
     api_base = urlunsplit((url.scheme, url.netloc, url.path.rstrip("/"), "", ""))
     if not str(cache_directory).strip():
         raise ValueError("An IRI configuration cache directory is required")
-    return name, api_base, Path(cache_directory).expanduser() / f"{name}.json"
+    if "~" in str(cache_directory):
+        raise ValueError("Cache paths containing '~' are not supported")
+    return name, api_base, Path(cache_directory) / f"{name}.json"
 
 
 def loadCachedImplementation(
@@ -114,7 +116,9 @@ def loadCachedImplementation(
     name = name.lower()
     if not re.fullmatch(r"[a-z][a-z0-9_-]*", name):
         raise ValueError("Implementation tags must start with a letter and contain only letters, digits, '-' or '_'")
-    cache_path = Path(cache_directory).expanduser() / f"{name}.json"
+    if "~" in str(cache_directory):
+        raise ValueError("Cache paths containing '~' are not supported")
+    cache_path = Path(cache_directory) / f"{name}.json"
     if not cache_path.exists():
         return None
     cache = ImplementationCache.model_validate_json(cache_path.read_text(encoding="utf-8"))
@@ -142,7 +146,9 @@ def loadCachedImplementations(cache_directory: str | Path | None = None) -> None
         from .state import getConfigurationCacheDirectory
 
         cache_directory = getConfigurationCacheDirectory()
-    for path in sorted(Path(cache_directory).expanduser().glob("*.json")):
+    if "~" in str(cache_directory):
+        raise ValueError("Cache paths containing '~' are not supported")
+    for path in sorted(Path(cache_directory).glob("*.json")):
         try:
             cache = ImplementationCache.model_validate_json(path.read_text(encoding="utf-8"))
             name, api_base, expected_path = _discovery_location(
@@ -180,7 +186,7 @@ def _mount_path_root(mount_path: str) -> str:
     path = PurePosixPath(mount_path)
     root = []
     templated = False
-    understood = path.is_absolute() and ".." not in path.parts
+    understood = path.is_absolute() and ".." not in path.parts and "~" not in mount_path
     for part in path.parts:
         if "{" in part or "}" in part:
             if part not in {"{user_id}", "{project_id}"}:
@@ -205,9 +211,9 @@ def _mount_path_root(mount_path: str) -> str:
         while True:
             supplied = input(f"Filesystem root for mount path {mount_path!r}: ").strip()
             path = PurePosixPath(supplied)
-            if path.is_absolute() and ".." not in path.parts and "{" not in supplied and "}" not in supplied:
+            if path.is_absolute() and ".." not in path.parts and "{" not in supplied and "}" not in supplied and "~" not in supplied:
                 return str(path)
-            print("Please provide an absolute POSIX root without placeholders or '..'.")
+            print("Please provide an absolute POSIX root without placeholders, '~', or '..'.")
     except EOFError as exc:
         raise ValueError(
             f"Discovering mount path {mount_path!r} requires interactive root confirmation; "

@@ -24,8 +24,19 @@ their run directories through the same path policy.
 ```
 
 `globals.checkSafePath(machine, path)` also permits paths under `/tmp` by default.
-Callers can set `allow_tmp=False` to require a configured sandbox root. Unknown
-machines and use before configuration raise errors. Use absolute paths;
+It accepts a string or `Path`, rejects `~`, and resolves symlinks internally;
+callers do not need to normalize paths just for validation. The boolean result
+does not change the caller's path, so filesystem operations still resolve it
+where needed for their own use.
+
+Path arguments and configured path fields must not contain `~`, including in
+local paths or literal filenames such as `result~`. The manager host's username
+and home directory may differ from the user or remote resource's account. Use
+explicit paths instead. This validation also applies with `allow_unsafe=True`;
+that option bypasses sandbox membership checks, not path syntax validation.
+Local `/tmp` paths are available even when no local sandbox has been configured.
+Callers can set `allow_tmp=False` to require a configured sandbox root. Other
+checks require configuration and a known machine. Use absolute paths;
 filesystem checks resolve paths on the manager host and cannot inspect remote
 symlink targets or prevent remote changes between checking and writing.
 
@@ -63,9 +74,10 @@ allowed to be outside `sandbox_directories["local"]`.
   and destination and remains required when `allow_unsafe=True`.
 - `uploadFileGlobus()` can read a local source outside staging, copy it into a
   temporary staging directory, and transfer it to a checked remote filename.
-- `downloadFileGlobus()` can write to staging or to a configured `local` sandbox.
-  `/tmp` alone does not authorize a destination outside staging: this helper
-  uses `allow_tmp=False`. It stages and moves/copies the result when necessary.
+- `downloadFileGlobus()` can write to staging, a configured `local` sandbox, or
+  `/tmp`. Files copied out of staging must pass the local destination check,
+  unless the caller explicitly sets `allow_unsafe=True`. The helper checks the
+  final filename before starting the transfer or creating destination parents.
 
 The two configured staging paths must identify the same physical directory.
 Path checks cannot verify that the collection exposes the intended host path.
@@ -78,9 +90,16 @@ Path checks cannot verify that the collection exposes the intended host path.
 | Compute jobs | Check the run directory; the executable, script, and pre/post commands retain the user's OS/scheduler permissions. |
 | Globus transfers | Check applicable known destinations; unknown external collections are allowed. Personal paths are confined to staging. |
 | Reads and listings | Generally use provider permissions rather than restricting reads to sandbox roots. |
-| `downloadFileGlobus` | Enforces staging or configured local sandbox destinations. |
-| Native `downloadFile` | Currently writes the local destination without a sandbox check. A provider's Globus fallback follows the stricter Globus helper instead. |
-| SPOOF | Does not validate the general sandbox policy and can write placeholder downloads locally. |
+| `downloadFileGlobus` | Allows configured staging, configured local sandboxes, or `/tmp`; `allow_unsafe=True` bypasses the final local destination restriction. |
+| Native `downloadFile`, local copies, and byte writes | Check the resolved final destination against local sandboxes and `/tmp` before fetching/copying/writing data, unless `allow_unsafe=True`. Directory destinations are expanded before checking their child filename. |
+| Local compute output | Checks the run directory, wrapper, and log before recording a job or starting its worker. Commands inside the job retain their OS permissions. |
+| SPOOF | Simulated remote mutations do not validate the general sandbox policy. Real local placeholder downloads do check their destination and accept `allow_unsafe`. |
+
+Credential files, discovery caches, configuration templates, and manager/status
+databases are written to paths explicitly chosen during configuration or object
+creation. Those setup/state paths are separate write contracts and do not need
+to lie inside data sandbox roots. The configured staging root is likewise
+authorized for temporary transfer files without requiring a data sandbox entry.
 
 Use the OS, scheduler, accounts, and facility permissions for stronger
 confinement. Configure sandbox roots and staging directories deliberately, and

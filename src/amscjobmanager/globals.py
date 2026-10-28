@@ -8,25 +8,37 @@ _pending_sandbox_checks: dict[str, list[str]] = {}
 _validating_sandboxes: set[str] = set()
 api_impl = os.getenv("AMSC_JOB_MANAGER_API_IMPL", "IRI") #Control which API implementation is used
 
-def checkSafePath(machine: str, path: str, *, allow_tmp: bool = True)->bool:
+def checkSafePath(machine: str, path: str | pathlib.Path, *, allow_tmp: bool = True)->bool:
     """
     Check if a path is within the sandbox directory structure on the machine.
 
+    Accept a string or Path; reject '~' and resolve symlinks here
+    before comparing with sandbox roots. Callers need not normalize paths for
+    this check. The caller's path is not modified.
+
+    Local paths under /tmp are writable even without local configuration.
     Set allow_tmp=False to require a configured sandbox directory even for
     paths under /tmp.
     """
     machine = machine.lower()
+    if "~" in str(path):
+        raise ValueError("Paths containing '~' are not supported; use an explicit path")
+    path_p = pathlib.Path(path).resolve()
+    tmp_p = pathlib.Path("/tmp").resolve()
+    # Local temporary storage is available even without a configured local root.
+    if machine == "local" and allow_tmp and path_p.is_relative_to(tmp_p):
+        return True
     if remote_workdir is None:
         raise Exception("setupWorkflowAgent has not been called")
     if machine not in remote_workdir:
         raise Exception("Unknown machine")
     
-    path_p = pathlib.Path(path).resolve()
-    tmp_p = pathlib.Path("/tmp")
     if allow_tmp and path_p.is_relative_to(tmp_p):
         return True
 
     for sp in remote_workdir[machine]:            
+        if "~" in str(sp):
+            raise ValueError("Sandbox paths containing '~' are not supported")
         safe_p = pathlib.Path(sp).resolve()
         if path_p.is_relative_to(safe_p):
             return True
@@ -45,6 +57,11 @@ def addSandboxDirs(dirs: Dict[str,str | List[str]], warn_unavailable=True, *,
     IRI machines are determined from the current implementation configuration.
     """
     global remote_workdir
+    # Reject ambiguous roots before registering any paths or probing machines.
+    for directories in dirs.values():
+        for directory in ([directories] if isinstance(directories, str) else directories):
+            if "~" in str(directory):
+                raise ValueError("Sandbox paths containing '~' are not supported")
     configured_machines = None
     if api_impl == "IRI":
         from .iri_api.resources import getKnownMachines

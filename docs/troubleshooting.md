@@ -11,6 +11,7 @@
 | Real IRI behavior when SPOOF was expected | Set `AMSC_JOB_MANAGER_API_IMPL` before any package import, then restart the process/kernel. |
 | “setupWorkflowAgent has not been called” | Call `setupManager(config)` or `api.setupWorkflowAgentFromConfig(config)` before path/API operations. |
 | Unknown machine or implementation | Check configured providers and names returned by `getKnownMachines()`. A provider tag, machine name, and collection UUID are different targets. |
+| Paths containing `~` are rejected | Supply the intended user's explicit path. Local and remote usernames/home directories can differ; the library does not infer either. The rule also applies with `allow_unsafe=True`. |
 | Discovery demands a cache directory | Set `iri_config_cache_directory`. Unknown providers also need an API URL and version for unattended use. |
 | Missing sandbox creation prompt | Pre-create intended directories, or run initialization interactively and approve their creation. Pending remote validation can occur on first provider use. |
 
@@ -57,8 +58,9 @@ Globus namespaces, select the desired collection explicitly.
 
 For personal collection issues, check that the two staging paths identify the
 same physical directory, the personal client is running with access to it, and
-direct personal paths remain below staging. Globus downloads outside staging
-require a configured local sandbox, even when the destination is under `/tmp`.
+direct personal paths remain below staging. Downloads copied out of staging
+require a configured local sandbox or `/tmp`, unless the caller explicitly
+sets `allow_unsafe=True`. The staging root itself is authorized by configuration.
 
 Inspect the transfer's raw status and service event log using its task ID.
 Manager `FAILED` can represent a transfer's `INACTIVE` state, which may still
@@ -67,8 +69,8 @@ appears as Globus `FAILED`.
 
 The native `downloadFile()` implementation distinguishes plaintext from base64
 using a heuristic; some text can look like base64. Use a binary-preserving
-Globus path when exact file contents matter. Native downloads also lack the
-Globus helper's local destination sandbox check.
+Globus path when exact file contents matter. Native and Globus downloads both
+check final local output paths before performing their writes.
 
 ## Workflows that do not advance
 
@@ -127,10 +129,8 @@ Concurrent local jobs sharing a directory overwrite `exec_wrap.sh`.
 
 Local cancellation is unavailable, and durable local metadata does not track
 processes after application failure. Several filesystem methods have no local
-dispatch. The low-level `localCopyFile(..., allow_unsafe=False)` also currently
-references an undefined variable during its check; avoid treating it as a
-validated copy primitive. Native `downloadFile("local", ...)` bypasses that
-check and does not enforce a destination sandbox.
+dispatch. `localCopyFile()` and native local downloads check the final output
+filename, including a directory destination's child and any existing symlink.
 
 ## Persistence and version changes
 

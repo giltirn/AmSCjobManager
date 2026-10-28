@@ -7,6 +7,10 @@ implementation. The top-level package exports `JobManager`, `JobData`, and
 `ActionStatus`. The interfaces below describe the current Python API; provider
 support and sandbox enforcement are detailed in the linked guides.
 
+Filesystem path arguments and configured paths reject `~` on all machines,
+including with `allow_unsafe=True`. Supply explicit account-specific paths;
+the library does not expand paths using the manager host's username.
+
 ## Setup and configuration
 
 | Entry point | Arguments and result |
@@ -106,11 +110,11 @@ code; use exceptions and follow-up queries as appropriate.
 | `api.pathStat(machine, remote_path, dereference=True)` | Provider stat output; SPOOF returns illustrative text. |
 | `api.pathType(machine, remote_path)` | File-description string, using `file` for local paths. |
 | `api.pathExists(machine, remote_path)` | Boolean derived from path-type output; subject to provider/SPOOF limitations. |
-| `api.isDirectory(machine, remote_path)` | Boolean derived from path-type output. A trailing slash is treated as indicating a directory without an existence check. |
+| `api.isDirectory(machine, remote_path, *, check_exists=False)` | A trailing slash indicates a directory without a query by default. Set `check_exists=True` to verify it exists as a directory. Local checks inspect the filesystem and follow symlinks; remote checks use path-type API output. Local copy/download helpers enable this option for destination checks. |
 | `api.uploadBytes(machine, remote_path, content, allow_unsafe=False)` | Uploads `io.BytesIO` contents to a destination file. |
 | `api.uploadSmallFile(machine, remote_path, local_path, allow_unsafe=False, definitely_is_file=False)` | Reads a local file and uploads it; remote directory paths append the local filename. |
 | `api.downloadFileContents(machine, remote_path)` | Text/base64 string, according to provider behavior. |
-| `api.downloadFile(machine, local_path_out, remote_path_in)` | Writes and returns the local filename; an existing destination directory receives the source filename. Native downloads currently lack a destination sandbox check. |
+| `api.downloadFile(machine, local_path_out, remote_path_in, *, allow_unsafe=False)` | Writes and returns the resolved local filename; an existing destination directory receives the source filename. Checks local sandbox or `/tmp` destinations unless explicitly overridden. A Globus fallback also permits its configured staging root. |
 
 See [sandboxing](sandboxing.md) and [implementations](implementations.md) before
 assuming equivalent checks or local dispatch for these functions.
@@ -131,13 +135,16 @@ api.uploadFileGlobus(
 
 api.downloadFileGlobus(
     machine, local_filesystem_path, remote_path,
-    remote_path_type="filesystem", remote_endpoint=None,
+    remote_path_type="filesystem", remote_endpoint=None, allow_unsafe=False,
 )
 ```
 
 The last two functions require their optional arguments as keywords.
 `globusCopy()` returns a task ID; `uploadFileGlobus()` blocks and returns a task
 ID; `downloadFileGlobus()` blocks and returns a local filename.
+Its local destination must be in a sandbox, `/tmp`, or configured staging unless
+`allow_unsafe=True` authorizes another final output path. Temporary staging
+remains confined to the configured staging root.
 
 | Function | Result and notes |
 | --- | --- |
@@ -153,3 +160,16 @@ ID; `downloadFileGlobus()` blocks and returns a local filename.
 Direct submissions are not added to JobData. Use actions when the manager
 should own ordering, monitoring, and cancellation. See [transfers](transfers.md)
 for namespaces and staging.
+
+## Local write primitives
+
+`amscjobmanager.local_api` provides `localMkdir(path, create_parents=True,
+allow_unsafe=False)`, `writeBytes(path, content, allow_unsafe=False)`, and
+`localCopyFile(path_to, path_from, allow_unsafe=False)`. Each checks its resolved
+output against local sandbox roots or `/tmp`. Copies expand directory
+destinations to the final source filename before checking, including symlinks.
+`allow_unsafe=True` explicitly bypasses the destination restriction.
+
+`executeJobScript(script_body, job_run_dir, allow_unsafe=False, name=None)` checks
+the run directory, wrapper, and log before recording the job or starting its
+worker. Its commands still run with the user's OS permissions.

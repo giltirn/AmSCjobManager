@@ -120,7 +120,7 @@ def remoteLs(machine: str, path: str)-> List[str]:
        machine - The name of the machine.
        path - The absolute path
     Return:
-       A list of files in the directory
+       A list of provider filenames, or sorted absolute child paths locally
 
     Uses GET with query parameters for API v1, or POST with a JSON body for
     API v2. Both versions submit an asynchronous directory-listing task.
@@ -129,6 +129,8 @@ def remoteLs(machine: str, path: str)-> List[str]:
     """
     machine = machine.lower()
     wfapiLog(f"Listing contents of directory {machine}:{path}")
+    if machine == "local":
+        return local_api.localLs(path)
     
     rid = getResourceID(machine, rtype="storage", path=path)
     version = getImplementationAPIVersion(getMachineImplementation(machine))
@@ -152,8 +154,16 @@ def remoteLs(machine: str, path: str)-> List[str]:
 
 
 def remoteChmod(machine: str, path : str, mode : str, allow_unsafe = False):
+    """Change path permissions on machine, returning None on success.
+
+    mode is a permission string such as '700'. For machine='local', numeric
+    and symbolic chmod modes are supported and symlinks are followed. Unless
+    allow_unsafe is True, the target must pass the machine's sandbox checks.
+    """
     machine = machine.lower()
     wfapiLog(f"Changing permissions of file {machine}:{path} to {mode}")
+    if machine == "local":
+        return local_api.localChmod(path, mode, allow_unsafe=allow_unsafe)
     
     if not allow_unsafe and not checkSafePath(machine, path):
         raise Exception("Path is not a subdirectory of the sandbox path")
@@ -218,11 +228,14 @@ def pathStat(machine: str, remote_path: str, dereference=True)->str:
     Args:
        machine - The name of the machine.
        remote_path - The absolute path on the remote machine
+       dereference - Inspect a symlink's target when True, or the link itself
+    Return:
+       Provider stat output, or the local stat command's output, as a string
     """
     machine = machine.lower()    
 
     if machine == "local":
-        raise NotImplementedError()
+        return local_api.localPathStat(remote_path, dereference=dereference)
 
     _require_filesystem_operation(machine, "pathStat")
        
@@ -337,10 +350,25 @@ def downloadFileContents(machine: str, remote_path: str)->str:
     Args:
        machine - The name of the machine.
        remote_path - The absolute path on the remote machine
+
+    machine='local' reads directly from the manager host. Local and Globus
+    fallback reads return UTF-8 plaintext for files identified as text or empty,
+    and an ASCII base64 string otherwise. Reads are not sandbox-restricted.
     """
     if "~" in remote_path:
         raise ValueError("Paths containing '~' are not supported; use an explicit path")
     machine = machine.lower()
+
+    if machine == "local":
+        local_path = local_api.getAbsoluteLocalPath(remote_path)
+        contents = local_api.readFileBinary(local_path)
+        file_description = local_api.localPathType(local_path).lower()
+        if "text" in file_description or "empty" in file_description:
+            try:
+                return contents.decode("utf-8")
+            except UnicodeDecodeError:
+                pass
+        return base64.b64encode(contents).decode("ascii")
 
     _require_filesystem_operation(machine, "downloadFileContents")
 
@@ -353,14 +381,7 @@ def downloadFileContents(machine: str, remote_path: str)->str:
         staging_file = temporary_directory / remote_filename
         try:
             downloadFileGlobus(machine, str(staging_file), remote_path)
-            file_description = local_api.localPathType(str(staging_file)).lower()
-            contents = staging_file.read_bytes()
-            if "text" in file_description or "empty" in file_description:
-                try:
-                    return contents.decode("utf-8")
-                except UnicodeDecodeError:
-                    pass
-            return base64.b64encode(contents).decode("ascii")
+            return downloadFileContents("local", str(staging_file))
         finally:
             shutil.rmtree(temporary_directory, ignore_errors=True)
 

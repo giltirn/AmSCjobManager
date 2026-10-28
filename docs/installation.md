@@ -21,7 +21,7 @@ An editable installation makes source changes available without reinstalling.
 Use `python -m pip install .` for a non-editable installation.
 
 Local execution uses Linux/Unix utilities including Bash, `whoami`, `file`,
-`mkdir`, `cp`, and `/proc/sys/kernel/random/uuid`. The current local runner is
+`mkdir`, `cp`, `chmod`, `stat`, and `/proc/sys/kernel/random/uuid`. The current local runner is
 not portable to Windows. Remote jobs require the requested executable, runtime,
 and launcher to exist on the destination machine.
 

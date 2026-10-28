@@ -128,8 +128,7 @@ active because not all worker failures update the local status database.
 Concurrent local jobs sharing a directory overwrite `exec_wrap.sh`.
 
 Local cancellation is unavailable, and durable local metadata does not track
-processes after application failure. Several filesystem methods have no local
-dispatch. `localCopyFile()` and native local downloads check the final output
+processes after application failure. `localCopyFile()` and native local downloads check the final output
 filename, including a directory destination's child and any existing symlink.
 
 ## Persistence and version changes

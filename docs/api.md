@@ -104,16 +104,16 @@ code; use exceptions and follow-up queries as appropriate.
 
 | Function | Result and notes |
 | --- | --- |
-| `api.remoteLs(machine, path)` | List of filenames returned by the provider. |
+| `api.remoteLs(machine, path)` | List of filenames returned by the provider; locally, sorted absolute child paths including hidden entries. |
 | `api.remoteMkdir(machine, path, create_parents=True, allow_unsafe=False)` | Creates a directory; checks supported destination paths. |
 | `api.remoteChmod(machine, path, mode, allow_unsafe=False)` | Changes permissions; mode is a string such as `"700"`. |
-| `api.pathStat(machine, remote_path, dereference=True)` | Provider stat output; SPOOF returns illustrative text. |
+| `api.pathStat(machine, remote_path, dereference=True)` | Provider or local stat output as a string; `dereference=False` inspects a symlink itself. SPOOF returns illustrative text. |
 | `api.pathType(machine, remote_path)` | File-description string, using `file` for local paths. |
 | `api.pathExists(machine, remote_path)` | Boolean derived from path-type output; subject to provider/SPOOF limitations. |
 | `api.isDirectory(machine, remote_path, *, check_exists=False)` | A trailing slash indicates a directory without a query by default. Set `check_exists=True` to verify it exists as a directory. Local checks inspect the filesystem and follow symlinks; remote checks use path-type API output. Local copy/download helpers enable this option for destination checks. |
 | `api.uploadBytes(machine, remote_path, content, allow_unsafe=False)` | Uploads `io.BytesIO` contents to a destination file. |
 | `api.uploadSmallFile(machine, remote_path, local_path, allow_unsafe=False, definitely_is_file=False)` | Reads a local file and uploads it; remote directory paths append the local filename. |
-| `api.downloadFileContents(machine, remote_path)` | Text/base64 string, according to provider behavior. |
+| `api.downloadFileContents(machine, remote_path)` | Text/base64 string, according to provider behavior. Locally, UTF-8 plaintext for text/empty files and base64 for other contents. |
 | `api.downloadFile(machine, local_path_out, remote_path_in, *, allow_unsafe=False)` | Writes and returns the resolved local filename; an existing destination directory receives the source filename. Checks local sandbox or `/tmp` destinations unless explicitly overridden. A Globus fallback also permits its configured staging root. |
 
 See [sandboxing](sandboxing.md) and [implementations](implementations.md) before

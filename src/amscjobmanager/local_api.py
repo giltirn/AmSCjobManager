@@ -44,6 +44,57 @@ def localMkdir(path: str, create_parents = True, allow_unsafe = False):
         raise Exception(f"Directory creation failed: {result.stderr}")        
 
 
+def localLs(path: str) -> list[str]:
+    """List a local directory, returning sorted absolute child paths.
+
+    path may be absolute or relative. Include hidden entries, without recursing
+    into subdirectories. Reads are not sandbox-restricted; filesystem errors
+    propagate to the caller.
+    """
+    directory = Path(getAbsoluteLocalPath(path))
+    return sorted(str(child) for child in directory.iterdir())
+
+
+def localChmod(path: str, mode: str, allow_unsafe=False) -> None:
+    """Change a local path's permissions, returning None on success.
+
+    path may be absolute or relative and symlinks are followed. mode is a chmod
+    permission string, such as '700' or 'u+x'. Unless allow_unsafe is True, the
+    resolved target must be inside a configured local sandbox or /tmp. Invalid
+    modes and filesystem failures raise subprocess exceptions.
+    """
+    path = getAbsoluteLocalPath(path)
+    if not allow_unsafe and not checkSafePath("local", path):
+        raise ValueError("Path is not a subdirectory of the sandbox path")
+    subprocess.run(["chmod", "--", mode, path], text=True, capture_output=True, check=True)
+
+
+def localPathStat(path: str, dereference=True) -> str:
+    """Return the local stat command's metadata as a string for path.
+
+    path may be absolute or relative. dereference selects whether to inspect a
+    symbolic link's target (True) or the link itself (False). Reads are not
+    sandbox-restricted. Command failures raise subprocess exceptions.
+    """
+    # Preserve the final symlink so stat can honor dereference=False.
+    if "~" in str(path):
+        raise ValueError("Paths containing '~' are not supported; use an explicit path")
+    args = ["stat"]
+    if dereference:
+        args.append("-L")
+    result = subprocess.run(args + ["--", str(path)], text=True, capture_output=True, check=True)
+    return result.stdout.strip()
+
+
+def readFileBinary(path: str) -> bytes:
+    """Read all contents of a local file at path and return raw bytes.
+
+    Accept absolute or relative paths and follow symlinks. Reads are not
+    sandbox-restricted. Path validation and filesystem errors propagate.
+    """
+    return Path(getAbsoluteLocalPath(path)).read_bytes()
+
+
 def localPathType(path: str):
     if "~" in str(path):
         raise ValueError("Paths containing '~' are not supported; use an explicit path")

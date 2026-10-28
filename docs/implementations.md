@@ -12,7 +12,7 @@ and backend selection are process-wide; use a fresh process to switch backends.
 | --- | --- | --- | --- |
 | Compute submission | Real provider jobs | Real shell processes on the manager host | Simulated completion |
 | Globus collection transfers | Real transfers through the IRI movement service | Use a configured personal collection for OS-visible files | Simulated tasks |
-| Filesystem operations | Provider-dependent, with some Globus fallbacks | Selected helpers only | Mostly logs and fixed illustrative responses |
+| Filesystem operations | Provider-dependent, with some Globus fallbacks | Local listings, permissions, metadata, uploads, and downloads | Mostly logs and fixed illustrative responses |
 | Authentication | Provider tokens; separate transfer credentials | No remote token needed for local operations | No tokens read |
 | Resource availability | Queries IRI resource status | Reports up | Reports up |
 | Remote cancellation | Compute and Globus APIs | Local process cancellation is not implemented | Simulated cancellation |
@@ -55,9 +55,14 @@ because the wrapper filename is shared within a directory. A local executable
 action runs its pre-launch commands, executable, and post-launch commands in
 sequence; it does not add MPI launch behavior.
 
-Local support is incomplete. `remoteMkdir`, `pathType`, local uploads, and local
-compute submission have local dispatch, but several general filesystem/resource
-operations still expect an IRI machine. `cancelJob("local", ...)` has no local
+`remoteLs`, `remoteChmod`, `pathStat`, `downloadFileContents`, `remoteMkdir`,
+`pathType`, uploads, downloads, and compute submission dispatch locally.
+Listings return sorted absolute child paths, including hidden entries.
+Permission changes check the resolved target against local sandboxes and `/tmp`
+unless `allow_unsafe=True`. File reads and metadata queries are unrestricted;
+`pathStat(..., dereference=False)` inspects the symlink itself.
+General IRI resource discovery still requires an IRI machine.
+`cancelJob("local", ...)` has no local
 cancellation implementation. Do not use local execution to test remote
 scheduler, launcher, or cancellation behavior.
 

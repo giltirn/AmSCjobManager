@@ -42,8 +42,9 @@ not automatically reproduce these special cases or discover Globus routes.
 ## Local execution
 
 Select IRI, configure a `local` sandbox, and construct a compute action with
-`machine="local"`. Both compute action types ultimately run through
-`local_api.executeJobScript()` in a worker thread, which starts a Bash process.
+`machine="local"`. Executable actions use `local_api.executeJob()` and batch
+script actions use `local_api.executeJobScript()`. Both share a background
+runner that starts a Bash process and manages status, logs, and cancellation.
 There is no local batch scheduler: nodes, ranks, GPUs, account, queue, and time
 do not allocate or limit local resources.
 
@@ -53,7 +54,10 @@ overridden with `allow_unsafe=True`. It writes `exec_wrap.sh` into the run direc
 `run.<remote-job-id>.log`. Give simultaneous local jobs distinct run directories
 because the wrapper filename is shared within a directory. A local executable
 action runs its pre-launch commands, executable, and post-launch commands in
-sequence; it does not add MPI launch behavior.
+sequence; it does not add MPI launch behavior. Pre-launch exports and directory
+changes carry into execution. A failing pre-launch skips execution and
+post-launch. Post-launch runs in a subshell only after successful execution;
+failure in any stage stops the job and marks it failed.
 
 `remoteLs`, `remoteChmod`, `pathStat`, `downloadFileContents`, `remoteMkdir`,
 `pathType`, uploads, downloads, and compute submission dispatch locally.

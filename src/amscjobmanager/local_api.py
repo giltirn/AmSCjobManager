@@ -325,6 +325,52 @@ def cancelJob(jobid: str) -> None:
             _local_jobs.pop(jobid, None)
 
 
+def executeJob(
+    executable: str,
+    arguments: list[str],
+    job_run_dir: str,
+    allow_unsafe=False,
+    name: str | None = None,
+    *,
+    pre_launch: str | None = None,
+    post_launch: str | None = None,
+) -> str:
+    """Start a local executable with optional Bash hooks; return its job ID.
+
+    executable is a command name or path; arguments is its literal argument
+    list, without shell expansion. job_run_dir is the initial working directory
+    and location of the generated wrapper and combined output log. name is
+    optional metadata for job discovery. Unless allow_unsafe is True, generated
+    output paths must be inside a local sandbox or /tmp.
+
+    pre_launch runs before the executable in the same shell, preserving exports
+    and directory changes. A nonzero final pre-launch status stops the job.
+    post_launch runs in a subshell only if pre-launch and the executable both
+    succeed. A nonzero status from any stage stops execution and marks the job
+    failed. Execution is asynchronous, uses
+    one local process rather than MPI, and supports cancelJob.
+    """
+    if "~" in executable:
+        raise ValueError("Paths containing '~' are not supported; use an explicit path")
+
+    # Preserve hook environment changes while keeping executable arguments literal.
+    script_body = f"""#!/bin/bash
+{pre_launch or ':'}
+amsc_pre_status=$?
+if (( amsc_pre_status != 0 )); then
+    exit "$amsc_pre_status"
+fi
+
+# Stop before postprocessing if the executable fails.
+{shlex.join([executable, *arguments])} || exit $?
+
+(
+{post_launch or ':'}
+)
+"""
+    return _startLocalJob(script_body, job_run_dir, allow_unsafe=allow_unsafe, name=name)
+
+
 def executeJobScript(
     script_body: str,
     job_run_dir: str,
@@ -342,7 +388,26 @@ def executeJobScript(
     A worker thread waits for a Bash subprocess in its own process group.
     Runtime handles are kept in memory for cancelJob; they do not survive a
     restart. Execution errors mark the job failed and release its handles.
-    """    
+    """
+    return _startLocalJob(script_body, job_run_dir, allow_unsafe=allow_unsafe, name=name)
+
+
+def _startLocalJob(
+    script_body: str,
+    job_run_dir: str,
+    allow_unsafe=False,
+    name: str | None = None,
+) -> str:
+    """Check outputs and start a cancelable local Bash job; return its ID.
+
+    script_body is the complete wrapper source. job_run_dir receives
+    exec_wrap.sh and run.<jobid>.log. allow_unsafe bypasses output sandbox
+    membership checks, and name is recorded for discovery. Shared by executable
+    and arbitrary-script submissions: creates the job record, registers the
+    worker and subprocess, records completion/failure, and releases handles.
+    Cancellation owns the terminal status once requested. Validation and
+    thread-start errors propagate; worker errors are logged and mark failure.
+    """
 
     job_run_dir = getAbsoluteLocalPath(job_run_dir)
     wrapper_path = Path(job_run_dir) / "exec_wrap.sh"

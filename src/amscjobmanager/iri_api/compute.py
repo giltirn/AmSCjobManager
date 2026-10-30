@@ -100,14 +100,9 @@ def executeJob(machine: str, executable: str, arguments: List[str], nodes: int, 
         raise ValueError("Paths containing '~' are not supported; use an explicit path")
     machine = machine.lower()
     if machine == "local":
-        script_body = "\n".join(
-            command for command in (
-                pre_launch, shlex.join([executable, *arguments]), post_launch
-            )
-            if command
-        )
-        return local_api.executeJobScript(
-            script_body, job_run_dir, allow_unsafe, name=name
+        return local_api.executeJob(
+            executable, arguments, job_run_dir, allow_unsafe=allow_unsafe, name=name,
+            pre_launch=pre_launch, post_launch=post_launch,
         )
 
     wfapiLog(

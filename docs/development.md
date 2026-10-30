@@ -43,6 +43,7 @@ for suite in \
     test_local_write_sandbox.py \
     test_local_filesystem.py \
     test_local_cancellation.py \
+    test_local_compute.py \
     test_globus_path_namespaces.py \
     test_iri_discovery.py \
     test_iri_lazy_setup.py \

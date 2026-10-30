@@ -240,6 +240,7 @@ status_man_db_path = "localjobs.db"
 _local_jobs = {}
 _local_jobs_lock = threading.Lock()
 _LOCAL_CANCEL_GRACE_SECONDS = 1.0
+_LOCAL_JOB_POLL_SECONDS = 0.1
 
 def setStatusManagerDatabasePath(path: str | None):
     """Override the database path for the status manager. Must be called before the status manager is initialized. Setting it to None will use an in-memory database."""
@@ -272,10 +273,10 @@ def findJobByName(name: str) -> str | None:
 def cancelJob(jobid: str) -> None:
     """Cancel a queued or running local job and return None after termination.
 
-    jobid is the ID returned by executeJobScript. Prevent queued jobs from
-    launching; terminate a running job's process group with SIGTERM, escalating
-    to SIGKILL after a short grace period. Record 'canceled' only after stopping
-    the process. Already terminal jobs are unchanged. Unknown IDs, missing
+    jobid is the ID returned by executeJob or executeJobScript. Signal the
+    worker to prevent launch or terminate the process group, then wait for its
+    acknowledgment. The worker owns signaling, terminal status, and cleanup.
+    Already terminal jobs are unchanged. Unknown IDs, missing
     runtime handles, and signaling failures raise exceptions for the caller.
     Jobs cannot be recovered after restarting the application, and descendants
     that deliberately detach into another session are outside this contract.
@@ -295,34 +296,14 @@ def cancelJob(jobid: str) -> None:
             with statusMan() as m:
                 if m.jobStatus(jobid) in ("completed", "failed", "canceled"):
                     return
+            job["cancel_error"] = None
+            job["cancel_complete"].clear()
             job["cancel_requested"].set()
-            process = job["process"]
 
-        if process is not None:
-            # Address the whole group, even if its original shell has exited.
-            try:
-                os.killpg(process.pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
-            deadline = time.monotonic() + _LOCAL_CANCEL_GRACE_SECONDS
-            while True:
-                try:
-                    os.killpg(process.pid, 0)
-                except ProcessLookupError:
-                    break
-                if time.monotonic() >= deadline:
-                    try:
-                        os.killpg(process.pid, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
-                    break
-                time.sleep(0.02)
-            process.wait()
-
-        with _local_jobs_lock:
-            with statusMan() as m:
-                m.finishJob(jobid, "canceled")
-            _local_jobs.pop(jobid, None)
+        # Wait without holding the registry/database lock needed by the worker.
+        job["cancel_complete"].wait()
+        if job["cancel_error"] is not None:
+            raise job["cancel_error"]
 
 
 def executeJob(
@@ -405,8 +386,11 @@ def _startLocalJob(
     membership checks, and name is recorded for discovery. Shared by executable
     and arbitrary-script submissions: creates the job record, registers the
     worker and subprocess, records completion/failure, and releases handles.
-    Cancellation owns the terminal status once requested. Validation and
-    thread-start errors propagate; worker errors are logged and mark failure.
+    The worker owns completion, failure, and cancellation, waking immediately
+    for cancellation requests and polling normal completion every 0.1 seconds.
+    Cancellation errors are returned to the waiting caller and retain the
+    worker for retries. Validation and thread-start errors propagate; other
+    worker errors are logged and mark failure.
     """
 
     job_run_dir = getAbsoluteLocalPath(job_run_dir)
@@ -426,48 +410,92 @@ def _startLocalJob(
 
     job = {
         "cancel_requested": threading.Event(),
+        "cancel_complete": threading.Event(),
+        "cancel_error": None,
         "cancel_lock": threading.Lock(),
         "process": None,
         "thread": None,
     }
 
     def _run():
+        process = None
+        cancellation_pending = False
         try:
             wfapiLog(f"Executing local job {jobid}")
             # Launch and handle publication are atomic with cancellation.
             with _local_jobs_lock:
-                if job["cancel_requested"].is_set():
-                    return
-                with open(wrapper_path, "w") as f:
-                    f.write(script_body)
-                cmd = f"cd {shlex.quote(job_run_dir)} && chmod u+x exec_wrap.sh && ./exec_wrap.sh"
-                with open(logfile, "w") as f:
-                    with statusMan() as m:
-                        m.startJob(jobid)
-                    process = subprocess.Popen(
-                        cmd, shell=True, text=True, stdout=f,
-                        stderr=subprocess.STDOUT, executable="/bin/bash",
-                        start_new_session=True,
-                    )
-                    job["process"] = process
-
-            returncode = process.wait()
-            with _local_jobs_lock:
-                # The cancellation caller owns the final status once requested.
                 if not job["cancel_requested"].is_set():
-                    with statusMan() as m:
-                        m.finishJob(jobid, "completed" if returncode == 0 else "failed")
+                    with open(wrapper_path, "w") as f:
+                        f.write(script_body)
+                    cmd = f"cd {shlex.quote(job_run_dir)} && chmod u+x exec_wrap.sh && ./exec_wrap.sh"
+                    with open(logfile, "w") as f:
+                        with statusMan() as m:
+                            m.startJob(jobid)
+                        process = subprocess.Popen(
+                            cmd, shell=True, text=True, stdout=f,
+                            stderr=subprocess.STDOUT, executable="/bin/bash",
+                            start_new_session=True,
+                        )
+                        job["process"] = process
+
+            while True:
+                # Event.wait wakes immediately on cancellation without busy polling.
+                if job["cancel_requested"].wait(timeout=_LOCAL_JOB_POLL_SECONDS):
+                    cancellation_pending = True
+                    try:
+                        if process is not None:
+                            # Stop descendants too, even if the original shell exited.
+                            try:
+                                os.killpg(process.pid, signal.SIGTERM)
+                            except ProcessLookupError:
+                                pass
+                            deadline = time.monotonic() + _LOCAL_CANCEL_GRACE_SECONDS
+                            while True:
+                                process.poll()  # Reap the shell when possible.
+                                try:
+                                    os.killpg(process.pid, 0)
+                                except ProcessLookupError:
+                                    break
+                                if time.monotonic() >= deadline:
+                                    try:
+                                        os.killpg(process.pid, signal.SIGKILL)
+                                    except ProcessLookupError:
+                                        pass
+                                    break
+                                time.sleep(0.02)
+                            process.wait()
+                        with _local_jobs_lock:
+                            with statusMan() as m:
+                                m.finishJob(jobid, "canceled")
+                        return
+                    except Exception as exc:
+                        wfapiLog(f"Could not cancel local job {jobid}: {exc}")
+                        with _local_jobs_lock:
+                            # Acknowledge this failure; remain alive for a new request.
+                            job["cancel_error"] = exc
+                            job["cancel_requested"].clear()
+                            job["cancel_complete"].set()
+                        continue
+
+                with _local_jobs_lock:
+                    # A request arriving after the timeout takes precedence over exit.
+                    if job["cancel_requested"].is_set():
+                        continue
+                    returncode = process.poll() if process is not None else None
+                    if returncode is not None and not cancellation_pending:
+                        with statusMan() as m:
+                            m.finishJob(jobid, "completed" if returncode == 0 else "failed")
+                        return
         except Exception as exc:
             wfapiLog(f"Local job {jobid} failed: {exc}")
             with _local_jobs_lock:
-                if not job["cancel_requested"].is_set():
-                    with statusMan() as m:
-                        m.finishJob(jobid, "failed")
+                job["cancel_error"] = exc
+                with statusMan() as m:
+                    m.finishJob(jobid, "failed")
         finally:
             with _local_jobs_lock:
-                # Retain handles after cancellation errors so retries can stop it.
-                if not job["cancel_requested"].is_set():
-                    _local_jobs.pop(jobid, None)
+                _local_jobs.pop(jobid, None)
+                job["cancel_complete"].set()
 
     worker = threading.Thread(target=_run)
     job["thread"] = worker
@@ -475,11 +503,13 @@ def _startLocalJob(
         _local_jobs[jobid] = job
     try:
         worker.start()
-    except Exception:
+    except Exception as exc:
         with _local_jobs_lock:
             with statusMan() as m:
                 m.finishJob(jobid, "failed")
             _local_jobs.pop(jobid, None)
+            job["cancel_error"] = exc
+            job["cancel_complete"].set()
         raise
 
     return jobid

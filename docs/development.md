@@ -73,6 +73,8 @@ symlink escapes, `/tmp`, explicit overrides, and the native/Globus download
 fallback contract. SPOOF filesystem tests also cover its real local writes.
 Local cancellation tests run real subprocesses and exercise queued cancellation,
 child processes, signal escalation, races, handle cleanup, and workflow retries.
+They also verify worker ownership of signals/status updates, immediate event
+wakeups, and retained cancellation intent when a process exits before a retry.
 Path-validation tests ensure that `~` is rejected before filesystem writes,
 authentication, or submission, including unsafe overrides and configured paths.
 

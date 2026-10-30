@@ -69,6 +69,9 @@ General IRI resource discovery still requires an IRI machine.
 `cancelJob("local", jobid)` prevents a queued job from starting or terminates a
 running job's process group. It sends `SIGTERM`, escalates to `SIGKILL` after a
 one-second grace period, and waits for termination before recording `canceled`.
+The caller signals an event and waits for acknowledgment; the worker performs
+termination, records the final status, and releases handles. Cancellation wakes
+the worker immediately; normal process completion is checked every 0.1 seconds.
 Repeated cancellation leaves terminal jobs unchanged. Normal child processes
 are included; processes that deliberately detach into a new session are not.
 Do not use local execution to test facility scheduler or launcher behavior.
@@ -86,7 +89,8 @@ setStatusManagerDatabasePath("/absolute/path/localjobs.sqlite")
 the remote scheduler's recovery guarantees: process IDs are not used to
 reconcile surviving jobs after an application crash. Cancellation handles exist
 only in memory and cannot be recovered after a restart. Worker exceptions mark
-the job failed; signaling errors retain handles for cancellation retries.
+the job failed; signaling errors are raised to the caller while the worker stays
+alive with its handles for cancellation retries.
 See [troubleshooting](troubleshooting.md).
 
 ## SPOOF

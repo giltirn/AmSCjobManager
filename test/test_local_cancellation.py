@@ -84,16 +84,65 @@ class LocalCancellationTests(unittest.TestCase):
              patch.object(local_api.subprocess, "Popen") as launch:
             jobid, directory = self._submit("touch executed")
             target = thread.call_args.kwargs["target"]
-            api.cancelJob("local", jobid)
-            # Run the delayed worker only after cancellation has completed.
+            job = self.jobs[-1][1]
+            errors = []
+
+            def cancel():
+                try:
+                    api.cancelJob("local", jobid)
+                except Exception as exc:
+                    errors.append(exc)
+
+            # The caller must wait for the delayed worker to acknowledge its request.
+            caller = real_thread(target=cancel)
+            caller.start()
+            self._wait_for(job["cancel_requested"].is_set)
+            self.assertTrue(caller.is_alive())
+            self.assertEqual(local_api.getJobState(jobid), "queued")
             worker = real_thread(target=target)
+            job["thread"] = worker
             worker.start()
             worker.join(timeout=3)
+            caller.join(timeout=3)
+            self.assertFalse(caller.is_alive())
             self.assertFalse(worker.is_alive())
+            self.assertEqual(errors, [])
             launch.assert_not_called()
             self.assertFalse((directory / "executed").exists())
             self.assertEqual(local_api.getJobState(jobid), "canceled")
-            self.jobs[-1] = (jobid, None)
+
+    def test_worker_handles_signals_and_database_update(self):
+        jobid, directory = self._submit("echo ready > ready\nexec sleep 60\n")
+        self._wait_for(lambda: (directory / "ready").exists())
+        worker = self.jobs[-1][1]["thread"]
+        signal_threads, finish_threads = [], []
+        killpg = os.killpg
+        finish = self.status._status_man.finishJob
+
+        def record_signal(*args):
+            signal_threads.append(threading.get_ident())
+            return killpg(*args)
+
+        def record_finish(*args):
+            finish_threads.append((args, threading.get_ident()))
+            return finish(*args)
+
+        with patch.object(local_api.os, "killpg", side_effect=record_signal), \
+             patch.object(self.status._status_man, "finishJob", side_effect=record_finish):
+            local_api.cancelJob(jobid)
+        self.assertTrue(signal_threads)
+        self.assertEqual(set(signal_threads), {worker.ident})
+        self.assertEqual(finish_threads, [((jobid, "canceled"), worker.ident)])
+        self.assertNotIn(jobid, local_api._local_jobs)
+
+    def test_cancellation_wakes_worker_without_waiting_for_poll_timeout(self):
+        with patch.object(local_api, "_LOCAL_JOB_POLL_SECONDS", 30):
+            jobid, directory = self._submit("echo ready > ready\nexec sleep 60\n")
+            self._wait_for(lambda: (directory / "ready").exists())
+            started = time.monotonic()
+            local_api.cancelJob(jobid)
+            self.assertLess(time.monotonic() - started, 3)
+        self.assertEqual(local_api.getJobState(jobid), "canceled")
 
     def test_ignoring_sigterm_escalates_to_sigkill(self):
         jobid, directory = self._submit("trap '' TERM\necho ready > ready\nwhile :; do sleep 60; done\n")
@@ -111,6 +160,8 @@ class LocalCancellationTests(unittest.TestCase):
                 local_api.cancelJob(jobid)
         self.assertEqual(local_api.getJobState(jobid), "active")
         self.assertIn(jobid, local_api._local_jobs)
+        self.assertTrue(self.jobs[-1][1]["thread"].is_alive())
+        self.assertFalse(self.jobs[-1][1]["cancel_requested"].is_set())
         local_api.cancelJob(jobid)
         self.assertEqual(local_api.getJobState(jobid), "canceled")
 
@@ -123,6 +174,28 @@ class LocalCancellationTests(unittest.TestCase):
                 self.assertEqual(local_api.getJobState(jobid), expected)
         jobid, _ = self._submit("sleep 60")
         local_api.cancelJob(jobid)
+        local_api.cancelJob(jobid)
+        self.assertEqual(local_api.getJobState(jobid), "canceled")
+
+    def test_process_exit_after_failed_cancellation_waits_for_retry(self):
+        jobid, directory = self._submit(
+            "echo ready > ready\nwhile [ ! -f finish ]; do sleep 0.01; done\n"
+        )
+        self._wait_for(lambda: (directory / "ready").exists())
+        job = self.jobs[-1][1]
+        with patch.object(local_api.os, "killpg", side_effect=PermissionError("denied")):
+            with self.assertRaises(PermissionError):
+                local_api.cancelJob(jobid)
+        # Let the process exit normally between cancellation attempts. The worker
+        # must retain cancellation ownership rather than recording completion.
+        process = job["process"]
+        with patch.object(process, "poll", wraps=process.poll) as poll:
+            (directory / "finish").touch()
+            process.wait(timeout=3)
+            polls = poll.call_count
+            self._wait_for(lambda: poll.call_count > polls)
+        self.assertEqual(local_api.getJobState(jobid), "active")
+        self.assertTrue(job["thread"].is_alive())
         local_api.cancelJob(jobid)
         self.assertEqual(local_api.getJobState(jobid), "canceled")
 

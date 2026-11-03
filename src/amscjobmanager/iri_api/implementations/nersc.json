@@ -1,0 +1,69 @@
+{
+  "schema_version": 1,
+  "implementation": "nersc",
+  "api_base": "https://api.iri.nersc.gov/api/v1",
+  "configuration": {
+    "api_version": 1,
+    "resource_server": "ed3e577d-f7f3-4639-b96e-ff5a8445d699",
+    "api_base": "https://api.iri.nersc.gov/api/v1",
+    "status_resources_supports_filters": true,
+    "storage_iriapi_group": "perlmutter",
+    "storage_resource_type": "compute",
+    "filesystems": {
+      "perlmutter_login_filesystem": {
+        "description": "Perlmutter filesystem exposed through its login resource",
+        "storage_resource_paths": [
+          {
+            "filesystem_roots": [
+              "/"
+            ],
+            "resource_name": "login"
+          }
+        ],
+        "globus_filesystems": [
+          {
+            "filesystem_roots": [
+              "/"
+            ],
+            "endpoint": "dtn",
+            "globus_root": "/"
+          }
+        ]
+      }
+    },
+    "required_scopes": [
+      "https://auth.globus.org/scopes/ed3e577d-f7f3-4639-b96e-ff5a8445d699/iri_api"
+    ],
+    "machines": {
+      "perlmutter": {
+        "iriapi_group": "perlmutter",
+        "iriapi_resource_name": "compute",
+        "launcher": "srun",
+        "mounted_filesystems": [
+          "perlmutter_login_filesystem"
+        ],
+        "queues": [
+          [
+            "debug",
+            "max time 0.5 hours, max nodes 8"
+          ],
+          [
+            "regular",
+            "use for standard, production jobs or those too large for debug"
+          ]
+        ]
+      },
+      "perlmutter_login": {
+        "iriapi_group": "perlmutter",
+        "iriapi_resource_name": "login",
+        "mounted_filesystems": [
+          "perlmutter_login_filesystem"
+        ],
+        "queues": []
+      }
+    }
+  },
+  "metadata": {
+    "source": "packaged"
+  }
+}

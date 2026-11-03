@@ -118,8 +118,10 @@ registered for use.
 
 ## Provider discovery
 
-The built-in provider definitions are in
-[`iri_api/config.py`](../src/amscjobmanager/iri_api/config.py). To configure another
+The packaged provider definitions are JSON files in
+[`iri_api/implementations/`](../src/amscjobmanager/iri_api/implementations/).
+These defaults are loaded automatically, including in installed distributions.
+To configure another
 provider, supply its tag, `api_url`, `api_version`, credentials, and a cache
 directory. Fresh compute/filesystem discovery currently requires IRI API v2.
 It discovers topology; queues and Globus filesystem routes are not discovered.
@@ -130,6 +132,38 @@ Discovery writes `<provider>.json` in the cache directory and registers the
 result for the process. All configured cache entries are loaded before lazy
 client setup. Invalid or mismatched caches raise errors rather than silently
 being replaced.
+
+Packaged definitions and user caches use the same JSON structure:
+
+```json
+{
+  "schema_version": 1,
+  "implementation": "example",
+  "api_base": "https://example.org/api/v2",
+  "configuration": {
+    "api_base": "https://example.org/api/v2",
+    "api_version": 2,
+    "status_resources_supports_filters": true,
+    "machines": {},
+    "filesystems": {}
+  },
+  "metadata": {}
+}
+```
+
+The filename must match the implementation tag (`example.json`). Packaged
+defaults load first; entries in `iri_config_cache_directory` override providers
+with the same name, including their API URL and version. An override replaces
+the **entire** definition, rather than merging fields. Machines removed from the
+replacement also disappear from that provider's machine index. A sparse
+discovered cache can therefore remove packaged queues, authentication settings,
+and filesystem/Globus routes; include all settings needed by your provider.
+Explicit `api_url`/`api_version` settings must agree with the selected definition.
+Invalid overrides raise errors rather than falling back to packaged defaults.
+Machine names cannot belong to two different providers.
+
+Discovery writes only to the user cache; it does not modify packaged defaults.
+Loading definitions does not authenticate or query remote APIs.
 
 To discover a selected provider from the command line, put its credentials in
 the manager configuration and run:

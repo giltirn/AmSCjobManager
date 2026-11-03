@@ -28,8 +28,9 @@ Globus collection UUIDs identify data access locations and are a third kind of
 identifier.
 
 Built-in definitions include NERSC and ALCF machines. Treat the definitions in
-[`iri_api/config.py`](../src/amscjobmanager/iri_api/config.py) as the source for
-supported names and routes. Calls requiring a provider fail if its credentials
+[`iri_api/implementations/`](../src/amscjobmanager/iri_api/implementations/) as the
+source for default names and routes. Same-name definitions in the user cache
+replace those defaults in full. Calls requiring a provider fail if its credentials
 were not configured. API v1 and v2 differ in available queries and request
 formats; for example, remote `getUsername()` requires v2.
 

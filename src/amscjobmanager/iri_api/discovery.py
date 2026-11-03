@@ -27,60 +27,10 @@ import os
 import re
 import tempfile
 from pathlib import Path, PurePosixPath
-from typing import Any, Literal
 from urllib.parse import quote, urljoin, urlsplit, urlunsplit
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
-
 from .config import IRI_IMPLEMENTATIONS, registerImplementation
-
-
-class DiscoveredMachine(BaseModel):
-    model_config = ConfigDict(extra="allow")
-
-    iriapi_group: str | None = None
-    iriapi_resource_name: str | None = None
-    iriapi_resource_id: str | None = None
-    mounted_filesystems: list[str] = Field(default_factory=list)
-    queues: list[tuple[str, str]] = Field(default_factory=list)
-
-    @model_validator(mode="after")
-    def _validate_resource_reference(self):
-        if not self.iriapi_resource_id and not self.iriapi_resource_name:
-            raise ValueError("A discovered machine needs a resource ID or name")
-        return self
-
-
-class DiscoveredImplementation(BaseModel):
-    """Configuration consumed by the existing resource and path routers."""
-
-    model_config = ConfigDict(extra="allow")
-
-    api_base: str
-    api_version: int = Field(strict=True, ge=1, le=2)
-    status_resources_supports_filters: bool
-    machines: dict[str, DiscoveredMachine]
-    filesystems: dict[str, dict[str, Any]] = Field(default_factory=dict)
-
-    @model_validator(mode="after")
-    def _validate_machine_mounts(self):
-        for name, machine in self.machines.items():
-            if name != name.lower() or name == "local":
-                raise ValueError(f"Discovered machine name must be lowercase and cannot be 'local': {name!r}")
-            unknown = set(machine.mounted_filesystems) - self.filesystems.keys()
-            if unknown:
-                raise ValueError(f"Discovered machine {name!r} references unknown filesystems: {sorted(unknown)}")
-        return self
-
-
-class ImplementationCache(BaseModel):
-    """Keep operational configuration separate from discovery observations."""
-
-    schema_version: Literal[1] = 1
-    implementation: str
-    api_base: str
-    configuration: DiscoveredImplementation
-    metadata: dict[str, Any] = Field(default_factory=dict)
+from .configuration_models import DiscoveredImplementation, ImplementationCache
 
 
 def _discovery_location(name: str, api_url: str, cache_directory: str | Path):
@@ -100,14 +50,15 @@ def _discovery_location(name: str, api_url: str, cache_directory: str | Path):
 
 
 def loadCachedImplementation(
-    name: str, api_url: str | None = None, cache_directory: str | Path | None = None
+    name: str, api_url: str | None = None, cache_directory: str | Path | None = None,
+    *, api_version: int | None = None,
 ) -> dict | None:
     """Load and register a cache entry, or return None if none exists.
 
     Invalid, mismatched, and unsupported-version entries fail explicitly;
     they do not silently replace working configuration or trigger network I/O.
-    Defaults to the configured cache directory and registered API URL, or the
-    cached API URL when loading a previously unknown provider.
+    Defaults to the configured cache directory and cached API URL. Explicit
+    URL/version arguments constrain the cache; packaged defaults do not.
     """
     if cache_directory is None:
         from .state import getConfigurationCacheDirectory
@@ -121,9 +72,9 @@ def loadCachedImplementation(
     cache_path = Path(cache_directory) / f"{name}.json"
     if not cache_path.exists():
         return None
-    cache = ImplementationCache.model_validate_json(cache_path.read_text(encoding="utf-8"))
+    cache = ImplementationCache.fromFile(cache_path)
     if api_url is None:
-        api_url = IRI_IMPLEMENTATIONS.get(name, {}).get("api_base", cache.api_base)
+        api_url = cache.api_base
     name, api_base, cache_path = _discovery_location(name, api_url, cache_directory)
     if cache.implementation != name or cache.api_base != api_base:
         raise ValueError(f"IRI configuration cache {str(cache_path)!r} belongs to a different implementation or API URL; use refresh=True to replace it")
@@ -131,6 +82,8 @@ def loadCachedImplementation(
         raise ValueError("Cached configuration API root does not match the requested API URL")
     definition = cache.configuration.model_dump()
     definition["api_base"] = api_base
+    if api_version is not None and (type(api_version) is not int or api_version != definition["api_version"]):
+        raise ValueError(f"API version for {name!r} conflicts with its cached configuration")
     registerImplementation(name, definition)
     return definition
 
@@ -150,7 +103,7 @@ def loadCachedImplementations(cache_directory: str | Path | None = None) -> None
         raise ValueError("Cache paths containing '~' are not supported")
     for path in sorted(Path(cache_directory).glob("*.json")):
         try:
-            cache = ImplementationCache.model_validate_json(path.read_text(encoding="utf-8"))
+            cache = ImplementationCache.fromFile(path)
             name, api_base, expected_path = _discovery_location(
                 cache.implementation, cache.api_base, cache_directory
             )
@@ -349,6 +302,10 @@ def discoverImplementation(
         cache_directory = getConfigurationCacheDirectory()
     name = name.lower()
     previous = IRI_IMPLEMENTATIONS.get(name)
+    if not refresh:
+        cached = loadCachedImplementation(name, api_url, cache_directory, api_version=api_version)
+        if cached is not None:
+            return cached
     try:
         if api_url is None:
             api_url = previous["api_base"] if previous else input(f"IRI API URL for {name!r}: ").strip()
@@ -364,11 +321,6 @@ def discoverImplementation(
     name, api_base, cache_path = _discovery_location(name, api_url, cache_directory)
     if previous is not None and api_version != previous["api_version"]:
         raise ValueError(f"API version for {name!r} conflicts with its registered configuration")
-    if not refresh:
-        cached = loadCachedImplementation(name, api_base, cache_directory)
-        if cached is not None:
-            return cached
-
     if api_version != 2:
         raise NotImplementedError(f"Compute discovery requires IRI API v2, not {name!r}'s v1 API")
     # Register only the API root for authentication and implementation-level
@@ -422,6 +374,11 @@ def configureImplementation(
     name = name.lower()
     api_url = getattr(settings, "api_url", None) if not isinstance(settings, dict) else settings.get("api_url")
     api_version = getattr(settings, "api_version", None) if not isinstance(settings, dict) else settings.get("api_version")
+    # Apply user overrides even when called without the manager's bulk cache load.
+    if cache_directory is not None:
+        cached = loadCachedImplementation(name, api_url, cache_directory, api_version=api_version)
+        if cached is not None:
+            return
     existing = IRI_IMPLEMENTATIONS.get(name, {})
     if existing and api_version is not None and api_version != existing["api_version"]:
         raise ValueError(f"API version for {name!r} conflicts with its registered configuration")

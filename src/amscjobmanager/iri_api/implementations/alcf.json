@@ -1,7 +1,6 @@
 {
   "schema_version": 1,
   "implementation": "alcf",
-  "api_base": "https://api.alcf.anl.gov/api/v1",
   "configuration": {
     "api_version": 1,
     "resource_server": "6be511f6-a071-471f-9bc0-02a0d0836723",

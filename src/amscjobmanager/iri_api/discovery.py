@@ -19,7 +19,7 @@ Manager configuration can select this through an implementation entry with
 api_url and the top-level iri_config_cache_directory setting. Unknown providers
 prompt for their API URL and version if omitted. Cached definitions use the existing
 IRI_IMPLEMENTATIONS layout, wrapped with schema_version, implementation,
-api_base, configuration, and metadata fields. Only configuration is registered;
+configuration, and metadata fields. Only configuration is registered;
 metadata preserves raw API responses and records which sections were discovered.
 """
 
@@ -74,12 +74,10 @@ def loadCachedImplementation(
         return None
     cache = ImplementationCache.fromFile(cache_path)
     if api_url is None:
-        api_url = cache.api_base
+        api_url = cache.configuration.api_base
     name, api_base, cache_path = _discovery_location(name, api_url, cache_directory)
-    if cache.implementation != name or cache.api_base != api_base:
+    if cache.implementation != name or cache.configuration.api_base.rstrip("/") != api_base:
         raise ValueError(f"IRI configuration cache {str(cache_path)!r} belongs to a different implementation or API URL; use refresh=True to replace it")
-    if cache.configuration.api_base.rstrip("/") != api_base:
-        raise ValueError("Cached configuration API root does not match the requested API URL")
     definition = cache.configuration.model_dump()
     definition["api_base"] = api_base
     if api_version is not None and (type(api_version) is not int or api_version != definition["api_version"]):
@@ -105,7 +103,7 @@ def loadCachedImplementations(cache_directory: str | Path | None = None) -> None
         try:
             cache = ImplementationCache.fromFile(path)
             name, api_base, expected_path = _discovery_location(
-                cache.implementation, cache.api_base, cache_directory
+                cache.implementation, cache.configuration.api_base, cache_directory
             )
             if path != expected_path:
                 raise ValueError("Cache filename must match its implementation tag")
@@ -347,7 +345,7 @@ def discoverImplementation(
     definition = configuration.model_dump()
     definition["api_base"] = api_base
     cache = ImplementationCache(
-        implementation=name, api_base=api_base, configuration=configuration,
+        implementation=name, configuration=configuration,
         metadata=metadata,
     )
     cache_path.parent.mkdir(parents=True, exist_ok=True)

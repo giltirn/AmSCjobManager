@@ -139,7 +139,6 @@ Packaged definitions and user caches use the same JSON structure:
 {
   "schema_version": 1,
   "implementation": "example",
-  "api_base": "https://example.org/api/v2",
   "configuration": {
     "api_base": "https://example.org/api/v2",
     "api_version": 2,

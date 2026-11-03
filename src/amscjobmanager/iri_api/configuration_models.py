@@ -50,20 +50,17 @@ class ImplementationCache(BaseModel):
 
     schema_version: Literal[1] = 1
     implementation: str
-    api_base: str
     configuration: DiscoveredImplementation
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def _validate_identity(self):
-        """Require a valid provider tag and matching HTTP API roots in both sections."""
+        """Require a valid provider tag and an HTTP API root in the configuration."""
         if not re.fullmatch(r"[a-z][a-z0-9_-]*", self.implementation):
             raise ValueError("Implementation tags must start with a letter and contain only lowercase letters, digits, '-' or '_'")
-        url = urlsplit(self.api_base)
+        url = urlsplit(self.configuration.api_base)
         if url.scheme not in {"http", "https"} or not url.netloc or url.username or url.password or url.query or url.fragment:
             raise ValueError("IRI API root must be an HTTP(S) URL without credentials, query parameters, or fragments")
-        if self.configuration.api_base.rstrip("/") != self.api_base.rstrip("/"):
-            raise ValueError("Configuration API root does not match the envelope API URL")
         return self
 
     @classmethod

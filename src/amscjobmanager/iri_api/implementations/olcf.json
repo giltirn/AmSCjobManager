@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "implementation": "olcf",
+  "configuration": {
+    "api_base": "https://amsc-moderate.s3m.olcf.ornl.gov/api/v2",
+    "api_version": 2,
+    "status_resources_supports_filters": true,
+    "storage_iriapi_group": "olcf",
+    "storage_resource_type": "compute",
+    "machines": {
+      "frontier": {
+        "iriapi_group": "olcf",
+        "iriapi_resource_name": "Frontier",
+        "iriapi_resource_id": "frontier",
+        "mounted_filesystems": [
+          "olcf_dtn_filesystem"
+        ],
+        "queues": [
+          [
+            "batch",
+            "Default production partition; 1-91 nodes: max 2 hours, 92-183: max 6 hours, 184-9472: max 12 hours; up to 4 eligible jobs per user. Optional debug QoS: max 2 hours, one job per user, debugging only."
+          ],
+          [
+            "extended",
+            "Long-running jobs: max 64 nodes and 24 hours; one running and one eligible job per user."
+          ],
+          [
+            "service",
+            "Isolated development nodes; requires develop QoS as well as the service partition; max 4 nodes and 2 hours, one running and one eligible job per user."
+          ]
+        ]
+      }
+    },
+    "filesystems": {
+      "olcf_dtn_filesystem": {
+        "description": "OLCF filesystem paths accessible through the Frontier IRI resource and OLCF DTN (Globus 5)",
+        "storage_resource_paths": [
+          {
+            "filesystem_roots": [
+              "/"
+            ],
+            "resource_name": "Frontier",
+            "resource_id": "frontier"
+          }
+        ],
+        "globus_filesystems": [
+          {
+            "filesystem_roots": [
+              "/"
+            ],
+            "endpoint": "36d521b3-c182-4071-b7d5-91db5d380d42",
+            "globus_root": "/"
+          }
+        ]
+      }
+    }
+  },
+  "metadata": {
+    "source": "packaged",
+    "queue_policy_source": "https://docs.olcf.ornl.gov/systems/frontier_user_guide.html#slurm",
+    "notes": "Frontier compute identity comes from OLCF discovery; native filesystem operations are assumed to use the frontier resource with root /. The Globus route is supplied manually and partition descriptions come from the Frontier user guide. Across all partitions, each user may have at most 100 jobs in all states."
+  }
+}

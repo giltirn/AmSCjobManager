@@ -1,7 +1,6 @@
 {
   "schema_version": 1,
   "implementation": "nersc",
-  "api_base": "https://api.iri.nersc.gov/api/v1",
   "configuration": {
     "api_version": 1,
     "resource_server": "ed3e577d-f7f3-4639-b96e-ff5a8445d699",

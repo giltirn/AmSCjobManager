@@ -24,7 +24,6 @@ class IRIConfigurationTests(unittest.TestCase):
         # A deliberately sparse v2 replacement must not inherit v1 routes/scopes.
         self.replacement = {
             "schema_version": 1, "implementation": "nersc",
-            "api_base": "https://replacement.example/api/v2",
             "configuration": {
                 "api_base": "https://replacement.example/api/v2", "api_version": 2,
                 "status_resources_supports_filters": False,
@@ -36,7 +35,7 @@ class IRIConfigurationTests(unittest.TestCase):
 
     def test_packaged_defaults_preserve_operational_settings(self):
         """Load packaged JSON with the shared schema and retain routing/auth fields."""
-        for name in ("nersc", "alcf"):
+        for name in ("nersc", "alcf", "olcf"):
             resource = files("amscjobmanager.iri_api").joinpath("implementations", f"{name}.json")
             definition = ImplementationCache.fromFile(resource).configuration.model_dump()
             self.assertEqual(config.IRI_IMPLEMENTATIONS[name], definition)
@@ -58,7 +57,7 @@ class IRIConfigurationTests(unittest.TestCase):
         self.assertIs(definitions, config.IRI_IMPLEMENTATIONS)
         self.assertIs(machines, config.MACHINE_IMPLEMENTATIONS)
         self.assertEqual(definitions["nersc"]["api_version"], 2)
-        self.assertEqual(definitions["nersc"]["api_base"], self.replacement["api_base"])
+        self.assertEqual(definitions["nersc"]["api_base"], self.replacement["configuration"]["api_base"])
         self.assertNotIn("required_scopes", definitions["nersc"])
         self.assertEqual(definitions["nersc"]["filesystems"], {})
         self.assertNotIn("perlmutter", machines)
@@ -102,11 +101,16 @@ class IRIConfigurationTests(unittest.TestCase):
         self.assertEqual(config.MACHINE_IMPLEMENTATIONS["replacement"], "new-provider")
 
     def test_invalid_files_fail_without_falling_back(self):
-        """Malformed JSON, invalid schema, identity mismatches and filenames fail."""
+        """Malformed JSON, invalid schema, API roots and filenames fail."""
         original = config.IRI_IMPLEMENTATIONS["nersc"]
         cases = ["{", "{}", json.dumps({**self.replacement, "schema_version": 99}),
                  json.dumps({**self.replacement, "implementation": "another"}),
-                 json.dumps({**self.replacement, "api_base": "https://wrong.example/api/v2"})]
+                 json.dumps({**self.replacement, "configuration": {
+                     **self.replacement["configuration"], "api_base": "not-an-http-url",
+                 }}),
+                 json.dumps({**self.replacement, "configuration": {
+                     key: value for key, value in self.replacement["configuration"].items() if key != "api_base"
+                 }})]
         for contents in cases:
             with self.subTest(contents=contents):
                 self.path.write_text(contents)

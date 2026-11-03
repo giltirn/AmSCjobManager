@@ -218,6 +218,7 @@ class IRIQueryTests(unittest.TestCase):
             self.assertEqual(set(result["machines"]), {"esnet_test-compute", "esnet_unnamed-system"})
             self.assertEqual(result["machines"]["esnet_test-compute"]["iriapi_resource_id"], "system-id")
             cache = json.loads((Path(directory) / "esnet.json").read_text())
+            self.assertNotIn("api_base", cache)
             self.assertEqual(cache["configuration"], result)
             self.assertEqual(cache["metadata"]["resources"], inventory)
             self.assertEqual(cache["metadata"]["discovered_sections"], ["compute", "filesystems"])
@@ -420,7 +421,7 @@ class IRIQueryTests(unittest.TestCase):
     def test_machine_tests_initialize_the_full_configuration_before_machine_lookup(self):
         with tempfile.TemporaryDirectory() as directory, patch.dict(IRI_IMPLEMENTATIONS), patch.dict(MACHINE_IMPLEMENTATIONS):
             cache = discovery.ImplementationCache(
-                implementation="cached-provider", api_base="https://cached.example/api/v2",
+                implementation="cached-provider",
                 configuration=DiscoveredImplementation(
                     api_base="https://cached.example/api/v2", api_version=2,
                     status_resources_supports_filters=True,

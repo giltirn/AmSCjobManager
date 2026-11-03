@@ -1,11 +1,40 @@
 """Unit tests for named facility filesystems and machine path routing."""
 
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from amscjobmanager import iri_api
+from amscjobmanager.iri_api import resources
 
 
 class IRIStoragePathTests(unittest.TestCase):
+    def test_frontier_paths_map_unchanged_to_olcf_dtn(self):
+        """The packaged Frontier route preserves absolute paths on the OLCF DTN."""
+        definition = iri_api.IRI_IMPLEMENTATIONS["olcf"]
+        self.assertEqual(definition["api_version"], 2)
+        self.assertEqual(definition["machines"]["frontier"]["iriapi_resource_id"], "frontier")
+        self.assertEqual(iri_api.MACHINE_IMPLEMENTATIONS["frontier"], "olcf")
+        for path in ("/", "/some/project/data.bin", "/some/home/user/file.txt"):
+            with self.subTest(path=path):
+                self.assertEqual(
+                    iri_api.getRemoteGlobusLocation("frontier", path),
+                    ("36d521b3-c182-4071-b7d5-91db5d380d42", path),
+                )
+
+    def test_frontier_native_filesystem_paths_use_compute_resource(self):
+        """Native filesystem routing selects Frontier even without storage resources."""
+        self.assertEqual(iri_api.getStorageResourcePaths("frontier"), [
+            {"filesystem_root": "/", "resource_name": "Frontier", "resource_id": "frontier"},
+        ])
+        client = SimpleNamespace(implementation="olcf", resource_map={})
+        inventory = [{"id": "frontier", "name": "Frontier", "group": "olcf",
+                      "resource_type": "urn:doe-iri:resource:compute"}]
+        with patch.object(resources, "getImplementationClient", return_value=client), patch.object(resources, "getResources", return_value=inventory):
+            for path in ("/", "/some/project/data.bin", "/some/home/user/file.txt"):
+                with self.subTest(path=path):
+                    self.assertEqual(resources.getResourceID("frontier", rtype="storage", path=path), "frontier")
+
     def test_alcf_machines_declare_their_mounted_filesystems(self):
         self.assertEqual(
             set(iri_api.getMountedFilesystems("polaris")),

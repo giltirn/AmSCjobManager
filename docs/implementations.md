@@ -27,7 +27,7 @@ machine name such as `perlmutter` identifies a resource within that provider.
 Globus collection UUIDs identify data access locations and are a third kind of
 identifier.
 
-Built-in definitions include NERSC and ALCF machines. Treat the definitions in
+Built-in definitions include NERSC, ALCF, and OLCF machines. Treat the definitions in
 [`iri_api/implementations/`](../src/amscjobmanager/iri_api/implementations/) as the
 source for default names and routes. Same-name definitions in the user cache
 replace those defaults in full. Calls requiring a provider fail if its credentials
@@ -39,6 +39,28 @@ the filesystem API does not supply them. Those fallbacks require transfer
 authentication and a personal collection. Its configured `pathStat` operation
 currently raises `NotImplementedError`. Fresh discovery of another provider does
 not automatically reproduce these special cases or discover Globus routes.
+
+The OLCF definition supplies `frontier` through the v2 API at
+`https://amsc-moderate.s3m.olcf.ornl.gov/api/v2`. Configure its credentials with
+`token_type="amsc_pat"` and the PAT JSON path. The manual Globus route uses
+**OLCF DTN (Globus 5)** (`36d521b3-c182-4071-b7d5-91db5d380d42`), with `/`
+mapped to `/`, preserving absolute filesystem paths. Use `uploadFileGlobus`,
+`downloadFileGlobus`, or `globusCopy` for this route. Native IRI filesystem
+operations are configured to use the `frontier` compute resource for paths
+rooted at `/`; this is a manually supplied assumption pending live verification.
+The root mapping describes path translation;
+configured sandbox checks still restrict writes.
+
+Frontier's queue list describes the `batch`, `extended`, and `service` partitions
+using the [Frontier Slurm policies](https://docs.olcf.ornl.gov/systems/frontier_user_guide.html#slurm).
+`debug` and `develop` are QoS classes, not partitions; `service` requires
+`develop` QoS. The library forwards `queue` as `queue_name` without a separate
+QoS argument, so listing a partition does not configure its required QoS.
+
+An existing `olcf.json` in the user cache replaces this packaged definition in
+full. To use the packaged route, move that cache file outside the cache directory
+or add the filesystem mapping to your cached definition. Rediscovery currently
+does not preserve manually supplied filesystem routes.
 
 ## Local execution
 

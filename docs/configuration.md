@@ -131,6 +131,23 @@ result for the process. All configured cache entries are loaded before lazy
 client setup. Invalid or mismatched caches raise errors rather than silently
 being replaced.
 
+To discover a selected provider from the command line, put its credentials in
+the manager configuration and run:
+
+```bash
+python utilities/discover_iri.py manager-config.json olcf \
+    --api-url https://amsc-moderate.s3m.olcf.ornl.gov/api/v2 \
+    --api-version 2 --refresh
+```
+
+The `olcf` entry supplies `token_path` and `token_type` (use `"amsc_pat"` for
+PAT JSON). `--api-url` and `--api-version` can be omitted when configured;
+`--cache-directory` optionally overrides `iri_config_cache_directory`.
+Overrides do not rewrite the configuration. Without `--refresh`, existing
+cached discovery is reused. Run fresh discovery in a terminal so you can answer
+machine-name and filesystem-root prompts. The utility does not initialize other
+providers or submit jobs.
+
 To refresh a provider after setup:
 
 ```python

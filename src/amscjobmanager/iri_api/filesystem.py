@@ -6,6 +6,7 @@ import json
 import pathlib
 import re
 import shutil
+from datetime import datetime, timezone
 from typing import List
 
 from .. import local_api
@@ -131,6 +132,10 @@ def remoteLs(machine: str, path: str)-> List[str]:
     wfapiLog(f"Listing contents of directory {machine}:{path}")
     if machine == "local":
         return local_api.localLs(path)
+
+    _require_filesystem_operation(machine, "remoteLs")
+    if getFilesystemOperationHandling(machine, "remoteLs") == "globus":
+        return remoteLsGlobus(machine, path)
     
     rid = getResourceID(machine, rtype="storage", path=path)
     version = getImplementationAPIVersion(getMachineImplementation(machine))
@@ -164,6 +169,8 @@ def remoteChmod(machine: str, path : str, mode : str, allow_unsafe = False):
     wfapiLog(f"Changing permissions of file {machine}:{path} to {mode}")
     if machine == "local":
         return local_api.localChmod(path, mode, allow_unsafe=allow_unsafe)
+
+    _require_filesystem_operation(machine, "remoteChmod")
     
     if not allow_unsafe and not checkSafePath(machine, path):
         raise Exception("Path is not a subdirectory of the sandbox path")
@@ -197,6 +204,10 @@ def remoteMkdir(machine: str, path: str, create_parents = True, allow_unsafe = F
     if machine == "local":
         return local_api.localMkdir(path, create_parents, allow_unsafe)
 
+    _require_filesystem_operation(machine, "remoteMkdir")
+    if getFilesystemOperationHandling(machine, "remoteMkdir") == "globus":
+        return remoteMkdirGlobus(machine, path, create_parents, allow_unsafe)
+
 
     wfapiLog(f"Creating directory {machine}:{path}")
     
@@ -222,42 +233,69 @@ def remoteMkdir(machine: str, path: str, create_parents = True, allow_unsafe = F
         raise Exception(f"Directory creation failed, response: {json.dumps(j, indent=2)}")
 
 
-def pathStat(machine: str, remote_path: str, dereference=True)->str:
-    """
-    Run stat on the provided path
-    Args:
-       machine - The name of the machine.
-       remote_path - The absolute path on the remote machine
-       dereference - Inspect a symlink's target when True, or the link itself
-    Return:
-       Provider stat output, or the local stat command's output, as a string
-    """
-    machine = machine.lower()    
+def pathStat(machine: str, remote_path: str, dereference=True, *, raw=False) -> dict | str:
+    """Inspect path metadata locally or through the configured IRI/Globus backend.
 
+    machine selects a machine; remote_path is absolute remotely. dereference
+    selects link-target metadata (True) or link metadata (False). Return a dict
+    containing type, size in bytes, permissions as an octal string, user, group,
+    and last_modified as a UTC ISO 8601 string. Backend-unavailable optional
+    values may be None. Globus cannot inspect a symlink itself and raises for
+    dereference=False on valid links. Reads are not sandbox-restricted.
+
+    raw=True returns the original native stat string and raises
+    NotImplementedError for a configured Globus fallback. Unrecognized native
+    stat output raises ValueError instead of returning incomplete metadata.
+    """
+    machine = machine.lower()
+    if "~" in remote_path:
+        raise ValueError("Paths containing '~' are not supported; use an explicit path")
     if machine == "local":
-        return local_api.localPathStat(remote_path, dereference=dereference)
-
-    _require_filesystem_operation(machine, "pathStat")
-       
-    if not pathlib.Path(remote_path).is_absolute():
-        raise Exception("Path must be absolute")
-    
-    rid = getResourceID(machine, rtype="storage", path=remote_path)
-
-    def submit_stat_task() -> str:
-        response = get(
-            machine,
-            f"filesystem/stat/{rid}",
-            params={"path": remote_path, "dereference": dereference},
-        )
-        return response["task_id"]
-
-    j = submitTask(machine, submit_stat_task)
-
-    if j["status"] == "completed":
-        return j["result"]["output"]
+        output = local_api.localPathStat(remote_path, dereference=dereference)
     else:
-        raise Exception(f"Download failed, response: { json.dumps(j,indent=2)}")        
+        _require_filesystem_operation(machine, "pathStat")
+        if getFilesystemOperationHandling(machine, "pathStat") == "globus":
+            if raw:
+                raise NotImplementedError("Raw stat output is unavailable through Globus")
+            return pathStatGlobus(machine, remote_path, dereference=dereference)
+        if not pathlib.Path(remote_path).is_absolute():
+            raise ValueError("Path must be absolute")
+        rid = getResourceID(machine, rtype="storage", path=remote_path)
+
+        def submit_stat_task() -> str:
+            response = get(
+                machine, f"filesystem/stat/{rid}",
+                params={"path": remote_path, "dereference": dereference},
+            )
+            return response["task_id"]
+
+        task = submitTask(machine, submit_stat_task)
+        if task["status"] != "completed":
+            raise RuntimeError(f"Stat failed: {json.dumps(task, indent=2)}")
+        output = task["result"]["output"]
+    if raw:
+        return output
+
+    # Extract only metadata also available through Globus; keep native output
+    # available explicitly rather than inventing fields absent from either API.
+    size = re.search(r"Size:\s*(\d+).*?IO Block:\s*\d+\s+([^\n]+)", output, re.IGNORECASE)
+    mode = re.search(r"Access:\s*\(([0-7]+)/", output)
+    owners = re.search(r"Uid:\s*\(\s*\d+/\s*([^)]*)\)\s+Gid:\s*\(\s*\d+/\s*([^)]*)\)", output)
+    modified = re.search(r"^Modify:\s*(.+)$", output, re.MULTILINE)
+    if not all((size, mode, owners, modified)):
+        raise ValueError("Unrecognized native stat output; use raw=True to inspect it")
+    kind = size[2].strip()
+    kinds = {"directory": "dir", "regular file": "file", "regular empty file": "file",
+             "symbolic link": "link", "character special file": "chr",
+             "block special file": "blk", "fifo": "pipe", "socket": "other"}
+    return {
+        "type": kinds.get(kind, "other"),
+        "size": int(size[1]),
+        "permissions": mode[1].zfill(4),
+        "user": owners[1].strip(),
+        "group": owners[2].strip(),
+        "last_modified": datetime.fromisoformat(modified[1].strip()).astimezone(timezone.utc).isoformat(),
+    }
 
 
 def pathType(machine: str, remote_path: str)->str:
@@ -271,6 +309,10 @@ def pathType(machine: str, remote_path: str)->str:
 
     if machine == "local":
         return local_api.localPathType(remote_path)
+
+    _require_filesystem_operation(machine, "pathType")
+    if getFilesystemOperationHandling(machine, "pathType") == "globus":
+        return pathTypeGlobus(machine, remote_path)
 
     if not pathlib.Path(remote_path).is_absolute():
         raise Exception("Path must be absolute")
@@ -455,4 +497,8 @@ from .globus import (
     createGlobusStagingDirectory,
     downloadFileGlobus,
     uploadFileGlobus,
+    remoteLsGlobus,
+    remoteMkdirGlobus,
+    pathStatGlobus,
+    pathTypeGlobus,
 )

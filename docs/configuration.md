@@ -97,6 +97,16 @@ the Globus Transfer service. Direct Globus credentials support transfer lookup
 by label and cancellation. Collection data access may require additional Globus
 consent; the transfer login requests scopes for configured collection routes.
 
+A linked facility identity may still need authentication within this
+application's Globus session. Direct Globus operations recognize 401/403
+responses containing `authorization_parameters`, open a new interactive login
+flow with the requested identity/domain/MFA/policy requirements, save both
+replacement token sets, and retry the operation once. The authorization URL
+requests the appropriate identity; deleting a token file alone does not ensure
+that identity is used. Ordinary permission errors do not trigger this flow,
+and a repeated challenge propagates. Preauthorize interactively before using
+collections in an unattended manager; session expiry can require another login.
+
 Protect credential files and exclude them from version control. They contain
 usable secrets.
 

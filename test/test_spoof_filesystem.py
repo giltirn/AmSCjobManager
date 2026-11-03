@@ -25,7 +25,8 @@ class SpoofFilesystemTests(unittest.TestCase):
             self.assertFalse(Path(remote_directory).exists())
 
     def test_metadata_and_path_helpers_use_fake_remote_responses(self):
-        self.assertIn("Size:", api.pathStat("perlmutter", "/fake/result.txt"))
+        self.assertEqual(api.pathStat("perlmutter", "/fake/result.txt")["size"], 128)
+        self.assertIn("Size:", api.pathStat("perlmutter", "/fake/result.txt", raw=True))
         self.assertIn("ASCII text", api.pathType("perlmutter", "/fake/result.txt"))
         self.assertTrue(api.isDirectory("perlmutter", "/fake/output"))
         self.assertFalse(api.isDirectory("perlmutter", "/fake/result.txt"))

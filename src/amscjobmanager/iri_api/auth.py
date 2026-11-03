@@ -216,7 +216,18 @@ def _globus_data_access_collections() -> set[str]:
             collections.add(special_globus_endpoints.get(endpoint, endpoint))
     return collections
 
-def interactive_globus_transfer_login(client: globus_sdk.NativeAppAuthClient) -> dict:
+def interactive_globus_transfer_login(
+    client: globus_sdk.NativeAppAuthClient, *, authorization_parameters: dict | None = None,
+) -> tuple[dict, dict]:
+    """Authorize both transfer services, honoring a collection's auth challenge.
+
+    client manages the native-app code flow. Optional authorization_parameters
+    comes from a Globus error and supplies session identity/domain/MFA/policy
+    requirements and additional scopes. Return IRI and direct Globus token
+    dictionaries, respectively. Empty session requirements are omitted to avoid
+    conflicting with the populated domain/identity requirements. No tokens are
+    saved here; the caller persists them after successful authorization.
+    """
     scope = globus_sdk.Scope(IRI_TRANSFER_DEFAULT_SCOPE)
     mapped_collections = _globus_data_access_collections()
     
@@ -225,14 +236,23 @@ def interactive_globus_transfer_login(client: globus_sdk.NativeAppAuthClient) ->
     scope = scope.with_dependency(transfer_scope)
     print(f"Logging in with scope: {scope}")
 
+    parameters = authorization_parameters or {}
+    requested_scopes = [scope, transfer_scope, *parameters.get("required_scopes", [])]
     client.oauth2_start_flow(
         # The IRI service needs Transfer as a dependency, while this client
         # also needs a first-party Transfer API token for task-list lookup.
-        requested_scopes=[scope, transfer_scope],
+        requested_scopes=requested_scopes,
         refresh_tokens=True,
     )
+    # Linking an identity is insufficient: authenticate it in this app's session.
+    authorize_options = {"prompt": "login"}
+    for name in ("session_required_identities", "session_required_single_domain",
+                 "session_required_policies", "session_required_mfa", "session_message"):
+        value = parameters.get(name)
+        if value is not None and value != []:
+            authorize_options[name] = value
     query = f"""Open this URL, login, and consent:
-    { client.oauth2_get_authorize_url(query_params={"prompt": "login"}) }
+    { client.oauth2_get_authorize_url(**authorize_options) }
 
     Enter authorization code: """
 
@@ -285,20 +305,32 @@ def refresh_globus_transfer_tokens(client: globus_sdk.NativeAppAuthClient, store
         return None
     return iri_auth_data, globus_auth_data
 
-def setupIRIapiGlobusTransfer(key_path):
+def setupIRIapiGlobusTransfer(key_path, *, authorization_parameters: dict | None = None):
+    """Load/refresh transfer credentials or interactively satisfy an auth challenge.
+
+    key_path stores both transfer-service token sets. When optional
+    authorization_parameters is supplied, bypass refresh of the old session
+    and obtain new tokens using those requirements. Persist successfully
+    granted credentials before updating the in-memory token cache. Return None.
+    """
     client =  globus_sdk.NativeAppAuthClient(GLOBUS_CLIENT_ID)
 
     wfapiLog("setupIRIapiGlobusTransfer checking stored tokens at",key_path)
     stored = load_globus_tokens(Path(key_path))
     auth_data = None
     globus_auth_data = None
-    if stored and stored.get("refresh_token"):
+    if authorization_parameters is None and stored and stored.get("refresh_token"):
         refreshed = refresh_globus_transfer_tokens(client, stored)
         if refreshed is not None:
             auth_data, globus_auth_data = refreshed
 
     if auth_data == None:
-        auth_data, globus_auth_data = interactive_globus_transfer_login(client)
+        if authorization_parameters is None:
+            auth_data, globus_auth_data = interactive_globus_transfer_login(client)
+        else:
+            auth_data, globus_auth_data = interactive_globus_transfer_login(
+                client, authorization_parameters=authorization_parameters,
+            )
 
     stored_tokens = dict(auth_data)
     stored_tokens["globus_transfer"] = globus_auth_data

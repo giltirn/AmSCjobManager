@@ -36,8 +36,8 @@ formats; for example, remote `getUsername()` requires v2.
 
 ALCF's configuration routes file upload/download operations through Globus where
 the filesystem API does not supply them. Those fallbacks require transfer
-authentication and a personal collection. Its configured `pathStat` operation
-currently raises `NotImplementedError`. Fresh discovery of another provider does
+authentication and a personal collection. Its `pathStat` operation uses Globus
+metadata, without requiring a personal collection. Fresh discovery of another provider does
 not automatically reproduce these special cases or discover Globus routes.
 
 The OLCF definition supplies `frontier` through the v2 API at
@@ -45,9 +45,12 @@ The OLCF definition supplies `frontier` through the v2 API at
 `token_type="amsc_pat"` and the PAT JSON path. The manual Globus route uses
 **OLCF DTN (Globus 5)** (`36d521b3-c182-4071-b7d5-91db5d380d42`), with `/`
 mapped to `/`, preserving absolute filesystem paths. Use `uploadFileGlobus`,
-`downloadFileGlobus`, or `globusCopy` for this route. Native IRI filesystem
-operations are configured to use the `frontier` compute resource for paths
-rooted at `/`; this is a manually supplied assumption pending live verification.
+`downloadFileGlobus`, or `globusCopy` for this route. OLCF's packaged definition
+also routes listings, path-type checks, stat, mkdir, and file upload/download
+through Globus; chmod raises `NotImplementedError`. Metadata and mkdir need
+only transfer credentials; file uploads/downloads also require a configured
+personal endpoint. The native filesystem mapping to `frontier` at `/` is
+retained but bypassed for the configured fallbacks.
 The root mapping describes path translation;
 configured sandbox checks still restrict writes.
 

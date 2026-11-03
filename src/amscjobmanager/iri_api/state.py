@@ -135,18 +135,23 @@ def getConfigurationCacheDirectory() -> str:
     return _configuration_cache_directory
 
 
-def getTransferToken(service: str) -> str:
+def getTransferToken(service: str, *, authorization_parameters: dict | None = None) -> str:
     """Authenticate the transfer service on first use and return its token.
 
     service is 'iriapi_transfer_base' or 'globus_transfer'. Merely configuring
     transfer credentials does not trigger Globus login during manager setup.
+    authorization_parameters forces a new interactive authorization satisfying
+    a Globus challenge, replacing and persisting both transfer-service tokens.
     """
     if service not in tokens:
         raise ValueError(f"Unknown transfer service: {service!r}")
-    if tokens[service] is None:
+    if tokens[service] is None or authorization_parameters is not None:
         if _transfer_token_path is None:
             raise RuntimeError("Globus transfers require transferapi_key_path in the manager configuration")
-        setupIRIapiGlobusTransfer(_transfer_token_path)
+        if authorization_parameters is None:
+            setupIRIapiGlobusTransfer(_transfer_token_path)
+        else:
+            setupIRIapiGlobusTransfer(_transfer_token_path, authorization_parameters=authorization_parameters)
     return tokens[service]
 
 

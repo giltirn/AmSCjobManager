@@ -45,6 +45,8 @@ for suite in \
     test_local_cancellation.py \
     test_local_compute.py \
     test_globus_path_namespaces.py \
+    test_globus_filesystem.py \
+    test_globus_authorization.py \
     test_iri_discovery.py \
     test_iri_lazy_setup.py \
     test_iri_public_api.py \
@@ -98,8 +100,23 @@ roots, credentials, accounts, collections, and personal staging.
 | `test_iri_file_roundtrip.py` | `python test/test_iri_file_roundtrip.py manager-config.json`; real upload/list/download across configured mounted filesystems. |
 | `test_globus_file_roundtrip.py` | `python test/test_globus_file_roundtrip.py manager-config.json`; real blocking transfers through the personal collection. |
 | `test_globus_transfer_lookup.py` | `python test/test_globus_transfer_lookup.py manager-config.json`; submits a labeled IRI transfer and compares its ID with direct Globus label discovery. Requires the configured Perlmutter/DTN route. |
+| `test_globus_operations_live.py` | `python test/test_globus_operations_live.py manager-config.json frontier`; verifies the first sandbox's Globus mapping, then tests all implemented Globus filesystem/transfer operations in a unique child directory. Requires transfer credentials and a reachable personal endpoint. |
 | `test_iri_compute_execution.py` | `python test/test_iri_compute_execution.py manager-config.json perlmutter ACCOUNT`; submits native and compatibility jobs. Also supports Aurora. |
 | `test_local.py` | `python test/test_local.py manager-config.json`; launches real local commands. |
+
+The comprehensive Globus check exercises mkdir (with and without parents),
+stat/type/missing-path queries, hidden-file listings, binary/text/empty-file
+uploads and downloads in filesystem and Globus namespaces, direct personal
+staging, file and recursive copies, task status, both label-lookup wrappers,
+and cancellation. Downloads verify content, not just task acceptance. It keeps
+remote files plus its `/tmp` and personal-staging directories for inspection;
+known outstanding nonblocking copies are canceled on failure. It never chooses
+a later sandbox if the first has no Globus route. It does not run compute jobs
+or test chmod/rename/delete, which are not implemented as Globus wrappers.
+`--timeout` (default 300 seconds) and `--poll-interval` (default 2 seconds)
+control explicit polling/label lookup; existing blocking upload/download waits
+are unchanged. A cancellation race is reported when a small task completes
+before cancellation takes effect.
 
 ## Adding a compute or transfer action
 

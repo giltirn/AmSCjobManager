@@ -5,6 +5,7 @@ import pathlib
 import shutil
 import time
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
@@ -68,21 +69,37 @@ def globusTransferStatus(transfer_id)-> str:
     j = _transfer_get(f"movement/transfer/globus/{transfer_id}")
     return j["status"]
 
+def _globus_operation(operation: str, *args, **kwargs):
+    """Execute one direct Globus operation, retrying one authorization challenge.
+
+    operation names a TransferClient method; args/kwargs are passed unchanged.
+    Return the SDK response. On a 401/403 with authorization_parameters, obtain
+    replacement tokens through interactive login and retry once with a new
+    client. Other errors and a second challenge propagate. An authorization
+    rejection is safe to retry because the requested operation was not allowed.
+    """
+    token = getTransferToken("globus_transfer")
+    for attempt in range(2):
+        client = globus_sdk.TransferClient(authorizer=globus_sdk.AccessTokenAuthorizer(token))
+        try:
+            return getattr(client, operation)(*args, **kwargs)
+        except globus_sdk.TransferAPIError as error:
+            body = error.raw_json
+            parameters = body.get("authorization_parameters") if isinstance(body, dict) else None
+            if attempt or error.http_status not in {401, 403} or not isinstance(parameters, dict):
+                raise
+            wfapiLog("Globus requires reauthorization for", operation,
+                     "— complete the new login using the identity requested by the collection")
+            token = getTransferToken("globus_transfer", authorization_parameters=parameters)
+
+
 def cancelGlobusTransfer(transfer_id: str) -> None:
     """Request cancellation of a transfer task by its Globus task ID."""
-    token = getTransferToken("globus_transfer")
-    client = globus_sdk.TransferClient(
-        authorizer=globus_sdk.AccessTokenAuthorizer(token)
-    )
-    client.cancel_task(transfer_id)
+    _globus_operation("cancel_task", transfer_id)
 
 def findGlobusTransfersByLabel(label: str) -> str | None:
     """Return the unique Globus task ID bearing an exact task label."""
-    token = getTransferToken("globus_transfer")
-    client = globus_sdk.TransferClient(
-        authorizer=globus_sdk.AccessTokenAuthorizer(token)
-    )
-    tasks = list(client.task_list(filter=f"label:={label}", limit=1000))
+    tasks = list(_globus_operation("task_list", filter=f"label:={label}", limit=1000))
     if len(tasks) > 1:
         raise RuntimeError(f"Multiple Globus tasks use submission label {label!r}")
     return None if not tasks else tasks[0]["task_id"]
@@ -134,6 +151,115 @@ def getRemoteGlobusLocation(machine: str, remote_filesystem_path: str) -> tuple[
     )
     root = pathlib.PurePosixPath(filesystem["filesystem_root"])
     return filesystem["endpoint"], str(pathlib.PurePosixPath(filesystem["globus_root"]) / path.relative_to(root))
+
+
+def pathStatGlobus(machine: str, remote_path: str, dereference=True) -> dict:
+    """Return shared metadata for a filesystem path through its Globus collection.
+
+    machine selects a configured machine; remote_path is an absolute filesystem
+    path. Return type, size (bytes), permissions (octal string), user, group,
+    and last_modified (UTC ISO 8601 string). Globus follows valid symlinks;
+    dereference=False raises NotImplementedError for those links. Missing paths
+    raise FileNotFoundError after checking that the collection itself exists.
+    Authentication, permission and connectivity failures propagate unchanged.
+    This read needs transfer credentials but no personal endpoint or staging.
+    """
+    endpoint, path = getRemoteGlobusLocation(machine, remote_path)
+    endpoint = replaceSpecialGlobusEndpoint(endpoint)
+    try:
+        metadata = _globus_operation("operation_stat", endpoint, path=path)
+    except globus_sdk.TransferAPIError as error:
+        if error.http_status != 404 or error.code not in {"ClientError.NotFound", "NotFound"}:
+            raise
+        # Collections can report NotFound or ClientError.NotFound for absent
+        # paths; a 404 can also mean that the collection itself is unavailable.
+        # Confirm collection access before reporting a nonexistent filesystem path.
+        _globus_operation("get_endpoint", endpoint)
+        raise FileNotFoundError(remote_path) from error
+    if not dereference and metadata.get("link_target") is not None:
+        raise NotImplementedError("Globus cannot stat a symlink itself; use dereference=True")
+    modified = metadata.get("last_modified")
+    return {
+        "type": metadata["type"],
+        "size": metadata["size"],
+        "permissions": metadata.get("permissions"),
+        "user": metadata.get("user"),
+        "group": metadata.get("group"),
+        "last_modified": datetime.fromisoformat(modified).astimezone(timezone.utc).isoformat() if modified else None,
+    }
+
+
+def pathTypeGlobus(machine: str, remote_path: str) -> str:
+    """Return a basic file-type description compatible with existence checks.
+
+    machine and remote_path identify a configured machine and absolute
+    filesystem path. Globus stat distinguishes types, not file contents. Return
+    'directory', 'regular file', or the reported special-file type. A missing
+    path returns 'cannot open: No such file or directory'; other errors propagate.
+    """
+    try:
+        metadata = pathStatGlobus(machine, remote_path)
+    except FileNotFoundError:
+        return "cannot open: No such file or directory"
+    return {"dir": "directory", "file": "regular file"}.get(metadata["type"], metadata["type"])
+
+
+def remoteLsGlobus(machine: str, remote_path: str) -> list[str]:
+    """List an absolute machine filesystem directory through Globus.
+
+    Return child names, including hidden entries, without recursing. Resolve the
+    machine's configured collection mapping; collection/authentication errors
+    propagate. No personal endpoint or staging directory is needed.
+    """
+    endpoint, path = getRemoteGlobusLocation(machine, remote_path)
+    response = _globus_operation("operation_ls", replaceSpecialGlobusEndpoint(endpoint), path=path, show_hidden=True)
+    return [entry["name"] for entry in response["DATA"]]
+
+
+def remoteMkdirGlobus(machine: str, remote_path: str, create_parents=True, allow_unsafe=False) -> None:
+    """Create an absolute machine filesystem directory through Globus.
+
+    Return None on success. With create_parents=True, inspect ancestors and
+    create missing directories from parent to child; existing directories are
+    accepted. With False, request only the target directory. Unless allow_unsafe
+    is set, both the target and every ancestor to be created must be sandboxed.
+    Reads/mkdir use transfer credentials without local staging. Unexpected
+    authentication, permission, connectivity and mkdir errors propagate.
+    """
+    path = _absolute_remote_path(remote_path)
+    if not allow_unsafe and not checkSafePath(machine, str(path)):
+        raise ValueError(f"Path {path} is outside the sandbox directories")
+    pending = [path]
+    if create_parents:
+        pending = []
+        current = path
+        while True:
+            try:
+                metadata = pathStatGlobus(machine, str(current))
+            except FileNotFoundError:
+                if not allow_unsafe and not checkSafePath(machine, str(current)):
+                    raise ValueError(f"Parent {current} is outside the sandbox directories")
+                pending.append(current)
+                if current == current.parent:
+                    raise
+                current = current.parent
+            else:
+                if metadata["type"] != "dir":
+                    raise NotADirectoryError(str(current))
+                break
+    # Validate the full creation plan before modifying any directory.
+    locations = [(item, getRemoteGlobusLocation(machine, str(item))) for item in reversed(pending)]
+    if not locations:
+        return
+    for item, (endpoint, globus_path) in locations:
+        try:
+            _globus_operation("operation_mkdir", replaceSpecialGlobusEndpoint(endpoint), path=globus_path)
+        except globus_sdk.TransferAPIError as error:
+            if not create_parents or error.code != "ExternalError.MkdirFailed.Exists":
+                raise
+            # Another process may have created it after the ancestor checks.
+            if pathStatGlobus(machine, str(item))["type"] != "dir":
+                raise
 
 
 def _file_transfer_location(machine, remote_path, remote_path_type, remote_endpoint):

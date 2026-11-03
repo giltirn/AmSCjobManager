@@ -212,11 +212,18 @@ def remoteChmod(machine: str, path: str, mode: str, allow_unsafe=False):
         raise ValueError("Paths containing '~' are not supported; use an explicit path")
     wfapiLog(f"Changing fake permissions of {machine}:{path} to {mode}")
 
-def pathStat(machine: str, remote_path: str, dereference=True) -> str:
-    """Return illustrative stat output without inspecting a remote filesystem."""
+def pathStat(machine: str, remote_path: str, dereference=True, *, raw=False) -> dict | str:
+    """Return illustrative shared metadata, or native-style text with raw=True.
+
+    machine/remote_path label the simulated file; dereference is accepted for
+    API compatibility. No remote filesystem is inspected or modified.
+    """
     if "~" in remote_path:
         raise ValueError("Paths containing '~' are not supported; use an explicit path")
     wfapiLog(f"Inspecting fake file metadata {machine}:{remote_path}")
+    if not raw:
+        return {"type": "file", "size": 128, "permissions": "0644", "user": "1000",
+                "group": "1000", "last_modified": "2000-01-01T00:00:00+00:00"}
     return f"File: {remote_path}\nSize: 128\nAccess: (0644/-rw-r--r--)\nUid: 1000\nGid: 1000"
 
 def pathType(machine: str, remote_path: str) -> str:

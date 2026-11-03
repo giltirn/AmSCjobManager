@@ -12,7 +12,7 @@
       "uploadBytes": "globus",
       "downloadFile": "globus",
       "downloadFileContents": "globus",
-      "pathStat": "skip"
+      "pathStat": "globus"
     },
     "filesystems": {
       "alcf_home": {

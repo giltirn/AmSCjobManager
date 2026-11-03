@@ -35,6 +35,7 @@ from .globus import (
     findGlobusTransferByLabel,
     findGlobusTransfersByLabel, getRemoteGlobusLocation, globusCopy,
     globusTransferStatus, uploadFileGlobus,
+    remoteLsGlobus, remoteMkdirGlobus, pathStatGlobus, pathTypeGlobus,
 )
 from .compute import (
     cancelJob, executeBatchJobCompat, executeJob, findJobByName, getJobState,
@@ -58,5 +59,6 @@ __all__ = [
     "findGlobusTransferByLabel", "findGlobusTransfersByLabel",
     "getRemoteGlobusLocation", "globusCopy", "globusTransferStatus",
     "uploadFileGlobus", "cancelJob", "executeBatchJobCompat", "executeJob",
+    "remoteLsGlobus", "remoteMkdirGlobus", "pathStatGlobus", "pathTypeGlobus",
     "findJobByName", "getJobState",
 ]

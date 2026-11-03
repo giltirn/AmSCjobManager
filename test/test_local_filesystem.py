@@ -70,10 +70,13 @@ class LocalFilesystemTests(unittest.TestCase):
         target.write_text("payload")
         link = self.directory / "link"
         link.symlink_to(target)
-        self.assertIn("regular file", api.pathStat("LOCAL", str(link)))
-        self.assertIn("symbolic link", api.pathStat("local", str(link), dereference=False))
+        metadata = api.pathStat("LOCAL", str(link))
+        self.assertEqual(metadata["type"], "file")
+        self.assertEqual(metadata["size"], 7)
+        self.assertEqual(api.pathStat("local", str(link), dereference=False)["type"], "link")
+        self.assertIn("regular file", api.pathStat("local", str(link), raw=True))
         target.unlink()
-        self.assertIn("symbolic link", api.pathStat("local", str(link), dereference=False))
+        self.assertEqual(api.pathStat("local", str(link), dereference=False)["type"], "link")
         with self.assertRaises(subprocess.CalledProcessError):
             api.pathStat("local", str(link))
 

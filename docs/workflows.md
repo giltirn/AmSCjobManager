@@ -4,6 +4,11 @@
 
 ## Start with the reference example
 
+For real execution, see [the MPI workflow example](../examples/README.md).
+It uploads C++ source, compiles in pre-launch, runs an MPI reduction under
+`JobManager`, then downloads and verifies the result. It supports local MPI
+and configured IRI machines, with configurable build profiles.
+
 Run [spoof_workflow_apiv1.py](../examples/spoof_workflow_apiv1.py) from the
 repository root:
 

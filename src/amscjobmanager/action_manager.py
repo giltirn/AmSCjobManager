@@ -44,7 +44,7 @@ class ActionManager:
     @staticmethod
     def _remoteActionName(action_id):
         """Return the deterministic name used to find an action after a crash."""
-        return f"amscjm:{action_id}"
+        return f"amscjm_{action_id}"
     
     def __init__(self, connection : sqlite3.Connection, table_name, api_action_status_map : dict,
                  *, _test_crash_at: str | None = None,
@@ -246,6 +246,11 @@ class ActionManager:
             except SimulatedCrash:
                 raise
             except Exception as exc:
+                wfmanLog(
+                    f"Remote lookup failed for {self.table_name} action {action_id} "
+                    f"(job {action['job_id']}, machine {action['machine']!r}); "
+                    f"deferring reconciliation: {type(exc).__name__}: {exc}"
+                )
                 with self.conn as conn:
                     conn.execute(
                         f"UPDATE {self.table_name} SET last_submission_error = ?, last_update = ? "
@@ -288,6 +293,11 @@ class ActionManager:
             #If we've maxed out our submission attempts we mark the workflow as failed
             if action["submission_attempts"] >= self.max_submission_attempts:
                 error = "Remote action was not found after the maximum number of submission attempts"
+                wfmanLog(
+                    f"Submission retries exhausted for {self.table_name} action {action_id} "
+                    f"(job {action['job_id']}, machine {action['machine']!r}, "
+                    f"{action['submission_attempts']} attempts); marking FAILED: {error}"
+                )
                 with self.conn as conn:
                     conn.execute(
                         f"UPDATE {self.table_name} SET api_status = ?, action_status = ?, "
@@ -316,6 +326,12 @@ class ActionManager:
             except Exception as exc:
                 # Keep the action schedulable until the next pass can check
                 # whether the remote service accepted this final attempt.
+                wfmanLog(
+                    f"Submission failed for {self.table_name} action {action_id} "
+                    f"(job {action['job_id']}, machine {action['machine']!r}, "
+                    f"attempt {action['submission_attempts'] + 1}/{self.max_submission_attempts}); "
+                    f"retaining SCHEDULING for reconciliation: {type(exc).__name__}: {exc}"
+                )
                 with self.conn as conn:
                     conn.execute(
                         f"UPDATE {self.table_name} SET last_submission_error = ? "
@@ -341,6 +357,11 @@ class ActionManager:
         except SimulatedCrash:
             raise
         except Exception as exc:
+            wfmanLog(
+                f"Status poll failed for {self.table_name} action {action_id} "
+                f"(job {action['job_id']}, machine {action['machine']!r}, remote ID {api_key!r}); "
+                f"deferring reconciliation: {type(exc).__name__}: {exc}"
+            )
             with self.conn as conn:
                 conn.execute(
                     f"UPDATE {self.table_name} SET last_submission_error = ?, last_update = ? "

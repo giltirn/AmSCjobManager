@@ -67,6 +67,8 @@ def globusTransferStatus(transfer_id)-> str:
     "FAILED"  The task or one of its subtasks failed, expired, or was canceled.
     """
     j = _transfer_get(f"movement/transfer/globus/{transfer_id}")
+    if j["status"] in {"FAILED", "INACTIVE"}:
+        wfapiLog(f"Globus transfer {transfer_id} reported {j['status']}; server response: {json.dumps(j)}")
     return j["status"]
 
 def _globus_operation(operation: str, *args, **kwargs):

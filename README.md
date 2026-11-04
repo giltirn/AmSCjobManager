@@ -60,6 +60,10 @@ importing the library. It demonstrates staging, a transfer → compute → trans
 workflow, monitoring, and shutdown without credentials or remote execution.
 Its remote filesystem responses and downloaded results are simulated.
 
+For a real calculation, see the [MPI workflow example](examples/README.md).
+It uploads C++ source, compiles in pre-launch, runs MPI under `JobManager`,
+then downloads and verifies the result on local or configured IRI machines.
+
 For real operations, select IRI before importing the package and initialize it
 from a configuration file:
 

@@ -104,6 +104,7 @@ roots, credentials, accounts, collections, and personal staging.
 | `test_globus_operations_live.py` | `python test/test_globus_operations_live.py manager-config.json frontier`; verifies the first sandbox's Globus mapping, then tests all implemented Globus filesystem/transfer operations in a unique child directory. Requires transfer credentials and a reachable personal endpoint. |
 | `test_iri_compute_execution.py` | `python test/test_iri_compute_execution.py manager-config.json perlmutter ACCOUNT`; submits native and compatibility jobs. Also supports Aurora. |
 | `test_local.py` | `python test/test_local.py manager-config.json`; launches real local commands. |
+| `examples/mpi_workflow.py` | `python examples/mpi_workflow.py manager-config.json local --ranks-per-node 4`; compiles and executes the bundled MPI reduction and verifies the downloaded result. See [example configuration and remote usage](../examples/README.md). |
 
 The comprehensive Globus check exercises mkdir (with and without parents),
 stat/type/missing-path queries, hidden-file listings, binary/text/empty-file

@@ -11,12 +11,23 @@ from unittest.mock import patch
 import httpx
 from pydantic import ValidationError
 
-from amscjobmanager.iri_api import discovery, filesystem, resources, rest, state
+from amscjobmanager.iri_api import compute, discovery, filesystem, resources, rest, state
 from amscjobmanager.iri_api.config import IRI_IMPLEMENTATIONS, MACHINE_IMPLEMENTATIONS
 from amscjobmanager.iri_api.discovery import DiscoveredImplementation
 
 
 class IRIQueryTests(unittest.TestCase):
+    def test_failed_compute_job_logs_server_reason(self):
+        """A failed compute status retains its return value and logs the server's reason."""
+        response = {"status": {"state": "failed", "reason": "Job exceeded memory limit"}}
+        with patch.object(compute, "getResourceID", return_value="resource"), \
+             patch.object(compute, "get", return_value=response), \
+             patch.object(compute, "wfapiLog") as log:
+            self.assertEqual(compute.getJobState("perlmutter", "job-1"), "failed")
+        message = log.call_args.args[0]
+        self.assertIn("perlmutter:job-1", message)
+        self.assertIn("Job exceeded memory limit", message)
+
     def setUp(self):
         accounts = patch.dict(state._implementation_accounts, {}, clear=True)
         accounts.start()

@@ -34,7 +34,7 @@ test_id = uuid.uuid4().hex
 test_dir = perlmutter_sandbox / "amsc-job-manager-transfer-tests" / test_id
 source_file = test_dir / "source.txt"
 destination_dir = test_dir / "dtn-destination"
-label = f"amscjm:transfer-wrapper-test:{test_id}"
+label = f"amscjm_transfer_wrapper_test_{test_id}"
 
 # NERSC recommends using its DTN collection for all transfers. The configured
 # Perlmutter sandbox path is shared with that collection.

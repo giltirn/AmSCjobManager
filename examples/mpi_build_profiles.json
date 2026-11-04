@@ -1,0 +1,27 @@
+{
+  "local": {
+    "setup": "",
+    "compiler": ["mpic++"],
+    "compiler_flags": ["-O2", "-std=c++17"]
+  },
+  "frontier": {
+    "setup": "module load PrgEnv-cray cray-mpich",
+    "compiler": ["CC"],
+    "compiler_flags": ["-O2", "-std=c++17"]
+  },
+  "perlmutter": {
+    "setup": "module load PrgEnv-gnu cray-mpich",
+    "compiler": ["CC"],
+    "compiler_flags": ["-O2", "-std=c++17"]
+  },
+  "polaris": {
+    "setup": "module load PrgEnv-nvidia cray-mpich",
+    "compiler": ["CC"],
+    "compiler_flags": ["-O2", "-std=c++17"]
+  },
+  "aurora": {
+    "setup": "module load oneapi mpich",
+    "compiler": ["mpicxx"],
+    "compiler_flags": ["-O2", "-std=c++17"]
+  }
+}

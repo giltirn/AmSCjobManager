@@ -294,7 +294,8 @@ def getJobState(machine: str, jobid: str) -> str:
 
     rid = getResourceID(machine, rtype="compute")
     j = get(machine, f"compute/status/{rid}/{jobid}", params = { "historical" : True })
-    wfapiLog(f"Queried job state {machine}:{jobid}, got {j['status']['state']}")
+    if j['status']['state'] == "failed":
+        wfapiLog(f"Compute job {machine}:{jobid} failed; server status: {json.dumps(j['status'])}")
     return j['status']['state']
 
 def findJobByName(machine: str, name: str) -> str | None:

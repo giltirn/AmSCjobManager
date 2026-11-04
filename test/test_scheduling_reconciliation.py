@@ -117,6 +117,10 @@ class HarnessGlobusDataTransfers(GlobusDataTransfers):
 
 class SchedulingReconciliationTests(unittest.TestCase):
     def setUp(self):
+        self.logs = []
+        log_output = patch("amscjobmanager.logging.wfman_log_func", side_effect=self.logs.append)
+        log_output.start()
+        self.addCleanup(log_output.stop)
         self.tmpdir = tempfile.TemporaryDirectory()
         self.db_path = Path(self.tmpdir.name) / "manager.sqlite"
         self.harness = TransferHarness()
@@ -309,6 +313,10 @@ class SchedulingReconciliationTests(unittest.TestCase):
         ).fetchone()
         self.assertEqual(row["submission_attempts"], 1)
         self.assertIn("action-layer submission failure", row["last_submission_error"])
+        submission_log = next(line for line in self.logs if "Submission failed" in line)
+        self.assertIn(str(job_id), submission_log)
+        self.assertIn("attempt 1/", submission_log)
+        self.assertIn("RuntimeError: simulated action-layer submission failure", submission_log)
 
     def test_submission_status_lookup_error_leaves_action_scheduling(self):
         # Submission succeeds remotely, but the immediate status API call
@@ -324,6 +332,11 @@ class SchedulingReconciliationTests(unittest.TestCase):
             job_data, job_id, ActionStatus.SCHEDULING, ActionStatus.SCHEDULING
         )
         self.assertEqual(self.harness.submission_count, 1)
+
+        poll_log = next(line for line in self.logs if "Status poll failed" in line)
+        self.assertIn(str(job_id), poll_log)
+        self.assertIn("transfer-1", poll_log)
+        self.assertIn("simulated remote status lookup failure", poll_log)
 
         job_data.reconcileSchedulingActions()
         self.assertEqual(self.harness.submission_count, 1)
@@ -342,6 +355,9 @@ class SchedulingReconciliationTests(unittest.TestCase):
             job_data, job_id, ActionStatus.SCHEDULING, ActionStatus.SCHEDULING
         )
         self.assertEqual(self.harness.submission_count, 0)
+        lookup_log = next(line for line in self.logs if "Remote lookup failed" in line)
+        self.assertIn(str(job_id), lookup_log)
+        self.assertIn("simulated remote action lookup failure", lookup_log)
 
         job_data.reconcileSchedulingActions() #this one should succeed
         self.assertEqual(self.harness.submission_count, 1)
@@ -397,6 +413,7 @@ class SchedulingReconciliationTests(unittest.TestCase):
                 self.assertEqual(self.harness.submission_count, 2)
 
         # Once polling succeeds, the retained workflow advances exactly once.
+        self.assertEqual(sum("temporary status outage" in line for line in self.logs), 3)
         job_data.progressActiveState(force_poll=True)
         self.assertEqual(job_data.jobState(first)["workflow_stage"], 1)
         self.assertEqual(self.harness.submission_count, 3)

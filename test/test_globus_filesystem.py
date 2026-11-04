@@ -11,6 +11,19 @@ from amscjobmanager.iri_api import filesystem, globus, state
 
 
 class GlobusFilesystemTests(unittest.TestCase):
+    def test_failed_transfer_logs_server_reason(self):
+        """Failed or suspended transfers report the server's details without changing the status."""
+        for status in ("FAILED", "INACTIVE"):
+            with self.subTest(status=status):
+                response = {"status": status, "details": "Endpoint credentials expired"}
+                with patch.object(globus, "_transfer_get", return_value=response), \
+                     patch.object(globus, "wfapiLog") as log:
+                    self.assertEqual(globus.globusTransferStatus("transfer-1"), status)
+                message = log.call_args.args[0]
+                self.assertIn("transfer-1", message)
+                self.assertIn(status, message)
+                self.assertIn("Endpoint credentials expired", message)
+
     def setUp(self):
         self.client = Mock()
         client = patch.object(globus.globus_sdk, "TransferClient", return_value=self.client)

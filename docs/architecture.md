@@ -56,7 +56,7 @@ Keep these identifiers distinct:
 - **Action ID:** a separate integer allocated by JobData for each workflow step.
 - **Remote API key:** the provider's compute job ID or Globus task ID, stored in
   the action table's `api_key` column. Here “key” means an identifier, not a token.
-- **Remote action name:** `amscjm:<action_id>`, used to recover a submitted action
+- **Remote action name:** `amscjm_<action_id>`, used to recover a submitted action
   if the process stops before saving its remote ID.
 
 The manager database contains `jobs`, `action_ids`, `computes`, and `transfers`.

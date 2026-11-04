@@ -135,7 +135,7 @@ class SpoofWorkflowTests(unittest.TestCase):
 
         submissions = [event for event in events if event["event"] == "submitted"]
         self.assertEqual(len({event["name"] for event in submissions}), len(workflow))
-        self.assertTrue(all(event["name"].startswith("amscjm:") for event in submissions))
+        self.assertTrue(all(event["name"].startswith("amscjm_") for event in submissions))
         self.assertEqual(
             [
                 event["details"]["script_body"]

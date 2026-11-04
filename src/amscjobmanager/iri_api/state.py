@@ -53,6 +53,7 @@ class IRIComputeClient:
 
 iri_compute_clients: dict[str, IRIComputeClient] = {}
 _implementation_credentials: dict[str, dict] = {}
+_implementation_accounts: dict[str, list[str]] = {}
 _validating_clients: set[str] = set()
 _transfer_token_path: str | None = None
 _configuration_cache_directory: str | None = None
@@ -126,6 +127,28 @@ def getImplementationClient(implementation: str) -> IRIComputeClient:
 def getConfiguredImplementations() -> tuple[str, ...]:
     """Return providers selected by the user, without authenticating them."""
     return tuple(_implementation_credentials)
+
+
+def getImplementationAccounts(implementation: str) -> list[str]:
+    """Return a copy of the account list for a case-insensitive provider tag.
+
+    Return an empty list when no accounts have been recorded. Modifying the
+    returned list does not change stored accounts; use addImplementationAccount.
+    This accessor performs no authentication, API requests, or file writes.
+    """
+    return list(_implementation_accounts.get(implementation.lower(), []))
+
+
+def addImplementationAccount(implementation: str, account: str) -> None:
+    """Append an account name to a provider's in-memory list unless already present.
+
+    implementation is a case-insensitive provider tag; account is a
+    case-sensitive name. Preserve insertion order and return None. No
+    authentication, API requests, or configuration-file writes are performed.
+    """
+    accounts = _implementation_accounts.setdefault(implementation.lower(), [])
+    if account not in accounts:
+        accounts.append(account)
 
 
 def getConfigurationCacheDirectory() -> str:
@@ -234,7 +257,8 @@ def setupWorkflowAgent(iri_implementations: dict, iriapi_transfer_key_path: str 
     Args:
        iri_implementations: Mapping of implementation names to configuration
            objects containing a token_path and an optional token_type
-           (globus by default, or amsc_pat). Implementations may share a PAT.
+           (globus by default, or amsc_pat), and optional accounts. Discovered
+           accounts augment these names for this process only. Implementations may share a PAT.
        iriapi_transfer_key_path: Optional IRI transfer token file path. None
            disables transfer authentication; login and token generation are
            deferred until the first transfer operation.
@@ -257,7 +281,12 @@ def setupWorkflowAgent(iri_implementations: dict, iriapi_transfer_key_path: str 
     # discard previous sandbox checks before it can make any client requests.
     addSandboxDirs({}, warn_unavailable=False, defer_checks=True, replace=True)
     _implementation_credentials.clear()
+    _implementation_accounts.clear()
     for implementation, settings in normalized_implementations.items():
+        accounts = settings.get("accounts", []) if isinstance(settings, dict) else getattr(settings, "accounts", [])
+        if not isinstance(accounts, list) or any(not isinstance(name, str) or not name.strip() for name in accounts):
+            raise ValueError(f"Accounts for {implementation!r} must be a list of nonempty strings")
+        _implementation_accounts[implementation] = list(dict.fromkeys(name.strip() for name in accounts))
         _implementation_credentials[implementation] = {
             "token_path": settings["token_path"] if isinstance(settings, dict) else settings.token_path,
             "token_type": settings.get("token_type", "globus") if isinstance(settings, dict) else settings.token_type,

@@ -18,6 +18,9 @@ from amscjobmanager.iri_api.discovery import DiscoveredImplementation
 
 class IRIQueryTests(unittest.TestCase):
     def setUp(self):
+        accounts = patch.dict(state._implementation_accounts, {}, clear=True)
+        accounts.start()
+        self.addCleanup(accounts.stop)
         cache_directory = patch.object(state, "_configuration_cache_directory", None)
         cache_directory.start()
         self.addCleanup(cache_directory.stop)

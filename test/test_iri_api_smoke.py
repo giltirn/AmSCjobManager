@@ -29,6 +29,9 @@ if len(sys.argv) != 3:
 
 def run(name, operation):
     """Run one wrapper and report the command accepted by the IRI API."""
+    if name == "getProjectAllocation" and not iri_api.IRI_IMPLEMENTATIONS[implementation].get("supports_account_discovery", True):
+        print(f"skipped: {name} (project ID discovery unavailable for {implementation})")
+        return
     operation_handling = iri_api.IRI_IMPLEMENTATIONS[implementation].get(
         "unsupported_filesystem_operations", {}
     ).get(name)

@@ -5,6 +5,7 @@
     "api_base": "https://amsc-moderate.s3m.olcf.ornl.gov/api/v2",
     "api_version": 2,
     "status_resources_supports_filters": true,
+    "supports_account_discovery": false,
     "unsupported_filesystem_operations": {
       "remoteLs": "globus",
       "remoteMkdir": "globus",

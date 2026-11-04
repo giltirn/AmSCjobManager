@@ -1,5 +1,5 @@
 from . import globals
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StringConstraints
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -7,6 +7,10 @@ ExplicitPath = Annotated[str, Field(pattern=r"^[^~]*$")]
 
 if globals.api_impl in ("SPOOF", "IRI"):
     class IRIImplementationConfig(BaseModel):
+        accounts: list[Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]] = Field(
+            default_factory=list,
+            description="Optional user account/project names; discovery adds names in memory when available",
+        )
         api_url: str | None = Field(
             None,
             description="Optional IRI API root or Swagger page URL used for configuration discovery",

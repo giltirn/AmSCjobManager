@@ -35,7 +35,8 @@ These are illustrative paths. Choose directories and endpoint IDs you control:
   "iri_implementations": {
     "nersc": {
       "token_type": "globus",
-      "token_path": "/home/example/.config/amscjobmanager/nersc-token.json"
+      "token_path": "/home/example/.config/amscjobmanager/nersc-token.json",
+      "accounts": ["MY_PROJECT"]
     }
   },
   "transferapi_key_path": "/home/example/.config/amscjobmanager/transfer-token.json",
@@ -67,6 +68,37 @@ Each `iri_implementations` value has:
 | `token_type` | `"globus"` | `"globus"` or `"amsc_pat"`. |
 | `api_url` | Optional | API root or Swagger URL used for discovery. Omit for built-in configuration unless deliberately using discovery. |
 | `api_version` | Optional | Integer `1` or `2`; must agree with a registered provider definition. Specify it for unattended setup of an unknown provider. |
+| `accounts` | Optional, `[]` | User account/project names to use alongside discovered names. Case is preserved; blank names are rejected. |
+
+For a provider without account discovery, supply names in your user
+configuration, for example:
+
+```json
+{
+  "iri_implementations": {
+    "olcf": {
+      "token_type": "amsc_pat",
+      "token_path": "/home/example/.globus/olcf-pat.json",
+      "accounts": ["YOUR_PROJECT"]
+    }
+  }
+}
+```
+
+This fragment belongs in a full manager configuration. Account discovery, when
+available, appends unique names to the configured list **in memory only**;
+neither the JSON file nor the loaded configuration object is changed. If
+discovery fails, existing configured/discovered names remain usable. If there
+are no names, the exception explains which `accounts` field to populate.
+Configured names do not grant account access or provide project IDs for
+allocation queries. Perlmutter's machine-level listing adds `_g` when missing,
+and preserves names already ending in `_g`.
+
+OLCF's packaged definition sets `supports_account_discovery` to `false`, so it
+uses your account names without requesting `account/projects`. Other providers
+default to discovery being supported. As with other packaged settings, an older
+user cache can override this flag; explicitly configured accounts still work
+when discovery is attempted and fails.
 
 `globus_personal_endpoint` requires all three fields shown above. The staging
 paths must refer to **the same physical directory**, one in the collection's

@@ -54,6 +54,11 @@ retained but bypassed for the configured fallbacks.
 The root mapping describes path translation;
 configured sandbox checks still restrict writes.
 
+OLCF account discovery is marked unavailable. Set
+`iri_implementations.olcf.accounts` in your user configuration to your project
+names for account listing and job submission. These names do not provide project
+IDs for allocation queries; the smoke test skips that query for this provider.
+
 Frontier's queue list describes the `batch`, `extended`, and `service` partitions
 using the [Frontier Slurm policies](https://docs.olcf.ornl.gov/systems/frontier_user_guide.html#slurm).
 `debug` and `develop` are QoS classes, not partitions; `service` requires

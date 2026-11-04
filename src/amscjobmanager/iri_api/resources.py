@@ -11,7 +11,7 @@ from .config import IRI_IMPLEMENTATIONS, getImplementationAPIVersion
 from .rest import get
 from .state import (
     getMachineImplementation, getImplementationClient, resolveImplementation,
-    getConfiguredImplementations,
+    getConfiguredImplementations, getImplementationAccounts, addImplementationAccount,
 )
 
 
@@ -109,12 +109,19 @@ def getUsername(machine: str | None = None, *, implementation: str | None = None
 
 
 def getUserProjectIDmap(machine=None, *, implementation=None):
-    """
-    Obtain the mapping between project name and id
-    Return:
-       dict name -> id
+    """Discover project IDs and add project names to the process's account list.
+
+    machine or implementation selects a provider. Return its cached name-to-ID
+    mapping, querying account/projects on first use. Configured account names
+    are not fabricated into IDs. Providers without discovery raise
+    NotImplementedError; API/authentication errors propagate to the caller.
     """
     implementation = resolveImplementation(machine=machine, implementation=implementation)
+    if not IRI_IMPLEMENTATIONS[implementation].get("supports_account_discovery", True):
+        raise NotImplementedError(
+            f"Project ID discovery (account/projects) is unavailable for {implementation!r}; "
+            "configured account names support submission but cannot supply project IDs for allocation queries"
+        )
     client = getImplementationClient(implementation)
 
     if implementation not in client.project_map:
@@ -123,7 +130,9 @@ def getUserProjectIDmap(machine=None, *, implementation=None):
         for acct in j:
             pmap[acct['name']] = acct['id']
         client.project_map[implementation] = pmap
-    
+
+    for name in client.project_map[implementation]:
+        addImplementationAccount(implementation, name)
     return client.project_map[implementation]
 
 def getKnownMachines():
@@ -147,15 +156,41 @@ def getMachineQueues(machine)->List[ Tuple[str,str] ]:
 
 
 def getUserAccountProjects(machine=None, *, implementation=None):
-    """List site projects; a machine additionally applies machine account naming."""
+    """Return configured account names supplemented by available project discovery.
+
+    machine or implementation selects a provider. Configured names come first;
+    discovered names are appended without duplicates and retained in memory for
+    this process. The user JSON is not modified. If discovery fails, use known
+    names and log the failure; with no names, raise an error explaining the
+    accounts configuration. Perlmutter adds the GPU '_g' suffix when absent.
+    """
+    implementation = resolveImplementation(machine=machine, implementation=implementation)
     if machine is not None:
         machine = machine.lower()
-    
-    out = list(getUserProjectIDmap(machine=machine, implementation=implementation).keys())
-    if machine == "perlmutter": #_g is required for GPU nodes
-        for i in range(len(out)):
-            out[i] += "_g"
-    return out
+    discovery_supported = IRI_IMPLEMENTATIONS[implementation].get("supports_account_discovery", True)
+    discovery_error = None
+    if discovery_supported:
+        try:
+            getUserProjectIDmap(implementation=implementation)
+        except Exception as error:
+            discovery_error = error
+            if getImplementationAccounts(implementation):
+                wfapiLog(f"Account discovery failed for {implementation!r}; using configured/known accounts: {error}")
+    accounts = getImplementationAccounts(implementation)
+    if not accounts:
+        reason = "Account discovery is unavailable" if not discovery_supported else "Account discovery returned no accounts"
+        if discovery_error is not None:
+            reason = f"Account discovery failed: {discovery_error}"
+        raise RuntimeError(
+            f"No account names are available for {implementation!r}. {reason}. "
+            f"Set iri_implementations.{implementation}.accounts in your manager configuration "
+            'to a list of account names, for example ["YOUR_PROJECT"].'
+        ) from discovery_error
+    # Preserve manually supplied GPU account names without appending '_g' twice.
+    return list(dict.fromkeys(
+        name + "_g" if machine == "perlmutter" and not name.endswith("_g") else name
+        for name in accounts
+    ))
 
 
 def getProjectAllocation(machine=None, project_name: str | None = None, *, implementation=None) -> List[dict]:
@@ -179,6 +214,12 @@ def getProjectAllocation(machine=None, project_name: str | None = None, *, imple
         # the underlying project name.
         project_id = project_map.get(project_name.removesuffix("_g"))
     if project_id is None:
+        known = getImplementationAccounts(implementation)
+        if project_name in known or (machine == "perlmutter" and project_name.removesuffix("_g") in known):
+            raise ValueError(
+                f"No discovered project ID is available for account {project_name!r} on {implementation!r}; "
+                "allocation queries require a discovered project ID"
+            )
         raise ValueError(
             f"Unknown project {project_name!r} for implementation {implementation!r}"
         )

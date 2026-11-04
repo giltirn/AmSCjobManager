@@ -83,8 +83,8 @@ signal. See [workflows](workflows.md) for parameter meanings.
 | `api.getKnownMachines()` | List of machine names available through configured providers, plus `local`. |
 | `api.queryMachineStatus(machine, rtype="compute")` | Boolean for `current_status == "up"`; local is `True`. Storage selection can require a path unavailable in this convenience signature; use resource discovery/`getResource` when necessary. |
 | `api.getMachineQueues(machine)` | Configured `(name, description)` pairs; discovery does not fill queue definitions. |
-| `api.getUserAccountProjects(machine)` | Provider-specific account/project names. IRI also supports querying by `implementation=`. |
-| `api.getProjectAllocation(machine, project_name)` | List of allocation dictionaries returned for the project. Fields depend on the provider. |
+| `api.getUserAccountProjects(machine)` | Configured account/project names plus unique discovered names, merged in memory. IRI also supports querying by `implementation=`. Without discovery or configured names, raises configuration guidance. |
+| `api.getProjectAllocation(machine, project_name)` | List of allocation dictionaries returned for a discovered project ID. Fields depend on the provider; configured account names alone cannot supply this query. |
 | `api.getUsername(machine=None, *, implementation=None)` | Username; exactly one target is required. `machine="local"` runs `whoami`; remote IRI needs API v2. |
 | `api.listSpecialGlobusEndpoints()` | Configured endpoint tags. |
 

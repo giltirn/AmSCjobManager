@@ -51,6 +51,7 @@ for suite in \
     test_iri_lazy_setup.py \
     test_iri_public_api.py \
     test_iri_queries.py \
+    test_iri_accounts.py \
     test_iri_configuration.py \
     test_iri_storage_paths.py \
     test_local_username.py \

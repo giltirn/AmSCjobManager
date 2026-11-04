@@ -101,6 +101,11 @@ runs the post-launch commands on MPI rank zero after all ranks finish. This
 requires the relevant Bash/MPI tools, `flock`, and shared writable storage. A
 rank failing before the barrier can prevent it from completing.
 
+For `machine="local"`, the action's `nodes * ranks_per_node` becomes the total
+number of local MPI processes when `local_mpi_launcher` is configured. With the
+default `null` setting, the total must equal one. Pre-launch and post-launch run
+once around the launcher; local execution does not allocate scheduler nodes.
+
 For a script body instead:
 
 ```python

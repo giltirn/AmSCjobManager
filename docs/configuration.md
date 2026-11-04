@@ -59,6 +59,16 @@ These are illustrative paths. Choose directories and endpoint IDs you control:
 | `transferapi_key_path` | Optional, `null` | Token file for IRI movement and Globus Transfer authentication. `null` disables transfer authentication; the first transfer request then fails with a configuration error. |
 | `globus_personal_endpoint` | Optional, `null` | Personal collection and its two staging paths; needed by the blocking local file transfer helpers and certain provider fallbacks. |
 | `iri_config_cache_directory` | Optional, `null` | Persistent discovery-cache directory. Required when discovering a provider from an API URL. |
+| `local_mpi_launcher` | Optional, `null` | Local MPI launcher executable, e.g. `"mpiexec"` or `"/usr/bin/mpirun"`. Without one, local executable jobs require exactly one rank. |
+
+To enable local MPI, add `"local_mpi_launcher": "mpiexec"` at the top level.
+This value is one executable name/path, without command-line options; spaces
+are treated literally, and `~` is rejected. Local executable jobs invoke
+`launcher -n RANKS executable arguments...`, where `RANKS` is
+`nodes * ranks_per_node`. Even one rank uses the launcher when configured.
+Launcher lookup happens after pre-launch, allowing environment/module setup
+there. MPI must be installed separately. Omit the setting or use `null` to
+disable it; a new agent setup replaces the previous launcher setting.
 
 Each `iri_implementations` value has:
 

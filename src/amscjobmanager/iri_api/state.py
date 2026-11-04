@@ -241,12 +241,14 @@ def setupWorkflowAgentFromConfig(config: "ManagerConfig") -> dict:
         config.sandbox_directories,
         config.globus_personal_endpoint,
         iri_config_cache_directory=config.iri_config_cache_directory,
+        local_mpi_launcher=config.local_mpi_launcher,
     )
 
 
 def setupWorkflowAgent(iri_implementations: dict, iriapi_transfer_key_path: str | None,
                        work_dir: dict, globus_personal_endpoint_config=None,
-                       iri_config_cache_directory: str | None = None):
+                       iri_config_cache_directory: str | None = None,
+                       local_mpi_launcher: str | None = None):
     """
     Configure the workflow agent without eager authentication or remote sandbox probes.
 
@@ -269,8 +271,13 @@ def setupWorkflowAgent(iri_implementations: dict, iriapi_transfer_key_path: str 
            configuration must be discovered from an API URL. All provider
            caches are loaded before configuring lazy clients.
            Unknown providers prompt for missing API URL and version.
+       local_mpi_launcher: Optional executable used as launcher -n ranks for
+           local jobs. None resets local execution to single-rank only.
     """    
     global _transfer_token_path, _configuration_cache_directory
+    from ..local_api import configureMPILauncher
+
+    configureMPILauncher(local_mpi_launcher)
     _configuration_cache_directory = iri_config_cache_directory
     normalized_implementations = {
         name.lower(): settings for name, settings in iri_implementations.items()

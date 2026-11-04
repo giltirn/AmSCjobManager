@@ -196,8 +196,12 @@ the run directory, wrapper, and log before recording the job or starting its
 worker. Its commands still run with the user's OS permissions.
 
 `local_api.executeJob(executable, arguments, job_run_dir, allow_unsafe=False,
-name=None, *, pre_launch=None, post_launch=None)` uses the same output checks
+name=None, *, ranks=1, pre_launch=None, post_launch=None)` uses the same output checks
 and asynchronous runner. It returns a local job ID, preserves literal executable
 arguments, and supports Bash pre/post hooks. Pre-launch failure stops the job;
 post-launch runs only after the executable succeeds. Failure in any stage marks
-the job failed. Both entry points support local cancellation.
+the job failed. With `local_mpi_launcher` configured, it invokes that executable
+with `-n ranks` before the application command. Without a launcher, ranks must
+equal one. Ranks must always be positive integers. `api.executeJob("local", ...)`
+forwards `nodes * ranks_per_node` as this total; it does not allocate nodes or
+enforce placement. Both entry points support local cancellation.

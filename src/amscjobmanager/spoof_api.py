@@ -30,11 +30,16 @@ def setupWorkflowAgentFromConfig(config) -> dict:
         config.sandbox_directories,
         config.globus_personal_endpoint,
         iri_config_cache_directory=config.iri_config_cache_directory,
+        local_mpi_launcher=config.local_mpi_launcher,
     )
 
 def setupWorkflowAgent(iri_implementations: dict, iriapi_transfer_key_path: str,
                        work_dir: dict, globus_personal_endpoint_config=None,
-                       iri_config_cache_directory: str | None = None):
+                       iri_config_cache_directory: str | None = None,
+                       local_mpi_launcher: str | None = None):
+    from .local_api import configureMPILauncher
+
+    configureMPILauncher(local_mpi_launcher)
     for directories in work_dir.values():
         for directory in ([directories] if isinstance(directories, str) else directories):
             if "~" in str(directory):

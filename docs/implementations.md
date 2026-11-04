@@ -76,8 +76,13 @@ Select IRI, configure a `local` sandbox, and construct a compute action with
 `machine="local"`. Executable actions use `local_api.executeJob()` and batch
 script actions use `local_api.executeJobScript()`. Both share a background
 runner that starts a Bash process and manages status, logs, and cancellation.
-There is no local batch scheduler: nodes, ranks, GPUs, account, queue, and time
-do not allocate or limit local resources.
+There is no local batch scheduler. Local executable jobs use
+`nodes * ranks_per_node` as their total rank count. With `local_mpi_launcher`
+configured, execution uses `launcher -n RANKS executable arguments...`;
+otherwise only one rank is accepted and execution is direct. All processes
+run locally; node placement, GPU allocation, account, queue, and time are not
+enforced as scheduler resource limits. Arbitrary batch scripts control their
+own launcher commands.
 
 Before starting the worker, the runner checks the run directory and resolved
 wrapper/log destinations against local sandboxes and `/tmp`, unless explicitly
@@ -85,7 +90,8 @@ overridden with `allow_unsafe=True`. It writes `exec_wrap.sh` into the run direc
 `run.<remote-job-id>.log`. Give simultaneous local jobs distinct run directories
 because the wrapper filename is shared within a directory. A local executable
 action runs its pre-launch commands, executable, and post-launch commands in
-sequence; it does not add MPI launch behavior. Pre-launch exports and directory
+sequence, adding the configured MPI launcher around the executable only.
+Pre-launch exports and directory
 changes carry into execution. A failing pre-launch skips execution and
 post-launch. Post-launch runs in a subshell only after successful execution;
 failure in any stage stops the job and marks it failed.

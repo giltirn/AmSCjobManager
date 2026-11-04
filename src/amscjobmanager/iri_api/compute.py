@@ -95,13 +95,19 @@ def executeJob(machine: str, executable: str, arguments: List[str], nodes: int, 
     runs ``executable``.  ALCF runs ``pre_launch`` on the head node, then uses
     a shared-filesystem barrier to run ``post_launch`` on MPI rank zero after
     every rank has completed the executable.
+    For machine='local', nodes * ranks_per_node sets the total local rank
+    count. A configured local MPI launcher is required for more than one rank;
+    nodes does not allocate additional machines or control rank placement.
     """
     if "~" in job_run_dir or "~" in executable:
         raise ValueError("Paths containing '~' are not supported; use an explicit path")
     machine = machine.lower()
     if machine == "local":
+        if type(nodes) is not int or nodes < 1 or type(ranks_per_node) is not int or ranks_per_node < 1:
+            raise ValueError("Local nodes and ranks_per_node must be positive integers")
         return local_api.executeJob(
             executable, arguments, job_run_dir, allow_unsafe=allow_unsafe, name=name,
+            ranks=nodes * ranks_per_node,
             pre_launch=pre_launch, post_launch=post_launch,
         )
 

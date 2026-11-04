@@ -11,6 +11,27 @@ import threading
 import signal
 import time
 
+_mpi_launcher: str | None = None
+
+
+def configureMPILauncher(launcher: str | None) -> None:
+    """Set the local MPI launcher executable, or disable MPI with None.
+
+    launcher is a command name or path, without embedded command-line options.
+    Reject blank names and '~'. Availability is checked by the execution shell
+    after pre-launch, allowing hooks to configure PATH. Return None; configuring
+    another agent replaces the setting for subsequent submissions.
+    """
+    if launcher is not None:
+        if not isinstance(launcher, str) or not launcher.strip():
+            raise ValueError("Local MPI launcher must be a nonempty executable name or None")
+        if "~" in launcher:
+            raise ValueError("Paths containing '~' are not supported; use an explicit path")
+        launcher = launcher.strip()
+    global _mpi_launcher
+    _mpi_launcher = launcher
+
+
 def localUsername() -> str:
     """Return the local operating-system username by executing whoami.
 
@@ -313,6 +334,7 @@ def executeJob(
     allow_unsafe=False,
     name: str | None = None,
     *,
+    ranks: int = 1,
     pre_launch: str | None = None,
     post_launch: str | None = None,
 ) -> str:
@@ -328,11 +350,23 @@ def executeJob(
     and directory changes. A nonzero final pre-launch status stops the job.
     post_launch runs in a subshell only if pre-launch and the executable both
     succeed. A nonzero status from any stage stops execution and marks the job
-    failed. Execution is asynchronous, uses
-    one local process rather than MPI, and supports cancelJob.
+    failed. ranks must be a positive integer. With a configured MPI launcher,
+    execute launcher -n ranks executable arguments, even for one rank. Without
+    a launcher, only ranks=1 is supported and execution is direct. The launcher
+    and literal argument list are fixed at submission; executable lookup uses
+    the environment after pre-launch. Execution is asynchronous and supports
+    cancelJob for the launcher and its local process group.
     """
     if "~" in executable:
         raise ValueError("Paths containing '~' are not supported; use an explicit path")
+    if type(ranks) is not int or ranks < 1:
+        raise ValueError("Local ranks must be a positive integer")
+    command = [executable, *arguments]
+    if _mpi_launcher is None:
+        if ranks != 1:
+            raise ValueError("Multiple local ranks require local_mpi_launcher in the manager configuration")
+    else:
+        command = [_mpi_launcher, "-n", str(ranks), *command]
 
     # Preserve hook environment changes while keeping executable arguments literal.
     script_body = f"""#!/bin/bash
@@ -343,7 +377,7 @@ if (( amsc_pre_status != 0 )); then
 fi
 
 # Stop before postprocessing if the executable fails.
-{shlex.join([executable, *arguments])} || exit $?
+{shlex.join(command)} || exit $?
 
 (
 {post_launch or ':'}

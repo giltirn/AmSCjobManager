@@ -21,6 +21,7 @@ class IRIPublicAPITests(unittest.TestCase):
                 "staging_directory_globus": "/globus/staging",
             },
             iri_config_cache_directory="/config/cache",
+            local_mpi_launcher="mpiexec",
         )
         for module in (state, spoof_api):
             with self.subTest(module=module.__name__), patch.object(module, "setupWorkflowAgent", return_value=config.sandbox_directories) as setup:
@@ -29,6 +30,7 @@ class IRIPublicAPITests(unittest.TestCase):
                     config.iri_implementations, config.transferapi_key_path,
                     config.sandbox_directories, config.globus_personal_endpoint,
                     iri_config_cache_directory=config.iri_config_cache_directory,
+                    local_mpi_launcher=config.local_mpi_launcher,
                 )
         self.assertIs(iri_api.setupWorkflowAgentFromConfig, state.setupWorkflowAgentFromConfig)
 

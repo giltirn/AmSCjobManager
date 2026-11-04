@@ -44,6 +44,10 @@ if globals.api_impl in ("SPOOF", "IRI"):
 
 
     class ManagerConfig(BaseModel):
+        local_mpi_launcher: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, pattern=r"^[^~]*$")] | None = Field(
+            None,
+            description="Optional local MPI launcher executable (e.g. mpiexec); null permits only single-rank local execution",
+        )
         iri_config_cache_directory: ExplicitPath | None = Field(
             None,
             description="Directory for discovered IRI implementation configuration; required when discovery is used",

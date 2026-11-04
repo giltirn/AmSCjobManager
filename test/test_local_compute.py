@@ -195,7 +195,8 @@ raise SystemExit(0 if all(status == 0 for status in statuses) else 1)
             for ranks in (2, 0, -1, 1.5, True, "2"):
                 with self.subTest(ranks=ranks), self.assertRaises(ValueError):
                     local_api.executeJob("true", [], str(self.directory), ranks=ranks)
-            for nodes, ranks_per_node in ((0, 1), (1, 0), (True, 1), (1, 1.5)):
+            local_api.configureMPILauncher(str(self.launcher))
+            for nodes, ranks_per_node in ((0, 1), (2, 1), (2, 4), (1, 0), (True, 1), (1.0, 1), (1, 1.5)):
                 with self.subTest(nodes=nodes, ranks_per_node=ranks_per_node), self.assertRaises(ValueError):
                     api.executeJob("local", "true", [], nodes, ranks_per_node, 0, "60", "unused", "unused", str(self.directory))
             start.assert_not_called()
@@ -276,7 +277,7 @@ raise SystemExit(0 if all(status == 0 for status in statuses) else 1)
         with patch.object(local_api, "executeJob", return_value="local-id") as submit, \
              patch.object(local_api, "executeJobScript") as script:
             result = api.executeJob(
-                "LOCAL", "/bin/echo", ["a b"], nodes=2, ranks_per_node=4,
+                "LOCAL", "/bin/echo", ["a b"], nodes=1, ranks_per_node=4,
                 gpus_per_rank=0, time="60", queue="debug", account="test",
                 job_run_dir=str(self.directory), allow_unsafe=True, name="job-name",
                 pre_launch="echo pre", post_launch="echo post",
@@ -285,7 +286,7 @@ raise SystemExit(0 if all(status == 0 for status in statuses) else 1)
             submit.assert_called_once_with(
                 "/bin/echo", ["a b"], str(self.directory), allow_unsafe=True,
                 name="job-name", pre_launch="echo pre", post_launch="echo post",
-                ranks=8,
+                ranks=4,
             )
             script.assert_not_called()
 

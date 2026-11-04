@@ -65,7 +65,8 @@ To enable local MPI, add `"local_mpi_launcher": "mpiexec"` at the top level.
 This value is one executable name/path, without command-line options; spaces
 are treated literally, and `~` is rejected. Local executable jobs invoke
 `launcher -n RANKS executable arguments...`, where `RANKS` is
-`nodes * ranks_per_node`. Even one rank uses the launcher when configured.
+`ranks_per_node`. Local execution requires `nodes=1`. Even one rank uses the
+launcher when configured.
 Launcher lookup happens after pre-launch, allowing environment/module setup
 there. MPI must be installed separately. Omit the setting or use `null` to
 disable it; a new agent setup replaces the previous launcher setting.

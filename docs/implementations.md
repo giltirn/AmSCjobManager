@@ -77,7 +77,7 @@ Select IRI, configure a `local` sandbox, and construct a compute action with
 script actions use `local_api.executeJobScript()`. Both share a background
 runner that starts a Bash process and manages status, logs, and cancellation.
 There is no local batch scheduler. Local executable jobs use
-`nodes * ranks_per_node` as their total rank count. With `local_mpi_launcher`
+`ranks_per_node` as their total rank count and require `nodes=1`. With `local_mpi_launcher`
 configured, execution uses `launcher -n RANKS executable arguments...`;
 otherwise only one rank is accepted and execution is direct. All processes
 run locally; node placement, GPU allocation, account, queue, and time are not

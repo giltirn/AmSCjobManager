@@ -203,5 +203,5 @@ post-launch runs only after the executable succeeds. Failure in any stage marks
 the job failed. With `local_mpi_launcher` configured, it invokes that executable
 with `-n ranks` before the application command. Without a launcher, ranks must
 equal one. Ranks must always be positive integers. `api.executeJob("local", ...)`
-forwards `nodes * ranks_per_node` as this total; it does not allocate nodes or
-enforce placement. Both entry points support local cancellation.
+requires `nodes=1` and forwards `ranks_per_node` as this total. Both entry points
+support local cancellation.

@@ -180,7 +180,7 @@ class SpoofWorkflowTests(unittest.TestCase):
 
     def test_canceled_queued_workflow_is_retained_and_never_starts(self):
         job_id = self.job_data.enqueueJob(self._compute_action("queued"))
-        self.job_data.removeJob(job_id)
+        self.job_data.cancelJob(job_id)
 
         self.assertEqual(self.job_data.jobStatus(job_id), ActionStatus.CANCELED)
         self.job_data.startWorkflows([job_id])
@@ -195,7 +195,7 @@ class SpoofWorkflowTests(unittest.TestCase):
         self.job_data.startWorkflows([job_id])
         action_id = self.job_data.jobState(job_id)["head_action_id"]
 
-        self.job_data.removeJob(job_id)
+        self.job_data.cancelJob(job_id)
         self.assertEqual(self.job_data.jobStatus(job_id), ActionStatus.CANCELED)
         self.assertEqual(
             self.job_data.action_man[ActionClass.COMPUTE].queryStatus(

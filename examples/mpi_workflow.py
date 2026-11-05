@@ -172,18 +172,28 @@ def main(argv=None) -> int:
         manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
         print(f"Workflow {job_id}: expecting {expected_ranks} MPI ranks", flush=True)
         # Keep this program alive while the background manager handles queueing,
-        # execution, and polling. Report state changes until the workflow ends.
+        # execution, and polling. Force a refresh on our own timer so queued
+        # jobs can be distinguished from running jobs, even without a change.
         manager.start()
         previous = None
+        next_poll = time.monotonic()
         while True:
             if not manager.isAlive():
                 raise RuntimeError("JobManager stopped before the workflow completed")
             with manager as jobs:
+                force_poll = time.monotonic() >= next_poll
+                action_status, api_status = jobs.headActionStatus(
+                    job_id, force_poll=force_poll, return_api_status=True
+                )
+                if force_poll:
+                    next_poll = time.monotonic() + args.poll_interval
                 status = jobs.jobStatus(job_id)
                 state = jobs.jobState(job_id)
-            summary = (status.name, state["workflow_stage"], state["head_action_type"])
-            if summary != previous:
-                print(f"Workflow {job_id}: {summary}", flush=True)
+            summary = (status.name, action_status.name, api_status, state["workflow_stage"], state["head_action_type"])
+            if force_poll or summary != previous:
+                print(f"Workflow {job_id}: workflow_status={status.name}, "
+                      f"action_status={action_status.name}, api_status={api_status!r}, "
+                      f"stage={state['workflow_stage']}, action={state['head_action_type']}", flush=True)
                 previous = summary
             if status == ActionStatus.COMPLETED:
                 break
@@ -196,7 +206,7 @@ def main(argv=None) -> int:
         if job_id is not None and status not in (ActionStatus.COMPLETED, ActionStatus.FAILED, ActionStatus.CANCELED):
             try:
                 with manager as jobs:
-                    jobs.removeJob(job_id)
+                    jobs.cancelJob(job_id)
             except Exception as error:
                 print(f"Cancellation could not be confirmed: {error}; inspect workflow.sqlite before resubmitting", flush=True)
         raise

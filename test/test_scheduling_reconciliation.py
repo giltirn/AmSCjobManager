@@ -116,6 +116,38 @@ class HarnessGlobusDataTransfers(GlobusDataTransfers):
 
 
 class SchedulingReconciliationTests(unittest.TestCase):
+    def test_head_action_status_forced_poll_updates_both_records_once(self):
+        """Forced status reads refresh the head and provider state without progressing steps."""
+        job_data = self._new_job_data()
+        self.addCleanup(job_data.conn.close)
+        job_id = job_data.enqueueJob([HarnessGlobusTransfer(), HarnessGlobusTransfer()])
+        self.assertEqual(job_data.headActionStatus(job_id, return_api_status=True),
+                         (ActionStatus.PENDING, None))
+        job_data.startWorkflows([job_id])
+        self.harness.status_by_api_key['transfer-1'] = 'SUCCEEDED'
+        with patch.object(self.harness, 'status', wraps=self.harness.status) as poll:
+            self.assertEqual(job_data.headActionStatus(job_id, return_api_status=True),
+                             (ActionStatus.ACTIVE, 'ACTIVE'))
+            poll.assert_not_called()
+            self.assertEqual(job_data.headActionStatus(job_id, force_poll=True, return_api_status=True),
+                             (ActionStatus.COMPLETED, 'SUCCEEDED'))
+            poll.assert_called_once_with('transfer-1')
+        self.assertEqual(job_data.jobState(job_id)['head_action_status'], ActionStatus.COMPLETED)
+        self.assertEqual(job_data.jobStatus(job_id), ActionStatus.ACTIVE)
+        self.assertEqual(self.harness.submission_count, 1)
+
+    def test_head_action_status_failed_poll_returns_cached_state(self):
+        """A forced poll outage is benign and retains both recorded statuses."""
+        job_data = self._new_job_data()
+        self.addCleanup(job_data.conn.close)
+        job_id = job_data.enqueueJob(HarnessGlobusTransfer())
+        job_data.startWorkflows([job_id])
+        self.harness.failed_status_lookup_count = 1
+        self.assertEqual(job_data.headActionStatus(job_id, force_poll=True, return_api_status=True),
+                         (ActionStatus.ACTIVE, 'ACTIVE'))
+        self.assertEqual(job_data.headActionStatus(job_id), ActionStatus.ACTIVE)
+        self.assertTrue(any('simulated remote status lookup failure' in line for line in self.logs))
+
     def setUp(self):
         self.logs = []
         log_output = patch("amscjobmanager.logging.wfman_log_func", side_effect=self.logs.append)
@@ -563,7 +595,7 @@ class SchedulingReconciliationTests(unittest.TestCase):
         job_data._test_crash_at = "job_head_canceling_persisted"
 
         with self.assertRaises(SimulatedCrash):
-            job_data.removeJob(job_id)
+            job_data.cancelJob(job_id)
         self.assertEqual(job_data.jobStatus(job_id), ActionStatus.CANCELING)
         self.assertEqual(self.harness.cancellation_count, 0)
         job_data.conn.close()
@@ -584,7 +616,7 @@ class SchedulingReconciliationTests(unittest.TestCase):
         )
 
         with self.assertRaises(SimulatedCrash):
-            job_data.removeJob(job_id)
+            job_data.cancelJob(job_id)
         self._assert_persisted_states(
             job_data, job_id, ActionStatus.CANCELING, ActionStatus.CANCELING
         )
@@ -633,7 +665,7 @@ class SchedulingReconciliationTests(unittest.TestCase):
         )
 
         with self.assertRaises(SimulatedCrash):
-            job_data.removeJob(job_id)
+            job_data.cancelJob(job_id)
         self._assert_persisted_states(
             job_data, job_id, ActionStatus.CANCELING, ActionStatus.CANCELING
         )
@@ -654,7 +686,7 @@ class SchedulingReconciliationTests(unittest.TestCase):
         job_data._test_crash_at = "action_canceled_before_job_head_update"
 
         with self.assertRaises(SimulatedCrash):
-            job_data.removeJob(job_id)
+            job_data.cancelJob(job_id)
         self._assert_persisted_states(
             job_data, job_id, ActionStatus.CANCELING, ActionStatus.CANCELED
         )
@@ -675,7 +707,7 @@ class SchedulingReconciliationTests(unittest.TestCase):
         self.harness.failed_cancellation_count = 1
 
         with self.assertRaisesRegex(RuntimeError, "remote cancellation failure"):
-            job_data.removeJob(job_id)
+            job_data.cancelJob(job_id)
         self._assert_persisted_states(
             job_data, job_id, ActionStatus.CANCELING, ActionStatus.CANCELING
         )
@@ -694,7 +726,7 @@ class SchedulingReconciliationTests(unittest.TestCase):
         self.harness.failed_status_lookup_count = 1
 
         with self.assertRaisesRegex(RuntimeError, "status lookup failure"):
-            job_data.removeJob(job_id)
+            job_data.cancelJob(job_id)
         self._assert_persisted_states(
             job_data, job_id, ActionStatus.CANCELING, ActionStatus.CANCELING
         )
@@ -711,7 +743,7 @@ class SchedulingReconciliationTests(unittest.TestCase):
         job_id = self._crash_while_starting("job_head_scheduling_persisted")
         job_data = self._new_job_data()
 
-        job_data.removeJob(job_id)
+        job_data.cancelJob(job_id)
 
         self.assertEqual(job_data.jobStatus(job_id), ActionStatus.CANCELED)
         self.assertEqual(self.harness.submission_count, 0)
@@ -722,7 +754,7 @@ class SchedulingReconciliationTests(unittest.TestCase):
         job_id = self._crash_while_starting("remote_submission_completed")
         job_data = self._new_job_data()
 
-        job_data.removeJob(job_id)
+        job_data.cancelJob(job_id)
 
         self.assertEqual(job_data.jobStatus(job_id), ActionStatus.CANCELED)
         self.assertEqual(self.harness.submission_count, 1)
@@ -735,7 +767,7 @@ class SchedulingReconciliationTests(unittest.TestCase):
         self.harness.hidden_remote_lookup_count = 1
         job_data = self._new_job_data(scheduling_retry_delay=60)
 
-        job_data.removeJob(job_id)
+        job_data.cancelJob(job_id)
         self._assert_persisted_states(
             job_data, job_id, ActionStatus.CANCELING, ActionStatus.CANCELING
         )
@@ -754,7 +786,7 @@ class SchedulingReconciliationTests(unittest.TestCase):
         job_id = self._crash_while_starting("before_remote_submission")
         job_data = self._new_job_data(scheduling_retry_delay=60)
 
-        job_data.removeJob(job_id)
+        job_data.cancelJob(job_id)
         self._assert_persisted_states(
             job_data, job_id, ActionStatus.CANCELING, ActionStatus.CANCELING
         )

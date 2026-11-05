@@ -268,7 +268,7 @@ class LocalCancellationTests(unittest.TestCase):
             # A failed signal preserves both cancellation intents and the handle.
             with patch.object(local_api.os, "killpg", side_effect=PermissionError("denied")):
                 with self.assertRaises(PermissionError):
-                    jobs.removeJob(workflow_id)
+                    jobs.cancelJob(workflow_id)
             self.assertEqual(jobs.jobState(workflow_id)["head_action_status"], ActionStatus.CANCELING)
             self.assertEqual(jobs.conn.execute("SELECT action_status FROM computes").fetchone()[0], "CANCELING")
             self.assertEqual(local_api.getJobState(jobid), "active")

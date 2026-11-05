@@ -104,11 +104,21 @@ the workflow has finished all steps and its head class is `NONE`; otherwise it
 returns `ACTIVE`. In particular, a head in `SCHEDULING` is reported as an active
 workflow. Inspect `head_action_status` for that distinction.
 
+Use `headActionStatus(job_id)` for the recorded head action status, including
+`SCHEDULING` and intermediate `COMPLETED`. With `return_api_status=True` it
+returns `(action_status, api_status)`, where the latter is the provider status
+string or `None` when unavailable. Set `force_poll=True` to refresh all active
+heads and propagate their statuses into the workflow records without advancing
+workflow steps. Poll failures are logged and return the last known state.
+Call under the `JobManager` lock while its background thread is running.
+Compute `ACTIVE` includes provider states `new`, `queued`, and `active`;
+only the provider status distinguishes waiting from execution.
+
 Remote compute status `canceled` maps to `CANCELED`. Globus status `FAILED`
 includes remotely canceled transfers, so an external Globus cancellation is
 seen as `FAILED`. Globus `INACTIVE` currently also maps to `FAILED`, even though
 the suspended remote task may still exist. A workflow canceled through
-`removeJob()` retains a `CANCELED` workflow head.
+`cancelJob()` retains a `CANCELED` workflow head.
 
 ## Submission failures and maintenance
 
@@ -140,7 +150,7 @@ workflow; it is not automatically resubmitted.
 
 ```python
 with manager as jobs:
-    jobs.removeJob(job_id)  # cancel_running=True by default
+    jobs.cancelJob(job_id)  # cancel_running=True by default
 ```
 
 The workflow record remains in the database. For a live compute/transfer action,
@@ -154,7 +164,7 @@ work. If indexing may lag, reconciliation waits for the submission backoff
 interval before accepting that no task was found. If a remote task is already
 terminal, reconciliation avoids another cancel request.
 
-`removeJob(job_id, cancel_running=False)` stops workflow progression by marking
+`cancelJob(job_id, cancel_running=False)` stops workflow progression by marking
 its head `CANCELED` without canceling running remote work. Use that option only
 when another owner will manage the remote task. Canceling a workflow does not
 delete prior action records, remove files, or undo completed operations.

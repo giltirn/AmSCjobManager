@@ -88,7 +88,7 @@ class JobData:
             job_id = cur.lastrowid
             return job_id
 
-    def removeJob(self, job_id: int, cancel_running: bool = True) -> None:
+    def cancelJob(self, job_id: int, cancel_running: bool = True) -> None:
         """Mark a workflow canceled and optionally cancel its remote action.
 
         ``job_id`` identifies the workflow. With the default
@@ -209,6 +209,38 @@ class JobData:
             row['head_action_status'] = ActionStatus[row['head_action_status']]
             row['head_action_class'] = ActionClass[row['head_action_class']]
             return row
+
+    def headActionStatus(self, job_id, *, force_poll=False, return_api_status=False):
+        """Return the head action's ActionStatus, optionally with its API status.
+
+        job_id identifies a workflow. If force_poll is True, poll all ACTIVE
+        workflow heads immediately and propagate their statuses to the workflow
+        database. This does not submit actions or advance workflow steps.
+        Poll failures are logged and leave the last known status in place.
+
+        By default return the recorded head ActionStatus, including SCHEDULING
+        and intermediate COMPLETED states. If return_api_status is True, return
+        (action_status, api_status), where api_status is the provider's status
+        string (for example 'queued'), or None before a remote status is known
+        or when no head action exists. This is not the full API response body.
+        Use jobStatus to distinguish intermediate completion from a finished
+        workflow. Access through JobManager's lock while its thread is running.
+        """
+        state = self.jobState(job_id)
+        if force_poll:
+            self.progressActiveActions(force_poll=True)
+            state = self.jobState(job_id)
+        action_status = state['head_action_status']
+        if not return_api_status:
+            return action_status
+
+        api_status = None
+        if state['head_action_class'] != ActionClass.NONE and state['head_action_id'] is not None:
+            # Read the cached provider status without causing a second poll.
+            _, api_status = self.action_man[state['head_action_class']].queryStatus(
+                state['head_action_id'], update_freq=float('inf')
+            )
+        return action_status, api_status
 
     def jobStatus(self, job_id)->ActionStatus:
         """Return the status of the workflow"""

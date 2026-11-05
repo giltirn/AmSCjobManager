@@ -35,7 +35,7 @@ the library does not expand paths using the manager host's username.
 | `JobData.enqueueJob(workflow, job_group=None)` | Accepts one action or a nonempty list; returns the integer workflow ID. |
 | `JobData.jobStatus(job_id)` | Returns a coarse `ActionStatus`; scheduling/intermediate completion appear as `ACTIVE`. |
 | `JobData.jobState(job_id)` | Returns a state dictionary with enum-valued head status/class and serialized workflow. |
-| `JobData.removeJob(job_id, cancel_running=True)` | Marks cancellation while retaining records; optionally cancels current remote work. Returns `None`; may raise while leaving `CANCELING`. |
+| `JobData.cancelJob(job_id, cancel_running=True)` | Marks cancellation while retaining records; optionally cancels current remote work. Returns `None`; may raise while leaving `CANCELING`. |
 | `JobData.getActiveActions(action_class)` | Returns a list of info dictionaries for active actions of `ActionClass.COMPUTE` or `TRANSFER`. Entries include workflow ID, remote `api_key`, and raw `api_status`. |
 | `JobData.countWorkflowsWithStatus(statuses)` | Accepts one `ActionStatus` or a list; counts matching head statuses with a non-`NONE` head class. Fully completed workflows are excluded. |
 | `JobData.startWorkflows(job_ids=None)` | Reconciles submissions, then starts selected eligible workflows or fills automatic slots. |

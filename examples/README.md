@@ -98,7 +98,11 @@ Rerunning creates a new workflow. The saved database is available for inspection
 and manual recovery. On interruption, the example requests
 cancellation of unfinished work and reports when cancellation cannot be
 confirmed. There is no workflow timeout, so waiting in a remote queue does not
-cancel the run. `--poll-interval` defaults to 20 seconds. `--time` still sets
+cancel the run. `--poll-interval` defaults to 20 seconds. The example forces an
+API status refresh on this timer and prints both the head action status and
+the provider's status, even when unchanged. `ACTIVE` includes queued jobs;
+the provider status distinguishes queueing from execution. Failed polls log
+the error and retain the last known statuses. `--time` still sets
 the requested remote job walltime after allocation.
 
 ## Build profiles and new machines

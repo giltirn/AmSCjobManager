@@ -29,6 +29,8 @@ import tempfile
 from pathlib import Path, PurePosixPath
 from urllib.parse import quote, urljoin, urlsplit, urlunsplit
 
+from ..logging import wfapiLog
+
 from .config import IRI_IMPLEMENTATIONS, registerImplementation
 from .configuration_models import DiscoveredImplementation, ImplementationCache
 
@@ -156,15 +158,15 @@ def _mount_path_root(mount_path: str) -> str:
                     return inferred
                 if answer in {"n", "no"}:
                     break
-                print("Please answer yes or no.")
+                wfapiLog("Please answer yes or no.")
         else:
-            print(f"Could not infer a filesystem root from mount path {mount_path!r}.")
+            wfapiLog(f"Could not infer a filesystem root from mount path {mount_path!r}.")
         while True:
             supplied = input(f"Filesystem root for mount path {mount_path!r}: ").strip()
             path = PurePosixPath(supplied)
             if path.is_absolute() and ".." not in path.parts and "{" not in supplied and "}" not in supplied and "~" not in supplied:
                 return str(path)
-            print("Please provide an absolute POSIX root without placeholders, '~', or '..'.")
+            wfapiLog("Please provide an absolute POSIX root without placeholders, '~', or '..'.")
     except EOFError as exc:
         raise ValueError(
             f"Discovering mount path {mount_path!r} requires interactive root confirmation; "
@@ -259,14 +261,14 @@ def _machine_name(implementation: str, resource: dict) -> str:
                     return suggested
                 if answer in {"n", "no"}:
                     break
-                print("Please answer yes or no.")
+                wfapiLog("Please answer yes or no.")
         else:
-            print(f"Could not derive a valid machine name from compute resource {label!r}.")
+            wfapiLog(f"Could not derive a valid machine name from compute resource {label!r}.")
         while True:
             supplied = input(f"Machine name for compute resource {label!r} ({resource['id']}): ").strip()
             if supplied != "local" and re.fullmatch(r"[a-z0-9][a-z0-9_-]*", supplied):
                 return supplied
-            print("Use lowercase letters, digits, underscores or hyphens, starting with a letter or digit; 'local' is reserved.")
+            wfapiLog("Use lowercase letters, digits, underscores or hyphens, starting with a letter or digit; 'local' is reserved.")
     except EOFError as exc:
         raise ValueError(
             f"Discovering compute resource {label!r} requires interactive machine-name confirmation; "

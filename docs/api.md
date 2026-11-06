@@ -34,7 +34,9 @@ the library does not expand paths using the manager host's username.
 | `manager.stop(wait_until_done=True, *, close_database=False)` | Waits according to its arguments, requests shutdown, and joins the thread. |
 | `JobData.enqueueJob(workflow, job_group=None)` | Accepts one action or a nonempty list; returns the integer workflow ID. |
 | `JobData.jobStatus(job_id)` | Returns a coarse `ActionStatus`; scheduling/intermediate completion appear as `ACTIVE`. |
+| `JobData.headActionStatus(job_id, force_poll=False, return_api_status=False)` | Returns the head `ActionStatus`, optionally paired with its provider status string; forced polling refreshes all active heads. Options are keyword-only. |
 | `JobData.jobState(job_id)` | Returns a state dictionary with enum-valued head status/class and serialized workflow. |
+| `JobData.listWorkflows(job_id=None, statuses=None)` | Lists state dictionaries in ID order, optionally filtering by ID and overall `ActionStatus` value(s). Includes terminal workflows; an explicit unknown ID raises `ValueError`. Does not poll. |
 | `JobData.cancelJob(job_id, cancel_running=True)` | Marks cancellation while retaining records; optionally cancels current remote work. Returns `None`; may raise while leaving `CANCELING`. |
 | `JobData.getActiveActions(action_class)` | Returns a list of info dictionaries for active actions of `ActionClass.COMPUTE` or `TRANSFER`. Entries include workflow ID, remote `api_key`, and raw `api_status`. |
 | `JobData.countWorkflowsWithStatus(statuses)` | Accepts one `ActionStatus` or a list; counts matching head statuses with a non-`NONE` head class. Fully completed workflows are excluded. |

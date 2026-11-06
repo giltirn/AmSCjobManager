@@ -60,6 +60,9 @@ importing the library. It demonstrates staging, a transfer → compute → trans
 workflow, monitoring, and shutdown without credentials or remote execution.
 Its remote filesystem responses and downloaded results are simulated.
 
+For read-only workflow monitoring from MCP or a traditional/JSON command-line client, see
+the optional [MCP server prototype](docs/server.md).
+
 For a real calculation, see the [MPI workflow example](examples/README.md).
 It uploads C++ source, compiles in pre-launch, runs MPI under `JobManager`,
 then downloads and verifies the result on local or configured IRI machines.

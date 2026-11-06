@@ -6,13 +6,11 @@ from .logging import wfapiLog
 
 if globals.api_impl == "IRI":
     #Pure IRI
-    print("Using IRI API")
     from .iri_api import setupWorkflowAgentFromConfig
     from .iri_api import getUsername
     from .iri_api import pathStat, downloadFileContents
     from .iri_api import setupWorkflowAgent, remoteLs, remoteMkdir, uploadBytes, uploadFileGlobus, executeJob, executeBatchJobCompat, remoteChmod, getJobState, findJobByName, cancelJob, cancelGlobusTransfer, queryMachineStatus, globusTransferStatus, findGlobusTransferByLabel, findGlobusTransfersByLabel, getUserAccountProjects, getProjectAllocation, getKnownMachines, getMachineQueues, downloadFile, downloadFileGlobus, listSpecialGlobusEndpoints, globusCopy, pathType
 elif globals.api_impl == "SPOOF":
-    print("Using Spoof API")
     from .spoof_api import setupWorkflowAgentFromConfig
     from .spoof_api import getUsername
     from .spoof_api import remoteLs, remoteChmod, pathStat, pathType, downloadFileContents
@@ -99,9 +97,9 @@ def watchJobStatus(machine, jobid, howlong=300, poll_freq=10):
     t0=int(time.time())
     while( int(time.time()) - t0 < howlong  ):
         state = getJobState(machine, jobid)
-        print(state)
+        wfapiLog(state)
         if state not in ("new", "queued", "active"):
-            print("Detected job completion")
+            wfapiLog("Detected job completion")
             break    
         time.sleep(poll_freq)
         

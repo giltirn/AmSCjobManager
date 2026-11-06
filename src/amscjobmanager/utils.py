@@ -1,6 +1,6 @@
 #Default user comms methods
 def cmdlinePrint(*args, **kwargs):
-    print(*args, *kwargs)
+    print(*args, **kwargs)
 def cmdlineInput(query):
     return input(query + " : ").strip()
 

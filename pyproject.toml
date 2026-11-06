@@ -13,6 +13,9 @@ dependencies = [
   "asteval"
 ]
 
+[project.optional-dependencies]
+server = ["mcp>=2.3,<3"]
+
 [tool.setuptools]
 package-dir = {"" = "src"}
 

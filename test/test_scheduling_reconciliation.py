@@ -117,7 +117,16 @@ class HarnessGlobusDataTransfers(GlobusDataTransfers):
 
 class SchedulingReconciliationTests(unittest.TestCase):
     def test_head_action_status_forced_poll_updates_both_records_once(self):
-        """Forced status reads refresh the head and provider state without progressing steps."""
+        """Refresh action/workflow records once without starting the next step.
+
+        Use the real JobData and action manager with a fake remote transfer
+        service. Start the first of two steps, then mark it successful remotely.
+        A cached read must not poll; a forced read must poll exactly once and
+        expose COMPLETED/SUCCEEDED in the local records. The workflow remains
+        ACTIVE because another step is outstanding. Listing by COMPLETED must
+        therefore exclude it, while listing by ACTIVE includes it. This guards
+        the overall-status filter used by MCP against intermediate completion.
+        """
         job_data = self._new_job_data()
         self.addCleanup(job_data.conn.close)
         job_id = job_data.enqueueJob([HarnessGlobusTransfer(), HarnessGlobusTransfer()])
@@ -135,9 +144,17 @@ class SchedulingReconciliationTests(unittest.TestCase):
         self.assertEqual(job_data.jobState(job_id)['head_action_status'], ActionStatus.COMPLETED)
         self.assertEqual(job_data.jobStatus(job_id), ActionStatus.ACTIVE)
         self.assertEqual(self.harness.submission_count, 1)
+        self.assertEqual(job_data.listWorkflows(statuses=ActionStatus.COMPLETED), [])
+        self.assertEqual([row['job_id'] for row in job_data.listWorkflows(statuses=ActionStatus.ACTIVE)], [job_id])
 
     def test_head_action_status_failed_poll_returns_cached_state(self):
-        """A forced poll outage is benign and retains both recorded statuses."""
+        """Return cached head/provider statuses when a forced remote poll fails.
+
+        Start a transfer through the fake service, then make its next status
+        lookup raise an exception. The public headActionStatus call must keep
+        returning ACTIVE/ACTIVE rather than propagate the error or fail the
+        workflow, and the log must include the simulated server failure reason.
+        """
         job_data = self._new_job_data()
         self.addCleanup(job_data.conn.close)
         job_id = job_data.enqueueJob(HarnessGlobusTransfer())

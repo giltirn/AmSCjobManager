@@ -89,6 +89,17 @@ availability, and confirm that simulated crashes are not swallowed as API errors
 
 ## Manual live checks
 
+The optional MCP prototype has a local subprocess integration test:
+`python -m unittest discover -s test -p test_mcp_server.py -v`.
+Install `.[server]` with `python -m pip install -e '.[server]'` first. No separate
+Uvicorn command is required: the test starts its own HTTP listener. It needs
+loopback socket access and runs a real local sleep job, canceled in cleanup.
+See [the server guide](server.md#test-locally) for environment setup and commands.
+`test_manager_failures.py` also injects failures into the real background worker
+to check lock release, logging, and shutdown with unfinished work. MCP tests
+verify unavailable-manager errors, continued tool discovery, and recovery after
+an explicit manager restart.
+
 Read each script before running it. These commands can authenticate, create
 remote files, or submit real jobs/transfers, and some intentionally leave
 artifacts for inspection. Supply a configuration with the necessary sandbox

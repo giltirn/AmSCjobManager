@@ -641,9 +641,9 @@ def globusCopy(dest_endpoint: str, dest_path: str,
     transfer_id = response["transfer_uuid"]
     if block_until_complete:
         while (status := globusTransferStatus(transfer_id)) == "ACTIVE":
-            print(".", end="")
+            wfapiLog(".", end="", flush=True)
             time.sleep(20)
-        print(status)
+        wfapiLog(status)
         if status != "SUCCEEDED":
             raise RuntimeError(f"Globus transfer {transfer_id} finished with status {status}")
     return transfer_id

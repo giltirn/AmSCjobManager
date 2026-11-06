@@ -183,7 +183,7 @@ def _create_globus_client(implementation: str, key_path: str) -> IRIComputeClien
     expires_at = auth_data.get("expires_at_seconds")
     if expires_at:
         ttl = int(expires_at - time.time())
-        print(f"\nAccess token valid for ~{max(ttl, 0)} seconds.")
+        wfapiLog(f"\nAccess token valid for ~{max(ttl, 0)} seconds.")
 
     wfapiLog(f"Saved {implementation} token data to {key_path}")
     wfapiLog(f"Granted scopes: {auth_data.get('scope', '')}")
@@ -234,7 +234,7 @@ def interactive_globus_transfer_login(
     data_access = [globus_sdk.scopes.GCSCollectionScopes(mc).data_access for mc in mapped_collections] #data access scope required for mapped collections
     transfer_scope = TransferScopes.all.with_dependencies(data_access)
     scope = scope.with_dependency(transfer_scope)
-    print(f"Logging in with scope: {scope}")
+    wfapiLog(f"Logging in with scope: {scope}")
 
     parameters = authorization_parameters or {}
     requested_scopes = [scope, transfer_scope, *parameters.get("required_scopes", [])]
@@ -339,7 +339,7 @@ def setupIRIapiGlobusTransfer(key_path, *, authorization_parameters: dict | None
     expires_at = auth_data.get("expires_at_seconds")
     if expires_at:
         ttl = int(expires_at - time.time())
-        print(f"\nAccess token valid for ~{max(ttl, 0)} seconds.")
+        wfapiLog(f"\nAccess token valid for ~{max(ttl, 0)} seconds.")
 
     wfapiLog(f"Saved token data to {key_path}")
     wfapiLog(f"Granted scopes: {auth_data.get('scope', '')}")

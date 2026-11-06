@@ -210,6 +210,64 @@ class JobData:
             row['head_action_class'] = ActionClass[row['head_action_class']]
             return row
 
+    def listWorkflows(self, job_id: int | None = None,
+                      statuses: ActionStatus | list[ActionStatus] | None = None) -> list[dict]:
+        """Return workflow state dictionaries, ordered by job ID.
+
+        Args:
+            job_id (int | None): Positive database workflow ID, not a list
+                index. None selects all recorded workflows, including terminal
+                records. An existing ID excluded by statuses returns no rows.
+            statuses (ActionStatus | list[ActionStatus] | None): Allowed overall
+                workflow statuses, as returned by jobStatus. List entries are
+                combined with OR and the ID/status filters with AND. None
+                permits all statuses; [] matches none. COMPLETED means every
+                step finished, not intermediate head-action completion.
+
+        Returns:
+            list[dict]: Matching jobState dictionaries in ascending job_id
+            order, or [] if nothing matches. The list positions are zero-based
+            and are independent of workflow/action IDs. Each dictionary has:
+                job_id (int): Positive workflow database key.
+                job_group (str | None): Group supplied when enqueuing.
+                workflow (bytes): Pickled list of action objects; not JSON.
+                workflow_stage (int): Zero-based action position, -1 before
+                    the first action, or the action count after full completion.
+                head_action_id (int | None): Positive action database key,
+                    independent of job_id; None when no action is assigned.
+                head_action_type (str | None): Action class name; 'NoneType'
+                    after normal workflow completion.
+                head_action_class (ActionClass): COMPUTE, TRANSFER, or NONE.
+                head_action_status (ActionStatus): Exact recorded head status,
+                    including SCHEDULING and intermediate COMPLETED.
+                last_status_change (int | None): Recorded Unix timestamp in
+                    whole seconds, not a guarantee of the last API poll time.
+
+        Raises:
+            ValueError: job_id is invalid or an explicit ID does not exist.
+            TypeError: statuses is not an ActionStatus or a list of them.
+
+        This reads recorded state without polling or progressing workflows.
+        Use the JobManager lock when its background thread is running.
+        """
+        if job_id is not None and (type(job_id) is not int or job_id < 1):
+            raise ValueError("job_id must be a positive integer")
+        if isinstance(statuses, ActionStatus):
+            statuses = [statuses]
+        elif statuses is not None and (
+            not isinstance(statuses, list) or any(not isinstance(status, ActionStatus) for status in statuses)
+        ):
+            raise TypeError("statuses must be an ActionStatus or a list of ActionStatus values")
+        with self.conn as conn:
+            if job_id is None:
+                rows = conn.execute("SELECT job_id FROM jobs ORDER BY job_id").fetchall()
+            else:
+                rows = conn.execute("SELECT job_id FROM jobs WHERE job_id = ?", (job_id,)).fetchall()
+                if not rows:
+                    raise ValueError(f"Workflow {job_id} does not exist")
+            return [self.jobState(row['job_id']) for row in rows
+                    if statuses is None or self.jobStatus(row['job_id']) in statuses]
+
     def headActionStatus(self, job_id, *, force_poll=False, return_api_status=False):
         """Return the head action's ActionStatus, optionally with its API status.
 

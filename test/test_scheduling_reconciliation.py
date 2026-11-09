@@ -13,6 +13,7 @@ from unittest.mock import patch
 
 from amscjobmanager.action_manager import ActionManager, ActionStatus, SimulatedCrash
 from amscjobmanager.async_action_manager import AsyncActionManager
+from amscjobmanager.api_action_manager import APIActions
 from amscjobmanager.actions_base import TransferActionBase
 from amscjobmanager.globus_transfer_action import GlobusDataTransfers
 from amscjobmanager.job_data import JobData
@@ -146,9 +147,9 @@ class SchedulingReconciliationTests(unittest.TestCase):
     def test_action_manager_interface_requires_an_implementation(self):
         """The interface cannot be instantiated; registered managers implement it.
 
-        Construct the real compute manager and the transfer harness through
-        JobData to verify both retain the asynchronous implementation behind
-        the common interface, with independent empty action records.
+        Construct all registered managers through JobData. Compute and transfer
+        managers retain the asynchronous implementation, while APIActions owns
+        its separate implementation behind the same interface. All start empty.
         """
         with self.assertRaises(TypeError):
             ActionManager()
@@ -156,7 +157,10 @@ class SchedulingReconciliationTests(unittest.TestCase):
         try:
             for manager in jobs.action_man.values():
                 self.assertIsInstance(manager, ActionManager)
-                self.assertIsInstance(manager, AsyncActionManager)
+                if isinstance(manager, APIActions):
+                    self.assertNotIsInstance(manager, AsyncActionManager)
+                else:
+                    self.assertIsInstance(manager, AsyncActionManager)
                 self.assertIsNone(manager.getMaxActionId())
         finally:
             jobs.conn.close()

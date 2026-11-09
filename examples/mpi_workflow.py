@@ -4,18 +4,19 @@ r"""Upload, compile, run and retrieve a real MPI reduction through JobManager.
     python examples/mpi_workflow.py manager-config.json frontier \
         --account YOUR_PROJECT --queue batch --nodes 2 --ranks-per-node 4
 
-Source staging and result retrieval use the filesystem API. The managed compute
-action compiles in pre-launch and runs MPI on the selected machine. Every run
-retains its source, executable, logs, result and SQLite databases for inspection.
+A staged API action creates the run/result directories and uploads the source.
+The next stage compiles in pre-launch and runs MPI on the selected machine.
+Results are downloaded after successful completion. Every run retains its
+source, executable, logs, result and SQLite databases for inspection.
 
 The example follows eight steps, marked in main():
     1. Read the requested machine and resources.
     2. Select the machine's compiler and module setup.
     3. Initialize the API from the user configuration.
-    4. Select sandboxed run and output directories.
-    5. Upload the MPI source before starting the workflow.
+    4. Select sandboxed artifact locations and initialize manager state.
+    5. Describe directory creation and source upload as an API action.
     6. Describe compilation and execution as a compute action.
-    7. Persist, enqueue, and monitor the workflow.
+    7. Enqueue the API and compute stages, then monitor the workflow.
     8. Download and validate the completed calculation's result.
 
 See examples/README.md for configuration and build-profile overrides.
@@ -29,18 +30,20 @@ import shlex
 import time
 import uuid
 
+from amscjobmanager import ActionStatus, JobManager, api_general as api
+from amscjobmanager import globals as manager_globals
+from amscjobmanager.api_actions import APIAction, MakeDirectory, UploadFile
+from amscjobmanager.compute_actions import ExecuteJobComputeAction
+from amscjobmanager.local_api import setStatusManagerDatabasePath
+from amscjobmanager.manager_config import readManagerConfigFile
 
-def main(argv=None) -> int:
-    """Run a real MPI workflow from config/machine CLI arguments; return zero.
 
-    argv optionally supplies CLI arguments. Validate resources and build settings,
-    stage the bundled C++ source in the selected machine sandbox, then enqueue and
-    monitor a compute action. Download only after completion and check its JSON.
-    Exceptions retain artifacts; interrupted workflows request
-    cancellation before stopping the manager. Importing this file submits no work.
+def create_parser() -> argparse.ArgumentParser:
+    """Take no arguments; return the example's configured CLI argument parser.
+
+    The parser describes the target, resource request, build overrides, artifact
+    locations and polling interval. It does not parse arguments or contact APIs.
     """
-    # 1. Read the target and resource request. Reject invalid requests before
-    # initializing the API or creating any workflow artifacts.
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("config", help="Manager configuration JSON file")
     parser.add_argument("machine", type=str.lower, help="Configured machine, or local")
@@ -54,19 +57,25 @@ def main(argv=None) -> int:
     parser.add_argument("--sandbox-directory", help="Register and use this machine sandbox instead of the first configured sandbox")
     parser.add_argument("--output-directory", help="Empty local output directory inside a local sandbox or /tmp")
     parser.add_argument("--poll-interval", type=float, default=20, help="Manager status polling interval in seconds (default: 20)")
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Run the staged MPI example and return zero after validating its result.
+
+    argv (list[str] | None) supplies CLI arguments without the program name;
+    None reads sys.argv. Enqueue API setup followed by compute, monitor without
+    a queue timeout, then download the result. Exceptions retain artifacts and
+    request cancellation of unfinished work before stopping the manager.
+    """
+    # 1. Read the request. The library validates compute resources and paths;
+    # retain only checks specific to this example and its monitoring loop.
+    parser = create_parser()
     args = parser.parse_args(argv)
-    if args.nodes < 1 or args.ranks_per_node < 1 or args.gpus_per_rank < 0 or args.time < 1:
-        parser.error("Nodes, ranks-per-node and time must be positive; GPUs-per-rank must be nonnegative")
     if not math.isfinite(args.poll_interval) or args.poll_interval <= 0:
         parser.error("Polling interval must be a finite positive number")
-    if args.machine == "local" and args.nodes != 1:
-        parser.error("Local execution requires --nodes 1")
     if args.machine != "local" and (not args.account or not args.queue):
         parser.error("Remote execution requires --account and --queue")
-    if any("~" in value for value in (args.config, args.build_config or "", args.output_directory or "", args.sandbox_directory or "")):
-        parser.error("Paths containing '~' are not supported; use explicit paths")
-    if args.sandbox_directory is not None and not args.sandbox_directory.strip():
-        parser.error("Sandbox directory must not be empty")
 
     # 2. Select how to build on the target machine. Bundled profiles provide
     # defaults; a user profile can replace the compiler, flags, and module setup.
@@ -74,100 +83,90 @@ def main(argv=None) -> int:
     profiles = json.loads((example_directory / "mpi_build_profiles.json").read_text())
     if args.build_config:
         overrides = json.loads(Path(args.build_config).read_text())
-        if not isinstance(overrides, dict):
-            parser.error("Build configuration must map machine names to profiles")
         profiles.update({name.lower(): profile for name, profile in overrides.items()})
     if args.machine not in profiles:
         parser.error(f"No build profile for {args.machine!r}; supply --build-config")
     profile = profiles[args.machine]
-    if not isinstance(profile, dict):
-        parser.error("A build profile must be a JSON object")
-    compiler = profile.get("compiler")
+    compiler = profile["compiler"]
     flags = profile.get("compiler_flags", [])
     setup = profile.get("setup", "")
-    if not isinstance(compiler, list) or not compiler or not all(isinstance(arg, str) and arg for arg in compiler):
-        parser.error("Profile compiler must be a nonempty list of executable/argument strings")
-    if not isinstance(flags, list) or not all(isinstance(arg, str) for arg in flags) or not isinstance(setup, str):
-        parser.error("Profile compiler_flags must be a string list and setup must be a shell-command string")
-    if "~" in compiler[0]:
-        parser.error("Compiler executable paths containing '~' are not supported")
 
     # 3. Initialize the API using the user's credentials and machine settings.
     # Honor environment overrides, but require IRI so this example runs real work.
-    from amscjobmanager import ActionStatus, JobManager, api_general as api
-    from amscjobmanager import globals as manager_globals
-    from amscjobmanager.compute_actions import ExecuteJobComputeAction
-    from amscjobmanager.local_api import setStatusManagerDatabasePath
-    from amscjobmanager.manager_config import readManagerConfigFile
-
     if manager_globals.api_impl != "IRI":
         raise RuntimeError("The live MPI example requires the IRI backend; check AMSC_JOB_MANAGER_API_IMPL")
     config = readManagerConfigFile(args.config)
     expected_ranks = args.nodes * args.ranks_per_node
-    if args.machine == "local" and expected_ranks > 1 and config.local_mpi_launcher is None:
-        parser.error("Configure local_mpi_launcher to run multiple local ranks")
     sandboxes = api.setupWorkflowAgentFromConfig(config)
-    if args.machine not in api.getKnownMachines():
-        parser.error(f"Configure a provider for machine {args.machine!r}")
     if args.sandbox_directory is None and not sandboxes.get(args.machine):
         parser.error(f"Configure a sandbox for {args.machine!r} or supply --sandbox-directory")
 
-    # 4. Choose authorized locations for this run. Keep execution files on the
-    # target machine and results/databases locally, in separate unique folders.
+    # 4. Select separate locations for execution files, downloaded results and
+    # manager state. Only the state directory must exist before enqueueing: the
+    # manager needs a database before it can execute the staged API operations.
     run_id = uuid.uuid4().hex[:12]
     sandbox_path = args.sandbox_directory if args.sandbox_directory is not None else sandboxes[args.machine][0]
-    sandbox = Path(sandbox_path).resolve() if args.machine == "local" else PurePosixPath(sandbox_path)
-    if not sandbox.is_absolute() or ".." in sandbox.parts:
-        parser.error("The selected machine sandbox must be absolute and contain no '..'")
     if args.sandbox_directory is not None:
-        # The explicit CLI path grants an additional sandbox for this run.
-        # Use the existing validation/creation behavior without rewriting config.
-        manager_globals.addSandboxDirs({args.machine: [str(sandbox)]})
+        # Pass the original path so the library validates it before normalization.
+        manager_globals.addSandboxDirs({args.machine: [sandbox_path]})
+    sandbox = Path(sandbox_path).resolve() if args.machine == "local" else PurePosixPath(sandbox_path)
     run_directory = PurePosixPath(str(sandbox)) / f"mpi-example-{run_id}"
     local_base = Path(sandbox) if args.machine == "local" else (
         Path(sandboxes["local"][0]).resolve() if sandboxes.get("local") else Path("/tmp")
     )
-    output_directory = Path(args.output_directory).resolve() if args.output_directory else local_base / f"mpi-results-{run_id}"
+    output_directory = Path(args.output_directory) if args.output_directory else local_base / f"mpi-results-{run_id}"
     if output_directory.exists() and (not output_directory.is_dir() or any(output_directory.iterdir())):
         parser.error("Output directory must be absent or empty; choose a new directory for this run")
-    api.remoteMkdir("local", str(output_directory))
+    state_directory = local_base / f"mpi-state-{run_id}"
+    api.remoteMkdir("local", str(state_directory))
     if args.machine == "local":
-        setStatusManagerDatabasePath(str(output_directory / "local-jobs.sqlite"))
-    print(f"Run directory: {args.machine}:{run_directory}", flush=True)
-    print(f"Results and workflow database: {output_directory}", flush=True)
+        # Local asynchronous compute uses a separate status database, configured
+        # before the manager starts submitting work.
+        setStatusManagerDatabasePath(str(state_directory / "local-jobs.sqlite"))
 
-    # 5. Upload the source during initial setup, before any job is submitted.
-    # The filesystem API selects local copying, native IRI, or a Globus fallback.
+    print(f"Run directory: {args.machine}:{run_directory}", flush=True)
+    print(f"Downloaded results: {output_directory}", flush=True)
+    print(f"Workflow state and databases: {state_directory}", flush=True)
+
+    # 5. Demonstrate staging API actions as a workflow stage. Constructing these
+    # operations does not create directories or upload files: JobManager executes
+    # them when this stage is reached, before advancing to the compute stage.
+    # The API manager checkpoints each operation for recovery after interruption.
     remote_source = run_directory / "mpi_reduction.cpp"
     remote_executable = run_directory / "mpi_reduction"
     remote_result = run_directory / "result.json"
-    api.remoteMkdir(args.machine, str(run_directory))
-    api.uploadSmallFile(args.machine, str(remote_source), str(example_directory / remote_source.name), definitely_is_file=True)
+    preparation = APIAction([
+        MakeDirectory("local", str(output_directory)),
+        MakeDirectory(args.machine, str(run_directory)),
+        UploadFile(args.machine, str(remote_source), str(example_directory / remote_source.name)),
+    ])
 
     # 6. Describe the compute action without executing it yet. Pre-launch sets
     # up the compiler and builds the uploaded source; the job then launches the
     # binary across the requested ranks. Pass the expected count for MPI to check.
     compile_command = shlex.join([*compiler, *flags, str(remote_source), "-o", str(remote_executable)])
     pre_launch = "\n".join(["set -e", f"cd {shlex.quote(str(run_directory))}", setup or ":", compile_command])
-    action = ExecuteJobComputeAction(
+    compute = ExecuteJobComputeAction(
         machine=args.machine, account=args.account or "", queue=args.queue or "", time=str(args.time),
         executable=str(remote_executable), arguments=[str(expected_ranks), str(remote_result)],
         rundir=str(run_directory), nodes=args.nodes, ranks_per_node=args.ranks_per_node,
         gpus_per_rank=args.gpus_per_rank, pre_launch=pre_launch,
     )
 
-    # 7. Save the run description and enqueue the action in a persistent workflow.
-    # JobManager owns submission and progression; access its database under lock.
-    manifest = {"machine": args.machine, "run_directory": str(run_directory), "expected_ranks": expected_ranks,
+    # 7. Persist and enqueue the ordered stages. Successful API preparation is
+    # required before compute can start. JobManager owns execution/progression;
+    # access its workflow database under the manager lock.
+    manifest = {"machine": args.machine, "run_directory": str(run_directory),
+                "output_directory": str(output_directory), "expected_ranks": expected_ranks,
                 "build_profile": profile, "nodes": args.nodes, "ranks_per_node": args.ranks_per_node}
-    manifest_path = output_directory / "run.json"
+    manifest_path = state_directory / "run.json"
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
-    manager = JobManager(filename=str(output_directory / "workflow.sqlite"), poll_freq=args.poll_interval, max_workflows_active=1)
+    manager = JobManager(filename=str(state_directory / "workflow.sqlite"), poll_freq=args.poll_interval, max_workflows_active=1)
     job_id = None
     status = None
     try:
         with manager as jobs:
-            job_id = jobs.enqueueJob([action], job_group=f"mpi-example-{run_id}")
+            job_id = jobs.enqueueJob([preparation, compute], job_group=f"mpi-example-{run_id}")
         manifest["job_id"] = job_id
         manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
         print(f"Workflow {job_id}: expecting {expected_ranks} MPI ranks", flush=True)
@@ -208,7 +207,7 @@ def main(argv=None) -> int:
                 with manager as jobs:
                     jobs.cancelJob(job_id)
             except Exception as error:
-                print(f"Cancellation could not be confirmed: {error}; inspect workflow.sqlite before resubmitting", flush=True)
+                print(f"Cancellation could not be confirmed: {error}; inspect {state_directory / 'workflow.sqlite'} before resubmitting", flush=True)
         raise
     finally:
         # Release the manager thread and database while retaining run artifacts.

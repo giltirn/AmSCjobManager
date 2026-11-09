@@ -3,6 +3,7 @@ import sqlite3
 from .actions_base import ActionClass, actionClass
 from .globus_transfer_action import GlobusDataTransfers
 from .compute_action_manager import ComputeActions
+from .api_action_manager import APIActions
 from .action_manager import ActionManager, ActionStatus, SimulatedCrash, _ser, _unser
 from .logging import wfmanLog
 import time
@@ -26,6 +27,7 @@ class JobData:
         manager_factories = {
             ActionClass.TRANSFER: GlobusDataTransfers,
             ActionClass.COMPUTE: ComputeActions,
+            ActionClass.API: APIActions,
         }
         if _test_action_manager_factories:
             manager_factories.update(_test_action_manager_factories)
@@ -236,7 +238,7 @@ class JobData:
                     independent of job_id; None when no action is assigned.
                 head_action_type (str | None): Action class name; 'NoneType'
                     after normal workflow completion.
-                head_action_class (ActionClass): COMPUTE, TRANSFER, or NONE.
+                head_action_class (ActionClass): COMPUTE, TRANSFER, API, or NONE.
                 head_action_status (ActionStatus): Exact recorded head status,
                     including SCHEDULING and intermediate COMPLETED.
                 last_status_change (int | None): Recorded Unix timestamp in

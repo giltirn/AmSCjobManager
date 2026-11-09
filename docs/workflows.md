@@ -34,6 +34,11 @@ real launch commands or remote paths will work.
 
 ## Construct actions
 
+Short filesystem preparation and local processing can be distinct `APIAction`
+stages before or after compute and transfer stages. See [API action stages](api_actions.md)
+for the supported operations and checkpoint recovery. Long-running local tasks
+should be compute actions targeting `local`.
+
 The following extracts show the workflow model; use the complete reference
 example for runnable setup and monitoring.
 

@@ -52,7 +52,7 @@ python examples/mpi_workflow.py manager-config.json frontier \
 
 Alternatively, supply `--sandbox-directory /absolute/remote/path`. The provider
 must still be configured; remote sandbox paths must be absolute and contain no
-`~` or `..` components.
+`~` characters. Path and sandbox validation are performed by the library.
 
 Remote execution requires explicit `--account` and `--queue` values. `--time`
 sets the remote walltime in seconds. The calculation uses CPU MPI; the optional
@@ -60,14 +60,25 @@ sets the remote walltime in seconds. The calculation uses CPU MPI; the optional
 site's allocation. Queues with additional QoS requirements need suitable site
 configuration; this example does not select QoS independently.
 
-The source is uploaded with `api.uploadSmallFile()`, compiled in the compute
-action's pre-launch, and executed through `ExecuteJobComputeAction`. The
-manager enqueues and monitors that action, then the example calls
+The workflow begins with an `APIAction` stage that creates the local result
+directory and target run directory, then uploads the bundled C++ source. These
+operations are deferred until the manager reaches that stage; constructing the
+workflow does not perform them. Each operation is checkpointed so recovery can
+skip finished operations and safely replay an interrupted one.
+
+The next stage compiles the uploaded source in the compute action's pre-launch
+and executes it through `ExecuteJobComputeAction`. The manager enqueues and
+monitors both stages, then the example calls
 `api.downloadFile()` only after successful workflow completion. These filesystem
 calls dispatch to local copying, native IRI, or configured Globus fallbacks.
 The latter need transfer credentials and a personal endpoint for uploads and
-downloads. Source staging and result retrieval run outside the managed action
-list, following the same sequence on all targets.
+downloads. Source staging is managed as part of the workflow; result retrieval
+and validation occur afterward, following the same sequence on all targets.
+
+The local state directory is created before enqueueing because the manager needs
+a database before it can execute the API stage. The example separates CLI parser
+construction from `main()`, whose numbered sections describe configuration,
+artifact locations, stage construction, monitoring and result validation.
 
 ## Calculation and results
 
@@ -87,12 +98,16 @@ The example downloads this file and checks that both integers equal
 `nodes * ranks_per_node` and `valid` is true. Compilation, reduction, rank-count,
 and output errors fail the job; results are not downloaded from failed jobs.
 
-Each run prints its remote run directory and local output directory. Artifacts
+Each run prints its target run directory, local output directory and local state
+directory. Artifacts
 are retained:
 
 - Run directory: uploaded source, compiled executable, wrapper, and job logs.
-- Local output directory: `workflow.sqlite`, `run.json`, and downloaded
-  `result.json` on success. Local execution also records `local-jobs.sqlite`.
+- Local output directory (`mpi-results-...` by default): downloaded `result.json`
+  on success; this directory is created by the API stage.
+- Local state directory (`mpi-state-...`): `workflow.sqlite` and `run.json`.
+  Local execution also records `local-jobs.sqlite` here. This directory uses the
+  same local base as the default output directory and exists before enqueueing.
 
 Rerunning creates a new workflow. The saved database is available for inspection
 and manual recovery. On interruption, the example requests

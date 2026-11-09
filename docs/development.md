@@ -133,6 +133,12 @@ before cancellation takes effect.
 
 ## Adding a compute or transfer action
 
+For short filesystem preparation or processing, use the built-in
+[`APIAction` operations](api_actions.md) rather than a custom compute action.
+They run under `APIActions`, which implements `ActionManager` directly and owns
+its operation cursor. Long-running local tasks remain compute actions targeting
+`local`.
+
 Define a module-level, pickle-compatible dataclass inheriting
 `ComputeActionBase` or `TransferActionBase`. Keep its fields as the durable
 description of requested work, rather than open clients, threads, or connections.
@@ -190,6 +196,7 @@ with the hook disabled and reconcile against the simulated remote service.
 | --- | --- |
 | Workflow submission | `job_head_scheduling_persisted`, `action_state_persisted_before_job_head_update` |
 | Action submission | `action_intent_persisted`, `before_remote_submission`, `remote_submission_completed`, `remote_status_obtained`, `action_state_persisted` |
+| API sequences | `action_intent_persisted`, `api_operation_N_started`, `api_operation_N_completed`, `api_operation_N_checkpoint_persisted`, `api_action_completed` (N is the zero-based operation index) |
 | Resource pre-check | `before_resource_status_check`, `resource_status_checked` |
 | Cancellation | `job_head_canceling_persisted`, `action_canceling_persisted`, `remote_cancellation_completed`, `action_canceled_before_job_head_update` |
 

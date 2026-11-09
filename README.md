@@ -11,7 +11,7 @@ computing resources. AmSCjobManager puts those capabilities to work by combining
 IRI resource queries, filesystem operations, and compute submission with Globus
 data movement, durable workflow state, and automatic progression between steps.
 
-Build a workflow as a list of compute and transfer actions. The manager submits
+Build a workflow as a list of compute, transfer and API actions. The manager submits
 each action, monitors it, and starts the next after successful completion.
 Multiple workflows can run concurrently, with durable state that supports
 recovery when the application restarts.
@@ -95,6 +95,7 @@ facility. Creating a `JobManager` does not initialize API configuration.
 | [Sandboxing](docs/sandboxing.md) | Path checks, staging permissions, and protection limits |
 | [Paths and transfers](docs/transfers.md) | Filesystem/Globus namespaces, endpoints, and file staging |
 | [Building workflows](docs/workflows.md) | Action parameters and a walkthrough of the example |
+| [API action stages](docs/api_actions.md) | Deferred filesystem preparation, short local processing, and checkpoint recovery |
 | [Operating the manager](docs/operations.md) | Locks, status, cancellation, retries, and restart recovery |
 | [API reference](docs/api.md) | Public entry points, arguments, and return values |
 | [Troubleshooting](docs/troubleshooting.md) | Common errors and current limitations |

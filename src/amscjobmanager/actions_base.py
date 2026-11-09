@@ -63,11 +63,16 @@ class ActionClass(Enum):
     NONE = 0
     TRANSFER = 1
     COMPUTE = 2
+    API = 3
     
 def actionClass(action):
+    from .api_actions import APIAction
+
     if issubclass(type(action), TransferActionBase):
         return ActionClass.TRANSFER
     elif issubclass(type(action), ComputeActionBase):
         return ActionClass.COMPUTE
+    elif isinstance(action, APIAction):
+        return ActionClass.API
     else:
         raise Exception("Unknown action type",type(action))

@@ -40,6 +40,7 @@ flowchart TD
 | `JobData` | Persists workflows, selects the current action, allocates action IDs, and advances completed workflows. |
 | `ActionManager` | Abstract interface for starting, canceling, recovering, and querying actions. Does not prescribe a database schema. |
 | `AsyncActionManager` | Implements action persistence, submission/cancellation recovery, remote identifiers, polling, and retries. Compute and Globus subclasses supply the remote control operations. |
+| `APIActions` | Executes short synchronous API sequences using its own table and a checkpoint for the next unfinished operation. Interrupted operations must be replay-safe. |
 | Action objects | Describe the requested work. `queryResourceStatus()` supplies an availability signal; `initiateAction()` submits and returns a remote identifier. |
 | `api_general` | Selects IRI or SPOOF at import time and supplies shared convenience functions. |
 | IRI modules | Implement authentication, provider/resource discovery, compute, filesystem, and transfer requests. Several operations dispatch to local execution when `machine="local"`. |

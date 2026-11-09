@@ -648,8 +648,9 @@ class SchedulingReconciliationTests(unittest.TestCase):
         self.assertEqual(self.harness.cancellation_count, 1)
 
     def test_action_cancellation_intent_survives_without_job_intent(self):
-        # A direct action cancellation changes only the action row. Reconcile
-        # that row, then let workflow polling update the job head.
+        # A direct action cancellation changes only the action row. Retry it
+        # through the public entry point after reopening the database, then
+        # let workflow polling update the job head.
         job_data = self._new_job_data()
         job_id = job_data.enqueueJob(HarnessGlobusTransfer())
         job_data.startWorkflows([job_id])
@@ -665,7 +666,7 @@ class SchedulingReconciliationTests(unittest.TestCase):
         job_data.conn.close()
 
         recovered = self._new_job_data()
-        recovered.action_man[ActionClass.TRANSFER].reconcileCancelingAction(action_id)
+        recovered.action_man[ActionClass.TRANSFER].cancelAction(action_id)
         self.assertEqual(recovered.jobStatus(job_id), ActionStatus.ACTIVE)
         recovered.progressActiveState()
         self.assertEqual(recovered.jobStatus(job_id), ActionStatus.CANCELED)

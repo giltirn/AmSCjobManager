@@ -132,7 +132,7 @@ class ActionManager:
                 preserved; an already-submitted action is not blindly resubmitted.
         """
         action_id = self._recordSchedulingIntent(action, job_id, action_id)
-        return self.reconcileScheduledAction(action_id)
+        return self._reconcileScheduledAction(action_id)
 
     def hasAction(self, action_id):
         """Return whether this manager has persisted the supplied action ID."""
@@ -169,7 +169,7 @@ class ActionManager:
             )
         self._maybeSimulateCrash("action_canceling_persisted")
 
-    def reconcileCancelingAction(self, action_id):
+    def _reconcileCancelingAction(self, action_id):
         """Finish a recorded cancellation without submitting new work.
 
         ``action_id`` identifies an action in ``CANCELING``. If submission
@@ -254,11 +254,15 @@ class ActionManager:
         """
         if recovery is not None:
             action, job_id = recovery
+            # A crash may leave the workflow head persisted without an action
+            # record. Recreate that record so cancellation can persist its
+            # intent and reconcile any remote work; this does not submit the
+            # action, and an existing record is left unchanged.
             self._recordSchedulingIntent(action, job_id, action_id)
         self._recordCancelingIntent(action_id)
-        return self.reconcileCancelingAction(action_id)
+        return self._reconcileCancelingAction(action_id)
 
-    def reconcileScheduledAction(self, action_id):
+    def _reconcileScheduledAction(self, action_id):
         """Submit or recover a SCHEDULING action from its durable intent.
 
         ``action_id`` identifies the action. A fresh intent is submitted

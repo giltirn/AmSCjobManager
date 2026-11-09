@@ -141,6 +141,17 @@ class ActionManager:
                 f"SELECT 1 FROM {self.table_name} WHERE action_id = ?", (action_id,)
             ).fetchone() is not None
 
+    def getMaxActionId(self) -> int | None:
+        """Return the highest action ID recorded by this manager.
+
+        Takes no arguments. Returns a positive int, or None when this manager
+        has no action records. JobData uses this to initialize its shared ID
+        allocator without depending on the manager's database schema.
+        """
+        return self.conn.execute(
+            f"SELECT MAX(action_id) FROM {self.table_name}"
+        ).fetchone()[0]
+
     def _recordCancelingIntent(self, action_id):
         """Persist ``CANCELING`` for an action before any remote API call.
 

@@ -11,7 +11,7 @@ import threading
 import unittest
 from unittest.mock import patch
 
-from amscjobmanager.action_manager import ActionStatus, SimulatedCrash
+from amscjobmanager.action_manager import ActionManager, ActionStatus, SimulatedCrash
 from amscjobmanager.actions_base import TransferActionBase
 from amscjobmanager.globus_transfer_action import GlobusDataTransfers
 from amscjobmanager.job_data import JobData
@@ -116,6 +116,42 @@ class HarnessGlobusDataTransfers(GlobusDataTransfers):
 
 
 class SchedulingReconciliationTests(unittest.TestCase):
+    def test_action_id_recovery_uses_manager_interface(self):
+        """Recover allocation from managers whose tables have custom names.
+
+        Substitute managers with no computes/transfers tables, seed IDs in
+        their records and the workflow head, then remove the allocator to
+        model an older database. Reopening must recover the highest ID from
+        all sources without knowing the action table names.
+        """
+        factories = {
+            ActionClass.COMPUTE: lambda conn, **kwargs: ActionManager(
+                conn, "custom_compute", {}, **kwargs
+            ),
+            ActionClass.TRANSFER: lambda conn, **kwargs: ActionManager(
+                conn, "custom_transfer", {}, **kwargs
+            ),
+        }
+        jobs = JobData(self.db_path, _test_action_manager_factories=factories)
+        for manager in jobs.action_man.values():
+            self.assertIsNone(manager.getMaxActionId())
+        job_id = jobs.enqueueJob(HarnessGlobusTransfer())
+        with jobs.conn as conn:
+            conn.execute("INSERT INTO custom_compute(action_id) VALUES (17)")
+            conn.execute("INSERT INTO custom_transfer(action_id) VALUES (29)")
+            conn.execute("UPDATE jobs SET head_action_id = 23 WHERE job_id = ?", (job_id,))
+            conn.execute("DROP TABLE action_ids")
+        jobs.conn.close()
+
+        recovered = JobData(self.db_path, _test_action_manager_factories=factories)
+        try:
+            self.assertEqual(recovered.action_man[ActionClass.COMPUTE].getMaxActionId(), 17)
+            self.assertEqual(recovered.action_man[ActionClass.TRANSFER].getMaxActionId(), 29)
+            with recovered.conn as conn:
+                self.assertEqual(recovered._allocateActionId(conn), 30)
+        finally:
+            recovered.conn.close()
+
     def test_head_action_status_forced_poll_updates_both_records_once(self):
         """Refresh action/workflow records once without starting the next step.
 

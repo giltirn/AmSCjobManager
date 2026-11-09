@@ -52,12 +52,14 @@ class JobData:
             # action manager, so a job head and its persisted action always use
             # the same durable key.
             conn.execute("CREATE TABLE IF NOT EXISTS action_ids (action_id INTEGER PRIMARY KEY AUTOINCREMENT)")
-            max_existing_action_id = conn.execute(
-                "SELECT MAX(action_id) FROM ("
-                "SELECT head_action_id AS action_id FROM jobs UNION ALL "
-                "SELECT action_id FROM computes UNION ALL "
-                "SELECT action_id FROM transfers)"
-            ).fetchone()[0]
+            recorded_action_ids = [
+                conn.execute("SELECT MAX(head_action_id) FROM jobs").fetchone()[0],
+                *(manager.getMaxActionId() for manager in self.action_man.values()),
+            ]
+            max_existing_action_id = max(
+                (action_id for action_id in recorded_action_ids if action_id is not None),
+                default=None,
+            )
             if max_existing_action_id is not None:
                 conn.execute(
                     "INSERT OR IGNORE INTO action_ids(action_id) VALUES (?)",

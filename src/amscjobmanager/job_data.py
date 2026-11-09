@@ -147,8 +147,8 @@ class JobData:
         """Reconcile canceling workflow heads through their action managers.
 
         ``job_ids`` optionally limits reconciliation to specific workflows.
-        Recreate a missing action row if submission crashed before recording
-        it, then ask its ActionManager to record and reconcile cancellation.
+        Supply the stored action definition so its ActionManager can recover
+        a missing action record and reconcile cancellation without submission.
         Leave the workflow ``CANCELING`` while remote discovery may lag.
         ``raise_errors`` propagates API errors to a direct caller; otherwise
         failed requests remain ``CANCELING`` for the next manager pass.
@@ -177,14 +177,11 @@ class JobData:
                 if action_id is not None:
                     action_class = ActionClass[job["head_action_class"]]
                     action_manager = self.action_man[action_class]
-                    if not action_manager.hasAction(action_id):
-                        workflow = _unser(job["workflow"])
-                        action = workflow[job["workflow_stage"]]
-                        action_manager.recordSchedulingIntent(
-                            action, job["job_id"], action_id
-                        )
-                    action_manager.recordCancelingIntent(action_id)
-                    if action_manager.reconcileCancelingAction(action_id) is None:
+                    workflow = _unser(job["workflow"])
+                    action = workflow[job["workflow_stage"]]
+                    if action_manager.cancelAction(
+                        action_id, recovery=(action, job["job_id"])
+                    ) is None:
                         continue
 
                 self._maybeSimulateCrash("action_canceled_before_job_head_update")
@@ -448,8 +445,8 @@ class JobData:
     def reconcileSchedulingActions(self):
         """Repair job heads whose submission crossed a process crash boundary.
 
-        The JobData-issued action ID lets this method recreate a missing local
-        action row and ask the action manager to find the corresponding remote action.
+        Supply the stored action and its JobData-issued ID to the action
+        manager, which owns recovery of its record and any remote submission.
         ActionManager first searches for a remote action under the durable
         action name; only an unfindable action is retried according to its
         persisted submission backoff policy.
@@ -467,12 +464,9 @@ class JobData:
             if action_id is None:
                 raise Exception(f"SCHEDULING job {job['job_id']} has no action ID")
             aman = self.action_man[action_class]
-            if not aman.hasAction(action_id):
-                workflow = _unser(job["workflow"])
-                action = workflow[job["workflow_stage"]]
-                aman.recordSchedulingIntent(action, job["job_id"], action_id)
-
-            action_id = aman.reconcileScheduledAction(action_id)
+            workflow = _unser(job["workflow"])
+            action = workflow[job["workflow_stage"]]
+            action_id = aman.startAction(action, job["job_id"], action_id)
             if action_id is not None:
                 try:
                     action_status, _ = aman.queryStatus(action_id)

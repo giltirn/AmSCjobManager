@@ -80,8 +80,18 @@ class ActionManager:
         if point == self._test_crash_at:
             raise SimulatedCrash(point)
 
-    def recordSchedulingIntent(self, action, job_id, action_id):
-        """Persist a SCHEDULING action row before contacting a remote API."""
+    def _recordSchedulingIntent(self, action, job_id, action_id):
+        """Persist an action's scheduling intent unless its record exists.
+
+        Args:
+            action (object): Serializable action definition from the workflow.
+            job_id (int): Positive workflow ID owning the action.
+            action_id (int): Positive, JobData-issued action ID.
+
+        Returns:
+            int: The action ID, whether its record was created or already
+                existed. Existing definitions and execution state are retained.
+        """
         with self.conn as conn:
             existing = conn.execute(
                 f"SELECT action_id FROM {self.table_name} WHERE action_id = ?",
@@ -107,8 +117,21 @@ class ActionManager:
         return action_id
 
     def startAction(self, action, job_id, action_id):
-        """Record then reconcile an action using its JobData-issued ID."""
-        action_id = self.recordSchedulingIntent(action, job_id, action_id)
+        """Start or recover an action using its durable workflow identity.
+
+        Args:
+            action (object): Serializable action definition from the workflow.
+                Used only when no record exists for ``action_id``.
+            job_id (int): Positive workflow ID owning the action.
+            action_id (int): Positive, JobData-issued action ID, reused during
+                recovery rather than allocating a new ID.
+
+        Returns:
+            int | None: The action ID when its recorded state can be read, or
+                None when reconciliation must wait. Existing action state is
+                preserved; an already-submitted action is not blindly resubmitted.
+        """
+        action_id = self._recordSchedulingIntent(action, job_id, action_id)
         return self.reconcileScheduledAction(action_id)
 
     def hasAction(self, action_id):
@@ -118,10 +141,11 @@ class ActionManager:
                 f"SELECT 1 FROM {self.table_name} WHERE action_id = ?", (action_id,)
             ).fetchone() is not None
 
-    def recordCancelingIntent(self, action_id):
+    def _recordCancelingIntent(self, action_id):
         """Persist ``CANCELING`` for an action before any remote API call.
 
-        ``action_id`` identifies a recorded action. Repeated calls leave a
+        ``action_id`` (int) is the positive ID of a recorded action. Return
+        None after recording intent. Repeated calls leave a
         ``CANCELING`` or ``CANCELED`` action unchanged. Raise ``ValueError``
         if the action is unknown.
         """
@@ -209,9 +233,29 @@ class ActionManager:
             )
         return action_id
 
-    def cancelAction(self, action_id):
-        """Record cancellation intent and reconcile ``action_id`` immediately."""
-        self.recordCancelingIntent(action_id)
+    def cancelAction(self, action_id, *, recovery: tuple[object, int] | None = None):
+        """Record cancellation intent and reconcile an action without submitting it.
+
+        Args:
+            action_id (int): Positive, JobData-issued action ID.
+            recovery (tuple[object, int] | None): Optional pair containing the
+                stored action definition at index 0 and its positive workflow
+                ID at index 1. Used to recover a missing action record after a
+                crash. An existing record is left unchanged. Defaults to None.
+
+        Returns:
+            int | None: The action ID when cancellation is resolved, or None
+                while remote discovery must wait. API failures propagate,
+                retaining cancellation intent for a subsequent call.
+
+        Raises:
+            ValueError: If the action is unknown and no recovery definition
+                is supplied.
+        """
+        if recovery is not None:
+            action, job_id = recovery
+            self._recordSchedulingIntent(action, job_id, action_id)
+        self._recordCancelingIntent(action_id)
         return self.reconcileCancelingAction(action_id)
 
     def reconcileScheduledAction(self, action_id):

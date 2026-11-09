@@ -1,0 +1,278 @@
+# MCP server prototype
+
+The optional server exposes workflow listing and status through MCP Streamable
+HTTP. The command-line client supports traditional commands and JSON requests,
+calling the same tools as an MCP agent. Workflow
+submission, cancellation, privileged operations, and authentication challenges
+are not exposed by this prototype.
+
+## Start the server
+
+Install the optional dependencies from the repository root:
+
+```bash
+python -m pip install -e '.[server]'
+python utilities/manager_server.py manager-config.json \
+    --database workflows.sqlite --port 8765 --log-file manager.log
+```
+
+The listener binds to `127.0.0.1` and serves `/mcp`. It owns a normal background
+`JobManager`, which resumes and progresses workflows in its database. Run only
+one manager/server against that database. Stopping the server closes its manager
+without canceling remote jobs. The tools are read-only, but normal background
+workflow processing continues.
+
+Successful HTTP startup prints an administrator notice to stdout:
+
+```text
+Server started: http://127.0.0.1:8765/mcp (PID 12345, log: /path/to/manager.log)
+```
+
+The notice is flushed immediately and appears only after the listener has bound
+its socket. Bind/configuration failures do not produce a success notice.
+Graceful shutdown, including Ctrl-C and SIGTERM, prints
+`Server terminating: http://127.0.0.1:8765/mcp`. Ctrl-C completes manager cleanup
+and exits successfully without a KeyboardInterrupt/CancelledError traceback.
+SIGKILL cannot emit a termination
+notice because it does not allow Python code to run. These lifecycle notices
+also use `wfmanLog` to record them in the server log. Routine requests produce
+no stdout notices, and client stdout remains JSON (except explicit help).
+
+The server assigns the existing `logging.py` hooks to an append-only log file:
+`wfmanLog` carries manager/server messages, and `wfapiLog` carries API messages.
+`--log-file` selects the file; without it, the default is the database filename
+with `.log` appended (for example `workflows.sqlite.log`). Hooks are installed
+before configuration and restored after the manager stops. This does not
+redirect stdout. MCP/Uvicorn use WARNING level: routine INFO/access messages
+are suppressed, while warnings/errors retain standard logging to stderr. This
+prevents per-request access logs from appearing alongside a client's JSON in
+the same terminal; the administrator lifecycle notices above are deliberate.
+Interactive queries retain their separate
+`wfapiUserQuery` hook.
+
+The library factory `amscjobmanager.server.app.createServer(manager)` can also
+attach the same tools to an existing manager in an embedding application. The
+caller then owns manager and listener startup/shutdown. This is how the
+integration test submits its local workflow directly through Python before
+querying it over MCP; the prototype has no MCP submission tool.
+The frontend uses `server.runner.ManagerHTTPServer` to add socket-readiness and
+termination announcements to the same MCP application.
+
+Workflow tools require a running manager. If its background thread fails, the
+manager logs the underlying exception through `wfmanLog` and releases its lock.
+The listener stays available, but workflow requests return an MCP tool error
+with code `manager_unavailable` instead of presenting cached records as current.
+The same error applies before manager startup and after shutdown. Health is
+checked before acquiring the lock and again after acquiring it, to cover a
+failure while the request was waiting. Tool discovery remains available.
+The server does not automatically restart a failed manager.
+
+## Query workflows
+
+```bash
+python utilities/manager_client.py list_workflows
+
+python utilities/manager_client.py list_workflows --workflow-id 1 --refresh
+
+python utilities/manager_client.py list_workflows --statuses FAILED COMPLETED
+
+python utilities/manager_client.py list_workflows --no-refresh
+
+python utilities/manager_client.py -h
+
+python utilities/manager_client.py -h list_workflows
+
+python utilities/manager_client.py list_workflows --help
+
+python utilities/manager_client.py --list-tools
+```
+
+The client discovers the selected tool's input schema and generates its options;
+parameter names such as `workflow_id` become `--workflow-id`. Discovery and
+execution use a single MCP connection. The tool name must match the server's
+advertised name, including underscores. Global options precede that name:
+
+```bash
+python utilities/manager_client.py --url http://127.0.0.1:9000/mcp --timeout 10 \
+    list_workflows --statuses FAILED
+```
+
+`-h`/`--help` discovers the server's commands and prints their names with brief
+human-readable descriptions, along with the frontend's connection/input options.
+`-h TOOL`, `--help TOOL`, and `TOOL --help` print that command's description,
+input options/types/defaults/choices, and an output field/type tree. The output
+tree resolves local schema references and marks array positions as `[0..]`;
+field descriptions explain database IDs, status meanings, and indexing.
+Both general and command-specific help require the optional server dependencies
+and a reachable server, because tool names, descriptions, and schemas come from
+its live response. Help discovers metadata without executing tools. Connection
+failures return the usual error envelope and nonzero exit code rather than an
+incomplete offline command list. Unknown tools or malformed tool options produce an
+`invalid_input` JSON envelope and a nonzero exit code. Valid command responses
+use the same JSON envelope as the JSON input mode below.
+
+Option conversion follows the advertised schema:
+
+| Parameter | Command-line input |
+| --- | --- |
+| Integer, number, string | `--workflow-id 1`; one value per option |
+| Boolean | `--refresh` or `--no-refresh`; no value follows the flag |
+| Array | `--statuses FAILED COMPLETED`; one or more values |
+| Object or other complex schema | One JSON value, for example `--metadata '{"mode":"test"}'` if a future tool exposes that parameter |
+
+Enum choices, required fields, numeric bounds, and object structure are validated
+before the tool executes. Omitted options are not sent, so server defaults apply;
+explicit false/zero values are preserved. Use JSON input for explicit `null`,
+empty arrays, or complex argument structures that are inconvenient in a shell.
+
+JSON input remains available for single calls and batches:
+
+```bash
+python utilities/manager_client.py --request \
+    '{"tool":"list_workflows","arguments":{}}'
+
+python utilities/manager_client.py --request \
+    '{"tool":"list_workflows","arguments":{"workflow_id":1,"refresh":true}}'
+
+python utilities/manager_client.py --request \
+    '{"tool":"list_workflows","arguments":{"statuses":["FAILED","COMPLETED"]}}'
+
+python utilities/manager_client.py --list-tools
+```
+
+Use `--url` to select an endpoint other than `http://127.0.0.1:8765/mcp`.
+The client does not load manager configuration, site credentials, or databases.
+Traditional commands cannot be combined with --request, --file, or --list-tools.
+
+`list_workflows(workflow_id=None, refresh=False, statuses=None)` returns all recorded workflows
+in ID order, including completed and canceled ones, or a one-element list for
+an explicit ID. An empty database returns an empty list; an unknown explicit
+ID is an error. Each record contains:
+
+- `workflow_id`, `job_group`, and `workflow_status` from the public manager API.
+- `workflow_stage`, `head_action_id`, `head_action_type`, `head_action_class`,
+  and `head_action_status`.
+- `api_status`: the provider's recorded status string, or `null` when unavailable.
+- `last_status_change`: the recorded timestamp in Unix seconds.
+
+`statuses` optionally selects overall workflow statuses: `PENDING`, `ACTIVE`,
+`COMPLETED`, `FAILED`, `CANCELING`, or `CANCELED`. Multiple values are combined
+with OR; the workflow ID and status filters are combined with AND. An existing
+workflow excluded by its status returns an empty list. `null` includes every
+status, and `[]` matches none. Filtering by `COMPLETED` selects finished workflows,
+not workflows whose head completed an intermediate step. Refresh happens before
+filtering, so newly observed failures/completions can appear immediately.
+
+Enums are returned as their string names. Internal serialized workflows are
+excluded. The MCP structured result wraps the list in `result`, following the
+SDK's schema convention; the CLI unwraps this field into each operation's result.
+
+`refresh=true` forces polling of all active workflow heads, even if one workflow
+was selected. It propagates statuses to workflow records without submitting or
+advancing steps. Failed polls log errors and retain cached values. Compute head
+status `ACTIVE` includes provider states `new`, `queued`, and `active`, so inspect
+`api_status` to distinguish queueing from execution. `workflow_status` remains
+`ACTIVE` between steps; `head_action_status` can be `SCHEDULING` or `COMPLETED`.
+
+## JSON sequences and results
+
+Pass a request object or a nonempty array using `--request`, `--file requests.json`,
+or `--file -` for standard input:
+
+```json
+[
+  {"tool": "list_workflows", "arguments": {}},
+  {"tool": "list_workflows", "arguments": {"workflow_id": 999}},
+  {"tool": "list_workflows", "arguments": {}}
+]
+```
+
+The full document's request structure is validated before connecting. Tool
+arguments are validated by the server when each call executes. Calls run
+sequentially over one connection, stopping at the first failure by default.
+`--continue-on-error` continues after tool errors; connection/protocol failures
+always stop further calls. There are no automatic retries or rollback.
+
+The CLI parses JSON into Pydantic `ToolRequest` models before invoking the
+library's `execute_requests(url, requests, ...)`. Python callers supply one
+`ToolRequest` or a nonempty list of them; the executor does not accept raw
+dictionaries or parse JSON. A malformed later batch entry prevents the CLI
+from executing any of the batch.
+
+For a traditional command, the frontend calls
+`execute_command(url, tool_name, arguments, timeout=...)`. The library discovers
+the tool, converts options into the same `ToolRequest` model, then uses the
+shared execution code on the already-open connection.
+
+For the sequence above, the response could be:
+
+```json
+{
+  "success": false,
+  "results": [
+    {"index": 0, "tool": "list_workflows", "status": "succeeded", "result": []},
+    {"index": 1, "tool": "list_workflows", "status": "failed",
+     "error": {"code": "workflow_not_found", "message": "Workflow 999 does not exist"}},
+    {"index": 2, "tool": "list_workflows", "status": "skipped",
+     "reason": "Stopped after operation 1 failed"}
+  ]
+}
+```
+
+The CLI prints one JSON envelope to stdout, routes library diagnostics to stderr
+using the same logging hooks without redirecting stdout, and
+exits zero only if every operation succeeds. Invalid input or an initial
+connection failure produces a top-level `error` and an empty `results` array.
+A connection failure during a call marks its outcome unknown and skips later
+operations; earlier results remain available. `--timeout` defaults to 30 seconds
+for HTTP connection/read operations and each tool call.
+
+## Test locally
+
+From the repository root, activate your environment and install the optional
+dependencies into that same interpreter:
+
+```bash
+source ~/miniconda3/bin/activate
+conda activate ai
+python -m pip install -e '.[server]'
+python -m unittest discover -s test -p test_mcp_server.py -v
+```
+
+You can also run `python test/test_mcp_server.py -v`. To select only the local
+workflow/HTTP test, append `-k local_job_status` to the unittest discovery command.
+
+The test prints each MCP request and response to stderr. Subprocess checks also
+show the full CLI command, the JSON payload (including file/stdin contents),
+exit code, and any child stderr. Mocked exchanges and inputs rejected locally
+are explicitly labeled, so they are not mistaken for requests sent to a server.
+This diagnostic output is enabled even without `-v`; `-v` additionally displays
+individual unittest names. To save it, append `2> test_mcp_server.log`.
+
+Do not launch Uvicorn separately for this test. The test constructs
+`uvicorn.Server` and invokes its `run()` method internally, then starts separate
+CLI processes against its temporary endpoint. Neither a `uvicorn ...` command
+nor a separately running manager server is required. For normal server use,
+run `python utilities/manager_server.py ...` as shown above; that frontend starts
+the SDK's HTTP server itself. Using `python -m pip` ensures dependencies are
+installed for the interpreter used by the tests, rather than a potentially
+different interpreter associated with a standalone `pip` or `uvicorn` executable.
+
+Missing or incompatible MCP/Uvicorn dependencies produce a startup diagnostic
+with the original import error, active Python interpreter, and an installation
+command for that interpreter. Direct execution exits with status 1 instead of
+reporting an all-skipped success. Under unittest discovery, optional-dependency
+skips remain, accompanied by that diagnostic. Install `.[server]` in the active
+environment. Tests require permission to bind/connect to loopback
+sockets and run local executables; restricted execution sandboxes may need
+those permissions enabled.
+
+The tests use the actual SDK, a temporary loopback listener in a child process,
+and separate CLI subprocesses. A local `/bin/sleep 30` job is submitted through
+the Python manager API alongside short successful and failing jobs; the CLI
+then lists, filters, and refreshes them using both traditional and JSON commands.
+Tests also cover server-discovered command summaries and detailed input/output
+help through both `-h TOOL` and `TOOL -h`, schema-derived types/defaults, one-connection discovery
+and execution, invalid arguments rejected before execution,
+tool discovery, error/skip/continuation responses, JSON files/stdin, and input
+validation. Cleanup cancels the local job and stops the test server.

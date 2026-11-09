@@ -138,7 +138,7 @@ exponential backoff starting at 30 seconds. An attempt is committed before
 `initiateAction()`. If the request fails ambiguously, later reconciliation
 searches by name before trying again. Once the attempt limit is reached, a
 successful lookup finding no remote work leads to `FAILED` when the resource
-check permits it. These defaults are ActionManager settings; JobManager does
+check permits it. These defaults are AsyncActionManager settings; JobManager does
 not expose constructor arguments for them.
 
 An up pre-check cannot guarantee the subsequent request succeeds. Ordinary API,

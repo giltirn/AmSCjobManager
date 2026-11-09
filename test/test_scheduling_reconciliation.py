@@ -12,6 +12,7 @@ import unittest
 from unittest.mock import patch
 
 from amscjobmanager.action_manager import ActionManager, ActionStatus, SimulatedCrash
+from amscjobmanager.async_action_manager import AsyncActionManager
 from amscjobmanager.actions_base import TransferActionBase
 from amscjobmanager.globus_transfer_action import GlobusDataTransfers
 from amscjobmanager.job_data import JobData
@@ -116,6 +117,50 @@ class HarnessGlobusDataTransfers(GlobusDataTransfers):
 
 
 class SchedulingReconciliationTests(unittest.TestCase):
+    def test_start_action_returns_readiness_and_preserves_supplied_id(self):
+        """Defer a real scheduling pass, then resolve it under the supplied ID.
+
+        Use the transfer harness and a resource-down response to exercise False
+        without submitting work. Restore availability and verify True is a bool,
+        the nontrivial supplied ID is retained, and recovery does not resubmit.
+        """
+        jobs = self._new_job_data()
+        try:
+            action = HarnessGlobusTransfer()
+            job_id = jobs.enqueueJob(action)
+            manager = jobs.action_man[ActionClass.TRANSFER]
+            action_id = 37
+            with patch.object(HarnessGlobusTransfer, "queryResourceStatus", return_value=False):
+                self.assertIs(manager.startAction(action, job_id, action_id), False)
+            self.assertEqual(manager.queryStatus(action_id)[0], ActionStatus.SCHEDULING)
+            self.assertEqual(self.harness.submission_count, 0)
+
+            self.assertIs(manager.startAction(action, job_id, action_id), True)
+            self.assertEqual(manager.getMaxActionId(), action_id)
+            self.assertEqual(manager.queryStatus(action_id)[0], ActionStatus.ACTIVE)
+            self.assertIs(manager.startAction(action, job_id, action_id), True)
+            self.assertEqual(self.harness.submission_count, 1)
+        finally:
+            jobs.conn.close()
+
+    def test_action_manager_interface_requires_an_implementation(self):
+        """The interface cannot be instantiated; registered managers implement it.
+
+        Construct the real compute manager and the transfer harness through
+        JobData to verify both retain the asynchronous implementation behind
+        the common interface, with independent empty action records.
+        """
+        with self.assertRaises(TypeError):
+            ActionManager()
+        jobs = self._new_job_data()
+        try:
+            for manager in jobs.action_man.values():
+                self.assertIsInstance(manager, ActionManager)
+                self.assertIsInstance(manager, AsyncActionManager)
+                self.assertIsNone(manager.getMaxActionId())
+        finally:
+            jobs.conn.close()
+
     def test_action_id_recovery_uses_manager_interface(self):
         """Recover allocation from managers whose tables have custom names.
 
@@ -125,10 +170,10 @@ class SchedulingReconciliationTests(unittest.TestCase):
         all sources without knowing the action table names.
         """
         factories = {
-            ActionClass.COMPUTE: lambda conn, **kwargs: ActionManager(
+            ActionClass.COMPUTE: lambda conn, **kwargs: AsyncActionManager(
                 conn, "custom_compute", {}, **kwargs
             ),
-            ActionClass.TRANSFER: lambda conn, **kwargs: ActionManager(
+            ActionClass.TRANSFER: lambda conn, **kwargs: AsyncActionManager(
                 conn, "custom_transfer", {}, **kwargs
             ),
         }

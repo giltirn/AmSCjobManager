@@ -3,7 +3,7 @@ import sqlite3
 from .actions_base import ActionClass, actionClass
 from .globus_transfer_action import GlobusDataTransfers
 from .compute_action_manager import ComputeActions
-from .action_manager import ActionStatus, SimulatedCrash, _ser, _unser
+from .action_manager import ActionManager, ActionStatus, SimulatedCrash, _ser, _unser
 from .logging import wfmanLog
 import time
 import json
@@ -29,7 +29,7 @@ class JobData:
         }
         if _test_action_manager_factories:
             manager_factories.update(_test_action_manager_factories)
-        self.action_man = {
+        self.action_man: dict[ActionClass, ActionManager] = {
             action_class: factory(self.conn, _test_crash_at=self._test_crash_at)
             for action_class, factory in manager_factories.items()
         }
@@ -383,8 +383,7 @@ class JobData:
         for action_class, action, job_id, action_id in pending_actions:
             wfmanLog(f"Initiating action of type {action_class.name} for {job_id}")
             aman = self.action_man[action_class]
-            action_id = aman.startAction(action, job_id, action_id)
-            if action_id is None:
+            if not aman.startAction(action, job_id, action_id):
                 continue
             try:
                 action_status, _ = aman.queryStatus(action_id)
@@ -468,8 +467,7 @@ class JobData:
             aman = self.action_man[action_class]
             workflow = _unser(job["workflow"])
             action = workflow[job["workflow_stage"]]
-            action_id = aman.startAction(action, job["job_id"], action_id)
-            if action_id is not None:
+            if aman.startAction(action, job["job_id"], action_id):
                 try:
                     action_status, _ = aman.queryStatus(action_id)
                 except SimulatedCrash:

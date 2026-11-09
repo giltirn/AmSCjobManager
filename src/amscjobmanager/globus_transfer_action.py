@@ -5,7 +5,8 @@ from .api_general import (
     cancelGlobusTransfer, findGlobusTransferByLabel, globusCopy,
     globusTransferStatus,
 )
-from .action_manager import ActionManager, ActionStatus
+from .action_manager import ActionStatus
+from .async_action_manager import AsyncActionManager
 import sqlite3
 
 @dataclass
@@ -40,7 +41,7 @@ class GlobusTransfer(TransferActionBase):
         """
         return { "origin" : f"{self.source_endpoint}:{self.source_path}",  "destination" : f"{self.dest_endpoint}:{self.dest_path}" }
 
-class GlobusDataTransfers(ActionManager):
+class GlobusDataTransfers(AsyncActionManager):
     """Action manager for Globus transfers"""
     terminal_api_statuses = {"SUCCEEDED", "FAILED"}
     def __init__(self, connection : sqlite3.Connection, **kwargs):

@@ -74,7 +74,7 @@ GlobusTransfer(
 
 Prefer keyword arguments. These dataclasses are descriptions, not submitted
 jobs. `initiateAction(job_id, name=None)` returns the remote ID when called by
-ActionManager; exceptions are handled by its submission policy.
+AsyncActionManager; exceptions are handled by its submission policy.
 `queryResourceStatus()` returns `True`, `False`, or `None` for no available
 signal. See [workflows](workflows.md) for parameter meanings.
 

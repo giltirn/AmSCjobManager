@@ -1,8 +1,6 @@
 import pickle
-import sqlite3
-import time
+from abc import ABC, abstractmethod
 from enum import Enum
-from .logging import wfmanLog
 
 def _ser(obj):
     return pickle.dumps(obj, protocol=pickle.HIGHEST_PROTOCOL)
@@ -26,490 +24,110 @@ class SimulatedCrash(RuntimeError):
         self.point = point
         super().__init__(f"Simulated crash at {point}")
     
-class ActionManager:
-    """A database-backed manager for initiating and querying action status"""
+class ActionManager(ABC):
+    """Workflow-facing action-manager interface, independent of storage schema.
 
-    def _queryStatusInternal(self, machine, api_key):
-        """Return the API status"""        
-        raise NotImplementedError("Derived class must implement _queryStatusInternal")
+    Implementations own their records, execution and recovery. JobData always
+    allocates action IDs and supplies them on initial execution and recovery;
+    action managers never allocate or replace them.
+    Construction and internal reconciliation hooks are implementation-specific.
+    """
 
-    def _findRemoteActionByName(self, machine, name):
-        """Return the remote API key for an action name, or None if absent."""
-        return None
-
-    def _cancelActionInternal(self, machine, api_key):
-        """Request cancellation of a submitted remote action."""
-        raise NotImplementedError("Derived class must implement _cancelActionInternal")
-
-    @staticmethod
-    def _remoteActionName(action_id):
-        """Return the deterministic name used to find an action after a crash."""
-        return f"amscjm_{action_id}"
-    
-    def __init__(self, connection : sqlite3.Connection, table_name, api_action_status_map : dict,
-                 *, _test_crash_at: str | None = None,
-                 scheduling_retry_delay=30, max_submission_attempts=3):
-        """
-        api_action_status_map : map between return status from the API to an ActionStatus
-        """
-        self.conn = connection
-        self.table_name = table_name
-        self.api_action_status_map = api_action_status_map #
-        self._test_crash_at = _test_crash_at
-        self.scheduling_retry_delay = scheduling_retry_delay
-        self.max_submission_attempts = max_submission_attempts
-        
-        with self.conn as conn:        
-            conn.execute(f"""
-            CREATE TABLE IF NOT EXISTS {table_name} (
-            action_id INTEGER PRIMARY KEY,
-            machine TEXT,
-            details BLOB,
-            api_key TEXT,
-            api_status TEXT,
-            action_status TEXT,
-            last_update INTEGER,
-            job_id INTEGER,
-            submission_attempts INTEGER NOT NULL DEFAULT 0,
-            last_submission_attempt INTEGER,
-            last_submission_error TEXT
-            )
-            """)
-
-    def _maybeSimulateCrash(self, point):
-        if point == self._test_crash_at:
-            raise SimulatedCrash(point)
-
-    def _recordSchedulingIntent(self, action, job_id, action_id):
-        """Persist an action's scheduling intent unless its record exists.
+    @abstractmethod
+    def startAction(self, action, job_id: int, action_id: int) -> bool:
+        """Start or recover an action, retaining an existing record's state.
 
         Args:
             action (object): Serializable action definition from the workflow.
-            job_id (int): Positive workflow ID owning the action.
-            action_id (int): Positive, JobData-issued action ID.
+            job_id (int): Positive owning workflow ID.
+            action_id (int): Positive global action ID allocated by JobData
+                before the initial call. Supply the same ID during recovery.
 
         Returns:
-            int: The action ID, whether its record was created or already
-                existed. Existing definitions and execution state are retained.
+            bool: True when this scheduling/recovery pass is resolved and the
+                caller should read queryStatus using the supplied action_id;
+                False when deferred and the workflow head should remain
+                unchanged until a later attempt. True does not imply successful
+                submission: the recorded status may also indicate failure.
+                Repeated calls must safely recover existing work.
         """
-        with self.conn as conn:
-            existing = conn.execute(
-                f"SELECT action_id FROM {self.table_name} WHERE action_id = ?",
-                (action_id,),
-            ).fetchone()
-            if existing is not None:
-                return existing["action_id"]
+        raise NotImplementedError
 
-            conn.execute(
-                f"INSERT INTO {self.table_name}(action_id, machine, details, api_key, api_status, action_status, last_update, job_id) VALUES (?,?,?,?,?,?,?,?)",
-                (
-                    action_id,
-                    getattr(action, "machine", None),
-                    _ser(action),
-                    None,
-                    None,
-                    ActionStatus.SCHEDULING.name,
-                    int(time.time()),
-                    job_id,
-                ),
-            )
-        self._maybeSimulateCrash("action_intent_persisted")
-        return action_id
-
-    def startAction(self, action, job_id, action_id):
-        """Start or recover an action using its durable workflow identity.
+    @abstractmethod
+    def cancelAction(self, action_id: int, *, recovery: tuple[object, int] | None = None) -> int | None:
+        """Cancel an action without initiating new work.
 
         Args:
-            action (object): Serializable action definition from the workflow.
-                Used only when no record exists for ``action_id``.
-            job_id (int): Positive workflow ID owning the action.
-            action_id (int): Positive, JobData-issued action ID, reused during
-                recovery rather than allocating a new ID.
+            action_id (int): Positive global action ID.
+            recovery (tuple[object, int] | None): Optional stored action at index
+                0 and positive owning workflow ID at index 1. Allows recovery
+                of a missing record. Defaults to None.
 
         Returns:
-            int | None: The action ID when its recorded state can be read, or
-                None when reconciliation must wait. Existing action state is
-                preserved; an already-submitted action is not blindly resubmitted.
+            int | None: Action ID when cancellation is resolved, or None when
+                recovery must wait. Failures must retain cancellation intent.
         """
-        action_id = self._recordSchedulingIntent(action, job_id, action_id)
-        return self._reconcileScheduledAction(action_id)
+        raise NotImplementedError
 
-    def hasAction(self, action_id):
-        """Return whether this manager has persisted the supplied action ID."""
-        with self.conn as conn:
-            return conn.execute(
-                f"SELECT 1 FROM {self.table_name} WHERE action_id = ?", (action_id,)
-            ).fetchone() is not None
+    @abstractmethod
+    def hasAction(self, action_id: int) -> bool:
+        """Return whether positive integer action_id has a persisted record."""
+        raise NotImplementedError
 
+    @abstractmethod
     def getMaxActionId(self) -> int | None:
-        """Return the highest action ID recorded by this manager.
+        """Take no arguments; return the highest recorded int ID, or None if empty."""
+        raise NotImplementedError
 
-        Takes no arguments. Returns a positive int, or None when this manager
-        has no action records. JobData uses this to initialize its shared ID
-        allocator without depending on the manager's database schema.
-        """
-        return self.conn.execute(
-            f"SELECT MAX(action_id) FROM {self.table_name}"
-        ).fetchone()[0]
-
-    def _recordCancelingIntent(self, action_id):
-        """Persist ``CANCELING`` for an action before any remote API call.
-
-        ``action_id`` (int) is the positive ID of a recorded action. Return
-        None after recording intent. Repeated calls leave a
-        ``CANCELING`` or ``CANCELED`` action unchanged. Raise ``ValueError``
-        if the action is unknown.
-        """
-        with self.conn as conn:
-            action = conn.execute(
-                f"SELECT action_status FROM {self.table_name} "
-                "WHERE action_id = ?", (action_id,),
-            ).fetchone()
-        if action is None:
-            raise ValueError(f"Unknown action_id: {action_id}")
-        if action["action_status"] in (
-            ActionStatus.CANCELING.name, ActionStatus.CANCELED.name
-        ):
-            return
-
-        with self.conn as conn:
-            conn.execute(
-                f"UPDATE {self.table_name} SET action_status = ?, last_update = ? "
-                "WHERE action_id = ?",
-                (ActionStatus.CANCELING.name, int(time.time()), action_id),
-            )
-        self._maybeSimulateCrash("action_canceling_persisted")
-
-    def _reconcileCancelingAction(self, action_id):
-        """Finish a recorded cancellation without submitting new work.
-
-        ``action_id`` identifies an action in ``CANCELING``. If submission
-        completed before its remote ID was saved, look it up by name. Query
-        remote status before requesting cancellation; API errors leave the
-        action in ``CANCELING`` for a later retry. Return ``action_id`` when
-        cancellation is resolved, or ``None`` while remote discovery may lag.
-        """
-        with self.conn as conn:
-            action = conn.execute(
-                f"SELECT machine, api_key, action_status, submission_attempts, "
-                f"last_submission_attempt FROM {self.table_name} "
-                "WHERE action_id = ?", (action_id,),
-            ).fetchone()
-        if action is None:
-            raise ValueError(f"Unknown action_id: {action_id}")
-        if action["action_status"] == ActionStatus.CANCELED.name:
-            return action_id
-        if action["action_status"] != ActionStatus.CANCELING.name:
-            raise ValueError(f"Action {action_id} is not awaiting cancellation")
-
-        api_key = action["api_key"]
-        api_status = None
-        action_status = ActionStatus.CANCELED
-
-        #If there is no API key attached to the record, it means that the submission process did not complete
-        #We wait for a while in case clarity is obtained, and if not we call it quits and mark it as canceled
-        if api_key is None:
-            api_key = self._findRemoteActionByName(
-                action["machine"], self._remoteActionName(action_id)
-            )
-            if api_key is None and action["submission_attempts"] > 0:
-                # The submission may have reached the remote service before
-                # its ID was saved. Give name indexing the same delay used
-                # before retrying that submission.
-                retry_delay = self.scheduling_retry_delay * (
-                    2 ** (action["submission_attempts"] - 1)
-                )
-                if int(time.time()) < action["last_submission_attempt"] + retry_delay:
-                    return None
-            elif api_key is not None:
-                with self.conn as conn:
-                    conn.execute(
-                        f"UPDATE {self.table_name} SET api_key = ?, last_update = ? "
-                        "WHERE action_id = ?",
-                        (api_key, int(time.time()), action_id),
-                    )
-        if api_key is not None:
-            api_status = self._queryStatusInternal(action["machine"], api_key)
-            if api_status in self.terminal_api_statuses:
-                action_status = self.api_action_status_map[api_status]
-            else:
-                self._cancelActionInternal(action["machine"], api_key)
-                self._maybeSimulateCrash("remote_cancellation_completed")
-
-        with self.conn as conn:
-            conn.execute(
-                f"UPDATE {self.table_name} SET api_status = ?, action_status = ?, "
-                "last_update = ? WHERE action_id = ?",
-                (api_status, action_status.name, int(time.time()), action_id),
-            )
-        return action_id
-
-    def cancelAction(self, action_id, *, recovery: tuple[object, int] | None = None):
-        """Record cancellation intent and reconcile an action without submitting it.
+    @abstractmethod
+    def queryStatus(self, action_id: int, update_freq=30, force_update=False) -> tuple[ActionStatus, str | None]:
+        """Read an action's status, refreshing external state when appropriate.
 
         Args:
-            action_id (int): Positive, JobData-issued action ID.
-            recovery (tuple[object, int] | None): Optional pair containing the
-                stored action definition at index 0 and its positive workflow
-                ID at index 1. Used to recover a missing action record after a
-                crash. An existing record is left unchanged. Defaults to None.
+            action_id (int): Positive global action ID.
+            update_freq (float): Minimum seconds between external polls;
+                defaults to 30. Infinity requests cached state.
+            force_update (bool): Refresh regardless of cache age; defaults to
+                False. Managers without external state may return stored status.
 
         Returns:
-            int | None: The action ID when cancellation is resolved, or None
-                while remote discovery must wait. API failures propagate,
-                retaining cancellation intent for a subsequent call.
-
-        Raises:
-            ValueError: If the action is unknown and no recovery definition
-                is supplied.
+            tuple[ActionStatus, str | None]: Action status at index 0 and raw
+                provider status at index 1, or None when unavailable/inapplicable.
         """
-        if recovery is not None:
-            action, job_id = recovery
-            # A crash may leave the workflow head persisted without an action
-            # record. Recreate that record so cancellation can persist its
-            # intent and reconcile any remote work; this does not submit the
-            # action, and an existing record is left unchanged.
-            self._recordSchedulingIntent(action, job_id, action_id)
-        self._recordCancelingIntent(action_id)
-        return self._reconcileCancelingAction(action_id)
+        raise NotImplementedError
 
-    def _reconcileScheduledAction(self, action_id):
-        """Submit or recover a SCHEDULING action from its durable intent.
+    @abstractmethod
+    def updateStatuses(self) -> None:
+        """Take no arguments; refresh all active statuses and return None.
 
-        ``action_id`` identifies the action. A fresh intent is submitted
-        directly; after an attempt, the remote action is sought by name
-        before retrying with backoff. Return the action ID when its local
-        state can be read, or ``None`` when recovery must wait.
+        Managers with no externally tracked work may perform no operation.
         """
-        with self.conn as conn:
-            action = conn.execute(
-                f"SELECT machine, details, job_id, api_key, action_status, submission_attempts, "
-                f"last_submission_attempt FROM {self.table_name} WHERE action_id = ?",
-                (action_id,),
-            ).fetchone()
-        if action is None:
-            raise Exception(f"Unknown action {action_id}")
-        if action["action_status"] != ActionStatus.SCHEDULING.name:
-            return action_id
+        raise NotImplementedError
 
-        api_key = action["api_key"]
-        submitted_now = False #submission was performed, used only for failure injection for testing
+    @abstractmethod
+    def waitForAction(self, action_id: int, check_freq=30) -> ActionStatus:
+        """Wait while an action is ACTIVE and return its resulting ActionStatus.
 
-        #If the submission previously failed such that no API key was returned, we need to see if the action was actually submitted
-        #using the metadata label we attached to it.
-        if api_key is None and action["submission_attempts"] > 0:
-            try:
-                api_key = self._findRemoteActionByName(
-                    action["machine"], self._remoteActionName(action_id)
-                ) #returns None if it could not be found
-            except SimulatedCrash:
-                raise
-            except Exception as exc:
-                wfmanLog(
-                    f"Remote lookup failed for {self.table_name} action {action_id} "
-                    f"(job {action['job_id']}, machine {action['machine']!r}); "
-                    f"deferring reconciliation: {type(exc).__name__}: {exc}"
-                )
-                with self.conn as conn:
-                    conn.execute(
-                        f"UPDATE {self.table_name} SET last_submission_error = ?, last_update = ? "
-                        "WHERE action_id = ?",
-                        (str(exc), int(time.time()), action_id),
-                    )
-                #If the recovery of the API key fails, we can't proceed, so we return None to leave it to a later pass
-                return None
-
-        # If no remote action was found, either retry submission or stop after
-        # the permitted number of attempts.
-        if api_key is None:
-
-            # Wait out the submission backoff before querying resource status
-            # for an attempt that is not yet due. A final exhausted attempt
-            # still checks the resource before it can be marked failed.
-            if 0 < action["submission_attempts"] < self.max_submission_attempts:
-                retry_delay = self.scheduling_retry_delay * (
-                    2 ** (action["submission_attempts"] - 1)
-                )
-                if int(time.time()) < action["last_submission_attempt"] + retry_delay:
-                    return None
-
-            submitted_action = _unser(action["details"])
-            self._maybeSimulateCrash("before_resource_status_check")
-            try:
-                resource_status = submitted_action.queryResourceStatus()
-            except SimulatedCrash:
-                raise
-            except Exception as exc:
-                wfmanLog(f"Could not query resource status for action {action_id}: {exc}")
-                return None
-            self._maybeSimulateCrash("resource_status_checked")
-            if resource_status is False:
-                wfmanLog(f"Resource for action {action_id} is down; deferring submission")
-                return None
-            if resource_status is not None and resource_status is not True:
-                raise TypeError("queryResourceStatus must return True, False, or None")
-
-            #If we've maxed out our submission attempts we mark the workflow as failed
-            if action["submission_attempts"] >= self.max_submission_attempts:
-                error = "Remote action was not found after the maximum number of submission attempts"
-                wfmanLog(
-                    f"Submission retries exhausted for {self.table_name} action {action_id} "
-                    f"(job {action['job_id']}, machine {action['machine']!r}, "
-                    f"{action['submission_attempts']} attempts); marking FAILED: {error}"
-                )
-                with self.conn as conn:
-                    conn.execute(
-                        f"UPDATE {self.table_name} SET api_status = ?, action_status = ?, "
-                        "last_submission_error = ?, last_update = ? WHERE action_id = ?",
-                        (error, ActionStatus.FAILED.name, error, int(time.time()), action_id),
-                    )
-                return action_id
-
-            # Persist the attempt before contacting the remote service. A
-            # crash during submission then triggers lookup and retry backoff.
-            with self.conn as conn:
-                conn.execute(
-                    f"UPDATE {self.table_name} SET submission_attempts = submission_attempts + 1, "
-                    "last_submission_attempt = ?, last_submission_error = NULL "
-                    "WHERE action_id = ?",
-                    (int(time.time()), action_id),
-                )
-            self._maybeSimulateCrash("before_remote_submission")
-            try:
-                #Do the submission!
-                api_key = submitted_action.initiateAction(
-                    action["job_id"], name=self._remoteActionName(action_id)
-                )
-            except SimulatedCrash:
-                raise
-            except Exception as exc:
-                # Keep the action schedulable until the next pass can check
-                # whether the remote service accepted this final attempt.
-                wfmanLog(
-                    f"Submission failed for {self.table_name} action {action_id} "
-                    f"(job {action['job_id']}, machine {action['machine']!r}, "
-                    f"attempt {action['submission_attempts'] + 1}/{self.max_submission_attempts}); "
-                    f"retaining SCHEDULING for reconciliation: {type(exc).__name__}: {exc}"
-                )
-                with self.conn as conn:
-                    conn.execute(
-                        f"UPDATE {self.table_name} SET last_submission_error = ? "
-                        "WHERE action_id = ?",
-                        (str(exc), action_id),
-                    )
-                return action_id
-            submitted_now = True
-            self._maybeSimulateCrash("remote_submission_completed")
-
-        #Query the job status
-
-        # Save the remote ID before polling, whether submitted now or found
-        # during recovery. A status outage must not make the action unfindable.
-        with self.conn as conn:
-            conn.execute(
-                f"UPDATE {self.table_name} SET api_key = ?, last_update = ?, "
-                "last_submission_error = NULL WHERE action_id = ?",
-                (api_key, int(time.time()), action_id),
-            )
-        try:
-            api_status = self._queryStatusInternal(action["machine"], api_key)
-        except SimulatedCrash:
-            raise
-        except Exception as exc:
-            wfmanLog(
-                f"Status poll failed for {self.table_name} action {action_id} "
-                f"(job {action['job_id']}, machine {action['machine']!r}, remote ID {api_key!r}); "
-                f"deferring reconciliation: {type(exc).__name__}: {exc}"
-            )
-            with self.conn as conn:
-                conn.execute(
-                    f"UPDATE {self.table_name} SET last_submission_error = ?, last_update = ? "
-                    "WHERE action_id = ?",
-                    (str(exc), int(time.time()), action_id),
-                )
-            return action_id
-        if submitted_now:
-            self._maybeSimulateCrash("remote_status_obtained")
-        action_status = self.api_action_status_map[api_status]
-        with self.conn as conn:
-            conn.execute(
-                f"UPDATE {self.table_name} SET api_key = ?, api_status = ?, action_status = ?, last_update = ? WHERE action_id = ?",
-                (api_key, api_status, action_status.name, int(time.time()), action_id),
-            )
-        if submitted_now:
-            self._maybeSimulateCrash("action_state_persisted")
-        return action_id
-
-    def updateStatuses(self):
-        """Force update of all active statuses"""
-        with self.conn as conn:
-            actions = conn.execute(f"SELECT action_id, api_key, machine FROM {self.table_name} WHERE action_status = ?", (ActionStatus.ACTIVE.name,) ).fetchall()
-            for t in actions:
-                api_status = self._queryStatusInternal(t['machine'],t['api_key'])
-                action_status = self.api_action_status_map[api_status]
-
-                conn.execute(f"UPDATE {self.table_name} SET api_status = ?, action_status = ?, last_update = ? WHERE action_id = ?", (api_status, action_status.name, int(time.time()), t['action_id']) )
-
-    def __str__(self):
-        with self.conn as conn:
-            actions = conn.execute(f"SELECT api_key, action_status, api_status, last_update FROM {self.table_name}").fetchall()
-            out = ""
-            for t in actions:
-                out = out + f"({t['api_key']},{t['action_status']}[ {t['api_status']} ],{t['last_update']})\n"
-            return out
-                    
-            
-    def queryStatus(self, action_id, update_freq=30, force_update=False):
+        Args:
+            action_id (int): Positive global action ID.
+            check_freq (float): Seconds between status checks; defaults to 30.
         """
-        Query the status of an action by id. This will use the last known status unless it has been more than update_freq seconds since the last poll or force_update == True
-        Return: action_status, api_status
-        """
-        with self.conn as conn:
-            action = conn.execute(f"SELECT action_status, api_status, last_update, machine, api_key FROM {self.table_name} WHERE action_id = ?", (action_id,) ).fetchone()
-            action_status = getattr(ActionStatus, action['action_status'],None)
-            api_status = action['api_status']
-            if action_status in (ActionStatus.CANCELED, ActionStatus.CANCELING):
-                return action_status, api_status
-            if action['api_key'] is None:
-                return action_status, api_status
-            if force_update or (int(time.time()) > action['last_update'] + update_freq):
-                api_status = self._queryStatusInternal(action['machine'],action['api_key'])
-                action_status = self.api_action_status_map[api_status]
-                
-                conn.execute(f"UPDATE {self.table_name} SET api_status = ?, action_status = ?, last_update = ? WHERE action_id = ?", (api_status, action_status.name, int(time.time()), action_id) )
-            return action_status, api_status
-        
-    def waitForAction(self, action_id, check_freq=30):
-        """Blocking wait until the action either completes or fails. Status checks are performed every check_freq seconds. Return the final status."""
-        while( (action_status := self.queryStatus(action_id,force_update=True)[0] ) == ActionStatus.ACTIVE):
-            time.sleep(check_freq)
-        return action_status
+        raise NotImplementedError
 
-    def getActiveActions(self):
-        """
-        Get all active actions and returning a list of dictionaries, each containing "api_key", "api_status" and other custom fields defined on a per-action basis
-        """
-        out = []
-        with self.conn as conn:
-            entries = conn.execute(f"SELECT job_id, api_key, api_status, details FROM {self.table_name} WHERE action_status = ?", (ActionStatus.ACTIVE.name,) ).fetchall()
-            for entry in entries:
-                action = _unser(entry['details'])
-                dc = action.getInfo()
-                dc['job_id'] = entry['job_id']
-                dc['api_key'] = entry['api_key']
-                dc['api_status'] = entry['api_status']
-                out.append(dc)
-        return out
+    @abstractmethod
+    def getActiveActions(self) -> list[dict]:
+        """Take no arguments; return information dictionaries for ACTIVE actions.
 
-    def getActionInfo(self, action_id)->dict:
+        Each dictionary contains job_id (positive int), api_key (str or None),
+        api_status (str or None), and implementation-specific action details.
         """
-        For the given action, return a dictionary containing "api_key", "api_status" and other custom fields defined on a per-action basis
-        """        
-        with self.conn as conn:
-            entry = conn.execute(f"SELECT job_id, details, api_status, api_key FROM {self.table_name} WHERE action_id = ?", (action_id,) ).fetchone()
-            action = _unser(entry['details'])
-            dc = action.getInfo()
-            dc['job_id'] = entry['job_id']
-            dc['api_key'] = entry['api_key']
-            dc['api_status'] = entry['api_status']
-            return dc
+        raise NotImplementedError
+
+    @abstractmethod
+    def getActionInfo(self, action_id: int) -> dict:
+        """Return an information dictionary for positive integer action_id.
+
+        Includes job_id (positive int), api_key (str or None), api_status
+        (str or None), and implementation-specific action details.
+        """
+        raise NotImplementedError

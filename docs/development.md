@@ -139,7 +139,7 @@ description of requested work, rather than open clients, threads, or connections
 
 Implement `initiateAction(job_id, name=None)` to submit via the API and return
 the remote identifier. Pass `name` through to the provider: recovery depends on
-the deterministic name/label supplied by ActionManager. Submission should return
+the deterministic name/label supplied by AsyncActionManager. Submission should return
 after acceptance so the manager can monitor asynchronously. API errors currently
 raise exceptions; a richer result protocol has not been introduced.
 
@@ -155,9 +155,27 @@ inherit machine/queue/time fields, while transfer actions must supply their own
 origin/destination description. The existing manager for that action class must
 support its remote ID, status query, name lookup, and cancellation semantics.
 If introducing a new action category, also extend `ActionClass`, `actionClass()`,
-and JobData's manager registry/table handling.
+and JobData's manager registry.
 
-ActionManager owns database transitions. Actions should wrap API operations and
+`ActionManager` is the abstract workflow-facing interface in `action_manager.py`.
+Implementations own their database schemas and transitions. Its public methods
+are `startAction`, `cancelAction`, `hasAction`, `getMaxActionId`, `queryStatus`,
+`updateStatuses`, `waitForAction`, `getActiveActions`, and `getActionInfo`.
+`JobData` uses `getMaxActionId` to recover its shared ID allocator without reading
+implementation tables. Internal reconciliation hooks are not part of the interface.
+JobData always allocates the action ID before initial execution and supplies the
+same ID during recovery. `startAction` returns a boolean, not an assigned ID:
+`True` tells the caller to read the recorded status with `queryStatus`, while
+`False` defers the attempt and leaves the workflow head unchanged. A `True`
+return does not imply successful submission; the recorded status may be failed.
+
+`AsyncActionManager` in `async_action_manager.py` supplies the existing compute
+and transfer persistence, retries, polling, and crash recovery. `ComputeActions`
+and `GlobusDataTransfers` inherit it and provide provider-specific operations.
+New managers with different execution semantics can implement `ActionManager`
+directly without adopting the asynchronous manager's database fields.
+
+Actions should wrap API operations and
 leave transaction, retry, and workflow decisions to the manager. The simulator
 and test-only factory hooks let tests replace remote behavior without changing
 the production persistence path.

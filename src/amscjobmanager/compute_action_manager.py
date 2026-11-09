@@ -1,8 +1,9 @@
-from .action_manager import ActionManager, ActionStatus
+from .action_manager import ActionStatus
+from .async_action_manager import AsyncActionManager
 import sqlite3
 from .api_general import cancelJob, getJobState, findJobByName
 
-class ComputeActions(ActionManager):
+class ComputeActions(AsyncActionManager):
     """Action manager for all compute jobs submitted via the IRI API"""
     terminal_api_statuses = {"completed", "failed", "canceled"}
     def __init__(self, connection : sqlite3.Connection, **kwargs):

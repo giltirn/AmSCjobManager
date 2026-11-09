@@ -22,7 +22,7 @@ actions. Files created by a successful action remain if a later action fails.
 flowchart TD
     User[Python application] --> Manager[JobManager: background loop and lock]
     Manager --> Jobs[JobData: workflows and head actions]
-    Jobs --> Actions[ActionManager: individual action records]
+    Jobs --> Actions[ActionManager interface: individual actions]
     Actions --> Action[Action object: resource query and submission]
     Action --> API[api_general: selected implementation]
     Actions --> API
@@ -38,7 +38,8 @@ flowchart TD
 | --- | --- |
 | `JobManager` | Owns a `JobData` instance, progresses it in a background thread, and serializes access through a lock. |
 | `JobData` | Persists workflows, selects the current action, allocates action IDs, and advances completed workflows. |
-| `ActionManager` | Persists submission/cancellation intent, remote identifiers, status, and retry information for an action. Compute and Globus subclasses implement the remote control operations. |
+| `ActionManager` | Abstract interface for starting, canceling, recovering, and querying actions. Does not prescribe a database schema. |
+| `AsyncActionManager` | Implements action persistence, submission/cancellation recovery, remote identifiers, polling, and retries. Compute and Globus subclasses supply the remote control operations. |
 | Action objects | Describe the requested work. `queryResourceStatus()` supplies an availability signal; `initiateAction()` submits and returns a remote identifier. |
 | `api_general` | Selects IRI or SPOOF at import time and supplies shared convenience functions. |
 | IRI modules | Implement authentication, provider/resource discovery, compute, filesystem, and transfer requests. Several operations dispatch to local execution when `machine="local"`. |

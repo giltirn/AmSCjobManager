@@ -4,6 +4,8 @@ Remote transfer tests mock only the transfer service. Crash tests reopen SQLite
 and inspect file effects to distinguish replay from skipped checkpoints.
 """
 
+
+
 from pathlib import Path
 import sqlite3
 import sys
@@ -13,6 +15,7 @@ import unittest
 from unittest.mock import patch
 
 from amscjobmanager import local_api
+from action_manager_helpers import DirectAPIActions, DirectComputeActions, DirectGlobusActions
 from amscjobmanager.action_manager import ActionManager, ActionStatus, SimulatedCrash
 from amscjobmanager.actions_base import ActionClass, actionClass
 from amscjobmanager.api_action_manager import APIActions
@@ -27,6 +30,14 @@ from amscjobmanager.job_data import JobData
 class APIActionTests(unittest.TestCase):
     def setUp(self):
         """Create an isolated local workspace/database and capture manager logs."""
+        # These tests isolate the checked-in reconciliation bodies; real
+        # asynchronous lifecycles and crash recovery have separate integration tests.
+        for name, implementation in [('APIActions', DirectAPIActions),
+                                     ('ComputeActions', DirectComputeActions),
+                                     ('GlobusDataTransfers', DirectGlobusActions)]:
+            adapter = patch(f'amscjobmanager.job_data.{name}', implementation)
+            adapter.start()
+            self.addCleanup(adapter.stop)
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
@@ -187,9 +198,9 @@ class APIActionTests(unittest.TestCase):
                 with self.assertRaises(SimulatedCrash):
                     jobs.cancelJob(job_id)
                 action_id = jobs.jobState(job_id)['head_action_id']
-                self.assertEqual(manager.queryStatus(action_id)[0], ActionStatus.CANCELED)
+                self.assertEqual(manager.queryRecordedStatus(action_id)[0], ActionStatus.CANCELED)
                 self.assertEqual(jobs.jobStatus(job_id), ActionStatus.CANCELING)
-                self.assertEqual(manager.cancelAction(action_id), action_id)
+                self.assertIsNone(manager.cancelOrResumeCancelingAction(action_id))
                 jobs.conn.close()
                 recovered = JobData(database)
                 try:
@@ -208,17 +219,17 @@ class APIActionTests(unittest.TestCase):
             job_id = jobs.enqueueJob(APIAction())
             jobs.startWorkflows([job_id])
             action_id = jobs.jobState(job_id)['head_action_id']
-            self.assertEqual(manager.queryStatus(action_id, force_update=True), (ActionStatus.COMPLETED, None))
+            self.assertEqual(manager.queryRecordedStatus(action_id, force_update=True), (ActionStatus.COMPLETED, None))
             self.assertEqual(manager.waitForAction(action_id), ActionStatus.COMPLETED)
             self.assertIsNone(manager.updateStatuses())
             self.assertEqual(manager.getActiveActions(), [])
             for cursor in [-1, 1.5, 'bad']:
-                with self.assertRaises(sqlite3.IntegrityError), jobs.conn:
-                    jobs.conn.execute('UPDATE api_actions SET next_operation = ? WHERE action_id = ?', (cursor, action_id))
+                with self.assertRaises(sqlite3.IntegrityError), jobs.conn as conn:
+                    conn.execute('UPDATE api_actions SET next_operation = ? WHERE action_id = ?', (cursor, action_id))
             with self.assertRaises(ValueError):
-                manager.queryStatus(999)
+                manager.queryRecordedStatus(999)
             with self.assertRaises(ValueError):
-                manager.cancelAction(999)
+                manager.cancelOrResumeCancelingAction(999)
             jobs.progressActiveState()
             self.assertEqual(jobs.jobStatus(job_id), ActionStatus.COMPLETED)
         finally:
@@ -245,7 +256,7 @@ class APIActionTests(unittest.TestCase):
         """Keep the original sequence when a recovery caller supplies amended inputs.
 
         Stop after intent persistence, force status reads, then supply a different
-        definition to startAction. Only the original persisted write may execute.
+        definition to startOrResumeAction. Only the original persisted write may execute.
         """
         jobs = JobData(self.database, _test_crash_at='action_intent_persisted')
         original, amended = self.root / 'original', self.root / 'amended'
@@ -255,10 +266,10 @@ class APIActionTests(unittest.TestCase):
                 jobs.startWorkflows([job_id])
             manager = jobs.action_man[ActionClass.API]
             action_id = jobs.jobState(job_id)['head_action_id']
-            self.assertEqual(manager.queryStatus(action_id, force_update=True), (ActionStatus.SCHEDULING, None))
+            self.assertEqual(manager.queryRecordedStatus(action_id, force_update=True), (ActionStatus.SCHEDULING, None))
             self.assertFalse(original.exists())
             manager._test_crash_at = None
-            self.assertIs(manager.startAction(APIAction([WriteFile('local', str(amended), 'amended')]), job_id, action_id), True)
+            self.assertIsNone(manager.startOrResumeAction(APIAction([WriteFile('local', str(amended), 'amended')]), job_id, action_id))
             self.assertTrue(original.exists())
             self.assertFalse(amended.exists())
         finally:

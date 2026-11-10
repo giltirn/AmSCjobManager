@@ -72,7 +72,7 @@ def createServer(manager: JobManager) -> MCPServer:
     @server.tool(annotations=ToolAnnotations(read_only_hint=True, destructive_hint=False))
     def list_workflows(
         workflow_id: Annotated[int, Field(gt=0, strict=True, description='Select a positive workflow database ID, not a list index. Omit to list all workflows.')] | None = None,
-        refresh: Annotated[StrictBool, Field(description='Poll all active workflow heads before filtering. Failed polls retain cached state; no steps are submitted or advanced.')] = False,
+        refresh: Annotated[StrictBool, Field(description='Wake supervisors to poll active workflow heads before filtering. Returns recorded state without waiting; no steps are submitted or advanced.')] = False,
         statuses: Annotated[list[Literal['PENDING', 'ACTIVE', 'COMPLETED', 'FAILED', 'CANCELING', 'CANCELED']] | None,
                             Field(description='Filter overall workflow statuses using OR. COMPLETED selects fully finished workflows, not intermediate steps. Omit for all statuses.')] = None,
     ) -> Annotated[CallToolResult, list[WorkflowSummary]]:
@@ -81,8 +81,9 @@ def createServer(manager: JobManager) -> MCPServer:
         Args:
             workflow_id (int | None): Positive workflow database ID, not a
                 list position. None selects all recorded workflows.
-            refresh (bool): If True, poll all ACTIVE heads before filtering,
-                even when workflow_id selects one record. Defaults to False.
+            refresh (bool): If True, request polling for all ACTIVE heads before filtering,
+                even when workflow_id selects one record. Pending workers
+                return cached state; supervisors record results when ready. Defaults to False.
             statuses (list[str] | None): Overall workflow status names from
                 PENDING, ACTIVE, COMPLETED, FAILED, CANCELING, and CANCELED.
                 Entries use uppercase names and OR semantics. None selects
@@ -101,7 +102,8 @@ def createServer(manager: JobManager) -> MCPServer:
             message. Invalid arguments are rejected separately by the SDK.
 
         Include completed/canceled records. An unknown explicit ID is an error.
-        refresh forces polling of all active workflow heads before returning;
+        refresh requests polling of all active workflow heads without waiting
+        for workers; responses contain currently recorded state.
         it does not submit or advance steps. Failed polls log their errors and
         retain cached statuses. ACTIVE includes queued compute jobs: api_status
         distinguishes provider states such as new, queued, and active. A null

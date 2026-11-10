@@ -1,4 +1,7 @@
 """Process-wide authenticated IRI connection state."""
+from collections import defaultdict
+from threading import RLock
+
 
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Union
@@ -51,6 +54,10 @@ class IRIComputeClient:
         self.http_client.close()
 
 
+# Serialize initialization per credential context, not across unrelated sites.
+# Workers can wait on shared authentication without closing each other's client.
+_implementation_locks = defaultdict(RLock)
+_transfer_lock = RLock()
 iri_compute_clients: dict[str, IRIComputeClient] = {}
 _implementation_credentials: dict[str, dict] = {}
 _implementation_accounts: dict[str, list[str]] = {}
@@ -108,20 +115,21 @@ def getImplementationClient(implementation: str) -> IRIComputeClient:
     authentication. Reentrant lookups from the checks reuse the registered
     client without restarting validation.
     """
-    implementation = implementation.lower()
-    if implementation not in iri_compute_clients:
-        settings = _implementation_credentials.get(implementation)
-        if settings is None:
-            raise RuntimeError(f"IRI implementation {implementation!r} is not configured")
-        setupImplementationClient(implementation, **settings)
-    if implementation not in _validating_clients:
-        _validating_clients.add(implementation)
-        try:
-            for machine in IRI_IMPLEMENTATIONS[implementation]["machines"]:
-                validateSandboxDirs(machine)
-        finally:
-            _validating_clients.remove(implementation)
-    return iri_compute_clients[implementation]
+    with _implementation_locks[implementation.lower()]:
+        implementation = implementation.lower()
+        if implementation not in iri_compute_clients:
+            settings = _implementation_credentials.get(implementation)
+            if settings is None:
+                raise RuntimeError(f"IRI implementation {implementation!r} is not configured")
+            setupImplementationClient(implementation, **settings)
+        if implementation not in _validating_clients:
+            _validating_clients.add(implementation)
+            try:
+                for machine in IRI_IMPLEMENTATIONS[implementation]["machines"]:
+                    validateSandboxDirs(machine)
+            finally:
+                _validating_clients.remove(implementation)
+        return iri_compute_clients[implementation]
 
 
 def getConfiguredImplementations() -> tuple[str, ...]:
@@ -166,16 +174,17 @@ def getTransferToken(service: str, *, authorization_parameters: dict | None = No
     authorization_parameters forces a new interactive authorization satisfying
     a Globus challenge, replacing and persisting both transfer-service tokens.
     """
-    if service not in tokens:
-        raise ValueError(f"Unknown transfer service: {service!r}")
-    if tokens[service] is None or authorization_parameters is not None:
-        if _transfer_token_path is None:
-            raise RuntimeError("Globus transfers require transferapi_key_path in the manager configuration")
-        if authorization_parameters is None:
-            setupIRIapiGlobusTransfer(_transfer_token_path)
-        else:
-            setupIRIapiGlobusTransfer(_transfer_token_path, authorization_parameters=authorization_parameters)
-    return tokens[service]
+    with _transfer_lock:
+        if service not in tokens:
+            raise ValueError(f"Unknown transfer service: {service!r}")
+        if tokens[service] is None or authorization_parameters is not None:
+            if _transfer_token_path is None:
+                raise RuntimeError("Globus transfers require transferapi_key_path in the manager configuration")
+            if authorization_parameters is None:
+                setupIRIapiGlobusTransfer(_transfer_token_path)
+            else:
+                setupIRIapiGlobusTransfer(_transfer_token_path, authorization_parameters=authorization_parameters)
+        return tokens[service]
 
 
 def setupImplementationClient(
@@ -188,14 +197,15 @@ def setupImplementationClient(
     discovery before machine and filesystem mappings are known. Registering
     before validation allows sandbox probes to reuse the same client.
     """
-    implementation = implementation.lower()
-    client = setupIRIapiCompute(implementation, token_path, token_type=token_type)
-    previous = iri_compute_clients.get(implementation)
-    if previous is not None:
-        previous.close()
-    iri_compute_clients[implementation] = client
-    _implementation_credentials[implementation] = {"token_path": token_path, "token_type": token_type}
-    return getImplementationClient(implementation)
+    with _implementation_locks[implementation.lower()]:
+        implementation = implementation.lower()
+        client = setupIRIapiCompute(implementation, token_path, token_type=token_type)
+        previous = iri_compute_clients.get(implementation)
+        if previous is not None and previous is not client:
+            previous.close()
+        iri_compute_clients[implementation] = client
+        _implementation_credentials[implementation] = {"token_path": token_path, "token_type": token_type}
+        return getImplementationClient(implementation)
 
 
 def _close_compute_clients():

@@ -97,8 +97,9 @@ loopback socket access and runs a real local sleep job, canceled in cleanup.
 See [the server guide](server.md#test-locally) for environment setup and commands.
 `test_manager_failures.py` also injects failures into the real background worker
 to check lock release, logging, and shutdown with unfinished work. MCP tests
-verify unavailable-manager errors, continued tool discovery, and recovery after
-an explicit manager restart.
+verify unavailable-manager errors, continued tool discovery, and rejection of
+restart after failure. Constructor-recovery tests create a new manager against
+the same database and verify that existing work resumes without resubmission.
 
 Read each script before running it. These commands can authenticate, create
 remote files, or submit real jobs/transfers, and some intentionally leave
@@ -136,7 +137,8 @@ before cancellation takes effect.
 For short filesystem preparation or processing, use the built-in
 [`APIAction` operations](api_actions.md) rather than a custom compute action.
 They run under `APIActions`, which implements `ActionManager` directly and owns
-its operation cursor. Long-running local tasks remain compute actions targeting
+its operation cursor. `Workers` runs API calls and authentication while the
+manager owns all database checkpoints. Long-running local tasks remain compute actions targeting
 `local`.
 
 Define a module-level, pickle-compatible dataclass inheriting
@@ -165,15 +167,53 @@ and JobData's manager registry.
 
 `ActionManager` is the abstract workflow-facing interface in `action_manager.py`.
 Implementations own their database schemas and transitions. Its public methods
-are `startAction`, `cancelAction`, `hasAction`, `getMaxActionId`, `queryStatus`,
-`updateStatuses`, `waitForAction`, `getActiveActions`, and `getActionInfo`.
+are `startOrResumeAction`, `cancelOrResumeCancelingAction`, `hasAction`, `getMaxActionId`, `queryRecordedStatus`,
+`updateStatuses`, `waitForAction`, `getActiveActions`, `getActionInfo`, and
+`stopWorkers`.
 `JobData` uses `getMaxActionId` to recover its shared ID allocator without reading
 implementation tables. Internal reconciliation hooks are not part of the interface.
 JobData always allocates the action ID before initial execution and supplies the
-same ID during recovery. `startAction` returns a boolean, not an assigned ID:
-`True` tells the caller to read the recorded status with `queryStatus`, while
-`False` defers the attempt and leaves the workflow head unchanged. A `True`
-return does not imply successful submission; the recorded status may be failed.
+same ID during recovery. "Resume" in `startOrResumeAction` specifically means
+recovering supervision from persisted state after a worker stopped, for example
+when constructing a new manager after shutdown or process failure. Normal execution needs no
+repeated calls: calls for a live worker reuse it. This is not a user-facing
+workflow pause/resume operation, and terminal actions are not restarted.
+`startOrResumeAction` and `cancelOrResumeCancelingAction` return `None`: they
+persist intent and start or signal supervision without waiting for provider work.
+`queryRecordedStatus` observes recorded state without accepting or changing a
+polling interval. Configure the interval at manager construction. Forced refresh
+wakes the worker and may return before the requested API poll finishes.
+
+The base supplies shared worker startup, interruption, error handling and cleanup.
+Derived managers explicitly pass execution and cancellation callables to the
+worker starters; neither callable is an abstract ActionManager method.
+`_startExecutionWorker(action_id, execute_action=..., complete_cancellation=...)`
+starts normal execution and retains the supplied cancellation callable for its
+handoff. `_startCancellationWorker(action_id, complete_cancellation=...)` starts
+cancellation recovery directly. Both callables take the global action ID and
+return None; they own persistence/recovery using the derived manager's schema.
+`_recordWorkerFailure` remains an internal abstract hook for unexpected errors. Shared `_startWorker`
+handles registration, failures and cleanup for either operation. When execution has
+finished running with a recorded CANCELING intent, its Future completion handoff starts
+cancellation on a separate worker. The handoff is serialized with new requests
+and shutdown, so execution and cancellation never perform work concurrently for
+one action. Recovery of CANCELING goes directly to the cancellation starter;
+shutdown suppresses the handoff and preserves intent.
+`AsyncActionManager._executeAction` supervises remote actions with polling/retry
+delays; `APIActions._executeAction` runs its remaining sequence
+directly without a periodic loop or polling interval. Remote cancellation has
+its own reconciliation/retry loop in `AsyncActionManager._completeCancellation`;
+API cancellation simply records CANCELED after the current operation has finished running.
+Keep ordinary API calls sequential inside these hooks, and use short database
+transactions through JobData's shared `LockedConnection` context manager.
+Use `with self.conn as conn:` for every SQL operation and fetch results before
+leaving the block. It yields a normal SQLite connection; neither connections
+nor cursors require SQL-method wrappers. Never hold its lock across API I/O or
+user input. JobData construction calls `resumeActions` after its tables and ID
+allocator are initialized, restoring workers for current unfinished heads,
+including ACTIVE actions. Workflow starting/progression does not trigger this
+recovery pass. JobManager is single-use; neither shutdown nor failure can be
+cleared by calling start() on the same instance.
 
 `AsyncActionManager` in `async_action_manager.py` supplies the existing compute
 and transfer persistence, retries, polling, and crash recovery. `ComputeActions`
@@ -191,11 +231,16 @@ the production persistence path.
 `JobData(..., _test_crash_at=POINT)` passes a test-only crash point to its action
 managers. A matching hook raises `SimulatedCrash`; tests reopen the same database
 with the hook disabled and reconcile against the simulated remote service.
+Hooks inside a supervisor are captured by its Future; `waitForAction` surfaces
+them to tests. `test_action_workers.py` also kills real child processes and
+checks autonomous polling and restart recovery. Existing reconciliation unit
+tests use the direct adapters in `action_manager_helpers.py` to exercise the
+same sequential production methods with deterministic crash boundaries.
 
 | Area | Hook names |
 | --- | --- |
 | Workflow submission | `job_head_scheduling_persisted`, `action_state_persisted_before_job_head_update` |
-| Action submission | `action_intent_persisted`, `before_remote_submission`, `remote_submission_completed`, `remote_status_obtained`, `action_state_persisted` |
+| Action submission | `action_intent_persisted`, `before_remote_submission`, `remote_submission_completed`, `remote_id_persisted`, `remote_status_obtained`, `action_state_persisted` |
 | API sequences | `action_intent_persisted`, `api_operation_N_started`, `api_operation_N_completed`, `api_operation_N_checkpoint_persisted`, `api_action_completed` (N is the zero-based operation index) |
 | Resource pre-check | `before_resource_status_check`, `resource_status_checked` |
 | Cancellation | `job_head_canceling_persisted`, `action_canceling_persisted`, `remote_cancellation_completed`, `action_canceled_before_job_head_update` |

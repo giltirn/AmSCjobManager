@@ -4,7 +4,8 @@
 
 ## Lifecycle and locking
 
-Initialize API configuration before creating work. `JobManager.start()` launches
+Initialize API configuration before constructing a manager: opening an existing
+database immediately recovers workers for unfinished actions. `JobManager.start()` launches
 a background thread that starts eligible workflows and progresses active ones.
 Calls to `start()` while it is already running return without starting another
 thread.
@@ -63,16 +64,16 @@ See [troubleshooting](troubleshooting.md).
 | --- | --- |
 | `filename=None` | In-memory workflow DB. Use an on-disk filename for remote recovery. |
 | `max_workflows_active=10` | Limit used when automatically starting pending workflows. `SCHEDULING`, `ACTIVE`, and `CANCELING` heads occupy slots. `0` disables automatic starts. |
-| `poll_freq=30` | Minimum interval in seconds between successful cached-status refreshes for an active action. `0` makes it eligible each progression pass. It is not an API request timeout. |
+| `poll_freq=30` | Worker delay in seconds between provider API status requests or recovery attempts. `0` uses a 0.01-second minimum delay. Set at manager construction; recorded-status reads do not change it. It is not an API request timeout. |
 
-The manager loop also sleeps between passes. Requests and blocking filesystem
-operations can take longer than a polling interval. Deferred compute submissions
+The manager loop also sleeps between workflow passes. API requests and blocking
+filesystem operations can take longer than a supervisor interval. Deferred compute submissions
 can occupy all active slots during maintenance and delay pending workflows for
 other resources.
 
 A failed status poll leaves the last known action/workflow state and successful
 update timestamp unchanged. It does not consume a submission attempt or add a
-failure state. The manager retries on a later pass using its existing cadence;
+failure state. The supervisor retries after its normal delay;
 no extra poll-failure counter or backoff is maintained. Only a successful status
 read can authorize the next workflow step. Direct status API calls can still
 raise errors to their callers.
@@ -107,9 +108,11 @@ workflow. Inspect `head_action_status` for that distinction.
 Use `headActionStatus(job_id)` for the recorded head action status, including
 `SCHEDULING` and intermediate `COMPLETED`. With `return_api_status=True` it
 returns `(action_status, api_status)`, where the latter is the provider status
-string or `None` when unavailable. Set `force_poll=True` to refresh all active
-heads and propagate their statuses into the workflow records without advancing
-workflow steps. Poll failures are logged and return the last known state.
+string or `None` when unavailable. Set `force_poll=True` to wake supervisors
+for all active heads and copy their currently recorded status without advancing
+workflow steps. The requested polls may finish after this call returns; read
+again to observe their results. Failed polls retain the last known state and
+are logged.
 Call under the `JobManager` lock while its background thread is running.
 Compute `ACTIVE` includes provider states `new`, `queued`, and `active`;
 only the provider status distinguishes waiting from execution.
@@ -177,14 +180,20 @@ stopping its thread. Failed or canceled workflows do not need to become
 successful. Resource downtime, unresolved cancellation, or a stopped thread can
 prevent a waiting shutdown from finishing.
 
-`manager.stop(wait_until_done=False)` requests loop shutdown and joins the thread;
-it still waits for an in-flight request. It does not cancel remote jobs or
-transfers. `close_database=True` closes the workflow DB after the thread stops.
-Local worker threads have their own lifetime.
+`manager.stop(wait_until_done=False)` requests loop shutdown, joins the workflow
+thread, and signals action workers to stop. API requests already in progress may
+finish later. Shutdown does not cancel remote jobs or transfers.
+`close_database=True` also closes workflow storage; repeated `stop()` calls are
+safe even after closure. Local compute processes have their own lifetime.
+
+A `JobManager` is single-use. Calling `start()` on a running instance is harmless,
+but calling it after shutdown, failure, or `stop()` before the first start raises
+an error. Workers belonging to the stopped instance are not revived.
 
 To resume remote work, initialize the same API configuration and create a new
-JobManager with the same database filename. Start it without enqueuing the old
-workflow again. Scheduling/cancellation intents are reconciled and active heads
+JobManager with the same database filename. Its JobData constructor restores
+supervision of unfinished actions; call `start()` for workflow progression without
+enqueuing the old workflow again. Scheduling/cancellation intents are reconciled and active heads
 are polled. Previously `FAILED` or `CANCELED` workflows stay stopped; there is no
 public automatic retry/resume operation for those states.
 
@@ -210,5 +219,81 @@ manager_logging.wfman_log_func = lambda *parts: logger.info(" ".join(map(str, pa
 manager_logging.api_log_func = lambda *parts: logger.info(" ".join(map(str, parts)))
 ```
 
-Some execution/transfer paths also use `print` directly. These hooks do not
-capture scheduler output files or replace the job's `run.log`/`err.log`.
+These hooks do not capture scheduler output files or replace the job's
+`run.log`/`err.log`.
+
+## Workers and user queries
+
+`wfapiUserQuery(title, query)` retains its two-argument hook interface. The
+terminal implementation blocks for input and returns the stripped answer.
+Authentication and action API operations use the shared `Workers` class, so
+questions block their worker rather than the workflow manager. Each worker
+retains the ordinary call stack; there are no completion-callback chains or
+condition exceptions.
+
+Normal Python authentication calls block for their shared worker result.
+Each action has one worker thread. For compute and transfer actions,
+`AsyncActionManager` runs submission, status polling and cancellation sequentially
+through separate execution and cancellation-completion hooks. API actions run
+their complete remaining sequence directly on their worker, without periodic
+polling or a retry delay. `startOrResumeAction` persists
+intent and starts or reuses execution without waiting; `JobData` observes recorded
+action states and advances workflow stages.
+Nested calls can wait for shared authentication without occupying the workflow
+manager. Independent implementations initialize under separate client locks.
+
+Action workers write their own records through the same `LockedConnection`
+context manager as `JobData`. It holds a reentrant lock and yields the persistent,
+ordinary SQLite connection for each `with self.conn as conn:` block. All SQL
+statements and result fetching must finish inside that block; the wrapper exposes
+no SQL methods. Leaving the block commits or rolls back and releases the lock.
+The connection remains open until manager shutdown. No database lock is held
+during API calls, questions or retry delays. Compute
+and transfer recovery uses the saved remote ID, action status, submission
+attempts and retry timing, without a scheduling step counter. A saved remote ID
+bypasses submission. API sequences retain their operation cursor to skip completed
+operations. Existing prototype counter columns are ignored.
+
+Resumption refers to recovery of missing worker supervision when constructing
+a new manager after shutdown or process failure, not a pause/resume feature for workflows. Normal
+workers progress independently; repeated start/resume calls reuse live workers.
+
+After a process crash, workers and questions are gone. JobData construction
+calls `resumeActions` once to restore supervisors for current unfinished workflow
+heads, including already ACTIVE jobs; historical abandoned records are not restarted. API sequences replay the
+unfinished operation. Submission recovery discovers accepted work by its stable
+name before retrying. Cancellation retains its intent and remote ID and checks
+remote status before another cancellation request. No query UUIDs, user responses
+or condition records are persisted.
+
+`queryRecordedStatus(action_id)` reads cached records without changing the
+provider polling interval configured at manager construction. Its optional
+`force_update=True` requests an early worker poll and returns the current record
+without waiting. Likewise, `force_poll=True` wakes an existing supervisor
+without waiting; its eventual successful poll updates the action record without
+another query or workflow pass. Poll failures retain existing state and are logged.
+`JobData` copies the latest recorded state into the workflow on its next pass.
+
+Worker interruption and action cancellation are separate. `Workers.interrupt`
+asks the current Python call to finish running by raising `WorkerInterrupted`.
+After execution has finished running, a separate cancellation worker starts
+`_completeCancellation`. Only that action-manager hook cancels remote work. `Workers.stop` instead requests worker shutdown, leaving
+remote jobs and persisted action state recoverable. Neither signal kills a thread.
+
+`checkForThreadCurrentWorkerInterruption()` raises for either signal during normal
+execution. Only when handling a recorded CANCELING intent,
+`clearThreadCurrentWorkerInterruptUnlessStopping()` clears the handled interrupt
+so cancellation API calls can proceed. It still raises if shutdown was requested;
+it never resumes a thread or resumes/cancels a remote job. Query hooks can
+inspect `getThreadCurrentWorkerInterruptionEvent()` to wake a waiting worker. The current terminal
+`input()` cannot be forcibly interrupted: cancellation is observed after input
+returns. A running submission's accepted ID is saved before its execution
+worker hands off to the cancellation worker. Stopping a manager signals supervisors and retains durable
+state; accepted remote jobs are not automatically canceled merely by stopping.
+Workers are daemon threads, so a noninterruptible API call cannot prevent process
+exit. Closing storage fences late database updates; restart recovery uses the
+persisted intent and stable remote name.
+
+There is no server message handling yet. A future query service will keep
+questions in memory and reject old replies using a server-session identifier
+and per-session query number. Restarted operations can issue fresh questions.

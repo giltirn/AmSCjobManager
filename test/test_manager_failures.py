@@ -2,7 +2,7 @@
 
 import threading
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from amscjobmanager.action_manager import ActionStatus
 from amscjobmanager.compute_actions import ExecuteJobComputeAction
@@ -39,8 +39,55 @@ class ManagerFailureTests(unittest.TestCase):
                         manager._lock.release()
                         log.assert_called_once()
                         self.assertIn('RuntimeError: unexpected worker failure', log.call_args.args[0])
+                        with self.assertRaisesRegex(RuntimeError, 'cannot be restarted'):
+                            manager.start()
                 finally:
                     manager.stop(wait_until_done=False, close_database=True)
+
+    def test_shutdown_is_idempotent_and_permanently_prevents_start(self):
+        """Retire a manager on stop, both before and after its first start.
+
+        Starting a running manager is harmless. After stop, including repeated
+        calls after storage closes, restart must fail without replacing its
+        thread or clearing shutdown state.
+        """
+        for started in (False, True):
+            with self.subTest(started=started):
+                manager = JobManager(max_workflows_active=0)
+                try:
+                    if started:
+                        manager.start()
+                        original = manager._thread
+                        manager.start()
+                        self.assertIs(manager._thread, original)
+                    manager.stop(wait_until_done=False, close_database=True)
+                    manager.stop()
+                    with self.assertRaisesRegex(RuntimeError, 'create a new JobManager'):
+                        manager.start()
+                    self.assertFalse(manager.isAlive())
+                finally:
+                    manager.stop(wait_until_done=False, close_database=True)
+
+    def test_thread_launch_failure_permanently_prevents_restart(self):
+        """Retain terminal failure when launching the manager thread itself fails.
+
+        Substitute only Thread construction, then check that a second start is
+        rejected and shutdown does not try to join a thread that never started.
+        """
+        manager = JobManager(max_workflows_active=0)
+        thread = Mock()
+        thread.start.side_effect = RuntimeError('launch denied')
+        try:
+            with patch('amscjobmanager.manager.threading.Thread', return_value=thread) as create:
+                with self.assertRaisesRegex(RuntimeError, 'launch denied'):
+                    manager.start()
+                with self.assertRaisesRegex(RuntimeError, 'cannot be restarted'):
+                    manager.start()
+                create.assert_called_once()
+            manager.stop(wait_until_done=False, close_database=True)
+            thread.join.assert_not_called()
+        finally:
+            manager.stop(wait_until_done=False, close_database=True)
 
     def test_default_stop_does_not_wait_for_dead_worker_to_finish_pending_work(self):
         """A crashed worker cannot drain queued workflows, so default stop must return.

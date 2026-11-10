@@ -5,16 +5,24 @@ from .logging import wfmanLog
 import time
             
 class JobManager:
-    """Launches a background thread that progresses the state of the underlying JobData instance"""
+    """Progress workflows in a single-use background manager.
+
+    Construction recovers unfinished actions through JobData. Once stopped or
+    failed, this instance cannot restart; create a new manager for recovery.
+    """
 
     def __init__(self, filename: str | None = None, poll_freq=30, max_workflows_active=10):
+        """Create a single-use manager and recover its unfinished action workers.
+
+        filename (str | None) is the persistent SQLite path, or None for a
+        memory-only database. poll_freq (float, default 30) is seconds between
+        provider status polls/recovery attempts. max_workflows_active (int,
+        default 10) limits automatic workflow starts; zero disables them.
+        Return None. JobData construction recovers existing unfinished actions;
+        start() separately launches workflow progression. After shutdown or
+        failure, create a new instance to recover persisted work.
         """
-        filename: The path to the database for persisting manager status. Use None for an in-memory database (WARNING: if you use an in-memory database and kill the manager before all workflows are complete, it will forget about those uncompleted)
-        poll_freq: how often the action monitors poll the API for status updates
-        max_workflows_active: if >0, the manager will attempt to maintain this many active workflows, activating more when others finish; if 0, they must be activated manually
-        """
-        
-        self.job_data = JobData(filename, max_workflows_active=max_workflows_active)
+        self.job_data = JobData(filename, max_workflows_active=max_workflows_active, poll_freq=poll_freq)
         self._stop = threading.Event()
         self._failed = threading.Event()
         self._thread = None
@@ -26,33 +34,54 @@ class JobManager:
         return self._thread is not None and self._thread.is_alive() and not self._failed.is_set()
         
     def start(self):
-        if self._thread is not None and self._thread.is_alive():
-            return
-        self._stop.clear()
-        self._failed.clear()
-        self._thread = threading.Thread(target=self._run)
-        self._thread.start()
+        """Start workflow progression once for this manager instance.
+
+        Take no arguments; return None. An already running manager is unchanged.
+        After shutdown or background failure, raise RuntimeError directing the
+        caller to construct a new manager against its persistent database.
+        Action recovery already occurred during JobData construction.
+        """
+        with self._lock:
+            if self._stop.is_set() or self._failed.is_set():
+                raise RuntimeError('JobManager cannot be restarted; create a new JobManager for recovery')
+            if self._thread is not None:
+                if self._thread.is_alive():
+                    return
+                raise RuntimeError('JobManager cannot be restarted; create a new JobManager for recovery')
+            self._thread = threading.Thread(target=self._run)
+            try:
+                self._thread.start()
+            except BaseException:
+                self._failed.set()
+                self._thread = None
+                self.job_data.stopWorkers()
+                raise
 
     def stop(self, wait_until_done=True, *, close_database=False):
-        """
-        Ask the manager thread to stop and wait until it does.
-        wait_until_done : block until there are no more active or pending workflows before stopping (default True)
-        close_database : close the JobData connection after the thread stops
-        A stopped or failed background thread cannot drain workflows, so it
-        ends the completion wait even if incomplete records remain.
-        """
-        def __nincomplete():
-            with self._lock:
-                return self.job_data.countWorkflowsWithStatus([ ActionStatus.PENDING, ActionStatus.SCHEDULING, ActionStatus.ACTIVE, ActionStatus.COMPLETED, ActionStatus.CANCELING ]) #note, complete (non-null) actions are awaiting progression
-        
-        if wait_until_done:
-            while(__nincomplete() > 0 and self.isAlive()):
-                time.sleep(2)
-        
-        self._stop.set()
+        """Permanently stop this manager and its action workers.
 
+        wait_until_done (bool, default True) waits for unfinished workflows while
+        the manager remains healthy. close_database (bool, default False) closes
+        storage after shutdown. Return None. Repeated calls are safe, including
+        after database closure. Accepted remote jobs are not canceled by shutdown.
+        This instance cannot be started again, even if it had never been started.
+        """
+        # A failed/stopped thread cannot drain workflows; do not query closed
+        # storage or wait for unfinished records during repeated shutdown.
+        while wait_until_done and self.isAlive():
+            with self._lock:
+                remaining = self.job_data.countWorkflowsWithStatus([
+                    ActionStatus.PENDING, ActionStatus.SCHEDULING, ActionStatus.ACTIVE,
+                    ActionStatus.COMPLETED, ActionStatus.CANCELING,
+                ])
+            if remaining == 0:
+                break
+            time.sleep(2)
+
+        self._stop.set()
         if self._thread is not None:
             self._thread.join()
+        self.job_data.stopWorkers()
         if close_database:
             self.job_data.conn.close()
 
@@ -67,7 +96,7 @@ class JobManager:
                         break
                     try:
                         self.job_data.startWorkflows()
-                        self.job_data.progressActiveState(poll_freq=self.poll_freq)
+                        self.job_data.progressActiveState()
                     except BaseException:
                         # Mark failure before unlocking so a waiting request
                         # cannot mistake the exiting thread for a healthy one.

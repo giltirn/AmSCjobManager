@@ -1,5 +1,6 @@
 ##Default IO functions for cmdline tool
 from .utils import cmdlinePrint
+from .workers import checkForThreadCurrentWorkerInterruption
 
 #Control over the function used for workflow manager logging
 wfman_log_func = cmdlinePrint
@@ -22,15 +23,27 @@ def wfapiLog(*args, **kwargs):
     api_log_func(*args, **kwargs)
 
 
-def defaultAPIuserQueryFunc(title, query):
+def defaultAPIuserQueryFunc(title: str, query: str) -> str:
+    """Print title (str), block on query (str), and return the stripped answer.
+
+    This is the default input implementation for wfapiUserQuery. It can run
+    on an authentication worker; input and its failures remain synchronous.
+    """
     if len(title):
         print(title)
     return input(query).strip()
             
 api_query_user_func = defaultAPIuserQueryFunc
 
-def wfapiUserQuery(title, query):
+def wfapiUserQuery(title: str, query: str) -> str:
+    """Ask through the configured hook and return its response string.
+
+    title (str) describes the interaction; query (str) is the question or login
+    URL/prompt. The default hook blocks and strips whitespace. Authentication
+    workers retain their execution state while this call waits; no completion
+    callback or condition ID is passed through the query interface.
     """
-    Ask a query to the user, e.g. for obtaining login credentials
-    """
-    return api_query_user_func(title,query)
+    checkForThreadCurrentWorkerInterruption()
+    response = api_query_user_func(title,query)
+    checkForThreadCurrentWorkerInterruption()
+    return response

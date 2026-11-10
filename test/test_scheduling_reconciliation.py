@@ -4,6 +4,8 @@ The harness substitutes only the remote Globus service.  JobData and the
 ActionManager implementation execute their normal database workflow.
 """
 
+
+
 from dataclasses import dataclass
 from pathlib import Path
 import tempfile
@@ -11,6 +13,7 @@ import threading
 import unittest
 from unittest.mock import patch
 
+from action_manager_helpers import DirectAsyncActions, DirectComputeActions
 from amscjobmanager.action_manager import ActionManager, ActionStatus, SimulatedCrash
 from amscjobmanager.async_action_manager import AsyncActionManager
 from amscjobmanager.api_action_manager import APIActions
@@ -98,7 +101,7 @@ class AcceptedThenRaisingHarnessGlobusTransfer(HarnessGlobusTransfer):
         raise RuntimeError("simulated response failure after acceptance")
 
 
-class HarnessGlobusDataTransfers(GlobusDataTransfers):
+class HarnessGlobusDataTransfers(DirectAsyncActions, GlobusDataTransfers):
     """The real transfer manager with only its remote operations overridden."""
 
     def __init__(self, connection, harness, scheduling_retry_delay=0, **kwargs):
@@ -118,12 +121,12 @@ class HarnessGlobusDataTransfers(GlobusDataTransfers):
 
 
 class SchedulingReconciliationTests(unittest.TestCase):
-    def test_start_action_returns_readiness_and_preserves_supplied_id(self):
+    def test_reconciliation_preserves_supplied_action_id(self):
         """Defer a real scheduling pass, then resolve it under the supplied ID.
 
         Use the transfer harness and a resource-down response to exercise False
-        without submitting work. Restore availability and verify True is a bool,
-        the nontrivial supplied ID is retained, and recovery does not resubmit.
+        without submitting work. Restore availability and verify that the
+        nontrivial supplied ID is retained and recovery does not resubmit.
         """
         jobs = self._new_job_data()
         try:
@@ -132,14 +135,15 @@ class SchedulingReconciliationTests(unittest.TestCase):
             manager = jobs.action_man[ActionClass.TRANSFER]
             action_id = 37
             with patch.object(HarnessGlobusTransfer, "queryResourceStatus", return_value=False):
-                self.assertIs(manager.startAction(action, job_id, action_id), False)
-            self.assertEqual(manager.queryStatus(action_id)[0], ActionStatus.SCHEDULING)
+                manager._recordSchedulingIntentIfNew(action, job_id, action_id)
+                self.assertIsNone(manager._reconcileScheduledAction(action_id))
+            self.assertEqual(manager.queryRecordedStatus(action_id)[0], ActionStatus.SCHEDULING)
             self.assertEqual(self.harness.submission_count, 0)
 
-            self.assertIs(manager.startAction(action, job_id, action_id), True)
+            self.assertEqual(manager._reconcileScheduledAction(action_id), action_id)
             self.assertEqual(manager.getMaxActionId(), action_id)
-            self.assertEqual(manager.queryStatus(action_id)[0], ActionStatus.ACTIVE)
-            self.assertIs(manager.startAction(action, job_id, action_id), True)
+            self.assertEqual(manager.queryRecordedStatus(action_id)[0], ActionStatus.ACTIVE)
+            self.assertEqual(manager._reconcileScheduledAction(action_id), action_id)
             self.assertEqual(self.harness.submission_count, 1)
         finally:
             jobs.conn.close()
@@ -251,6 +255,11 @@ class SchedulingReconciliationTests(unittest.TestCase):
         self.assertTrue(any('simulated remote status lookup failure' in line for line in self.logs))
 
     def setUp(self):
+        # These tests isolate the checked-in reconciliation bodies; real
+        # asynchronous lifecycles and crash recovery have separate integration tests.
+        adapter = patch('amscjobmanager.job_data.ComputeActions', DirectComputeActions)
+        adapter.start()
+        self.addCleanup(adapter.stop)
         self.logs = []
         log_output = patch("amscjobmanager.logging.wfman_log_func", side_effect=self.logs.append)
         log_output.start()
@@ -325,7 +334,7 @@ class SchedulingReconciliationTests(unittest.TestCase):
             self.assertFalse(manager.hasAction(action_id))
         else:
             self.assertTrue(manager.hasAction(action_id))
-            self.assertEqual(manager.queryStatus(action_id)[0], action_status)
+            self.assertEqual(manager.queryRecordedStatus(action_id)[0], action_status)
 
     def _assert_reconciled_active(self, job_data, job_id):
         self._assert_persisted_states(
@@ -371,8 +380,9 @@ class SchedulingReconciliationTests(unittest.TestCase):
         job_id = self._crash_while_starting("action_intent_persisted")
         self.harness.failed_submission_count = 3
 
+        # Construction performs the first attempt; the helper's observation
+        # and this additional pass complete the three failed submissions.
         job_data = self._reopen_and_reconcile()
-        job_data.reconcileSchedulingActions()
         job_data.reconcileSchedulingActions()
 
         self.assertEqual(self.harness.submission_count, 0)
@@ -442,9 +452,10 @@ class SchedulingReconciliationTests(unittest.TestCase):
         self._assert_persisted_states(
             job_data, job_id, ActionStatus.SCHEDULING, ActionStatus.SCHEDULING
         )
-        row = job_data.conn.execute(
-            "SELECT submission_attempts, last_submission_error FROM transfers"
-        ).fetchone()
+        with job_data.conn as conn:
+            row = conn.execute(
+                "SELECT submission_attempts, last_submission_error FROM transfers"
+            ).fetchone()
         self.assertEqual(row["submission_attempts"], 1)
         self.assertIn("action-layer submission failure", row["last_submission_error"])
         submission_log = next(line for line in self.logs if "Submission failed" in line)
@@ -480,7 +491,8 @@ class SchedulingReconciliationTests(unittest.TestCase):
         # An outage while looking up a remote action must be deferred as a
         # retryable scheduling state after an ambiguous submission attempt.
         job_id = self._crash_while_starting("before_remote_submission")
-        self.harness.failed_remote_lookup_count = 1
+        # Cover both constructor recovery and the following reconciliation pass.
+        self.harness.failed_remote_lookup_count = 2
         job_data = self._new_job_data()
 
         job_data.reconcileSchedulingActions()
@@ -506,9 +518,10 @@ class SchedulingReconciliationTests(unittest.TestCase):
         job_id = job_data.enqueueJob(HarnessGlobusTransfer())
         job_data.startWorkflows([job_id])
         action_id = job_data.jobState(job_id)["head_action_id"]
-        job_data.conn.execute("UPDATE transfers SET last_update = 0")
+        with job_data.conn as conn:
+            conn.execute("UPDATE transfers SET last_update = 0")
 
-        action_status, _ = job_data.action_man[ActionClass.TRANSFER].queryStatus(
+        action_status, _ = job_data.action_man[ActionClass.TRANSFER].queryRecordedStatus(
             action_id
         )
 
@@ -524,9 +537,10 @@ class SchedulingReconciliationTests(unittest.TestCase):
         job_data.startWorkflows([first, second])
         first_state = job_data.jobState(first)
         action_id = first_state["head_action_id"]
-        first_action = dict(job_data.conn.execute(
-            "SELECT * FROM transfers WHERE action_id = ?", (action_id,)
-        ).fetchone())
+        with job_data.conn as conn:
+            first_action = dict(conn.execute(
+                "SELECT * FROM transfers WHERE action_id = ?", (action_id,)
+            ).fetchone())
         for api_key in self.harness.status_by_api_key:
             self.harness.status_by_api_key[api_key] = "SUCCEEDED"
         original_status = self.harness.status
@@ -540,9 +554,10 @@ class SchedulingReconciliationTests(unittest.TestCase):
             for _ in range(3):
                 job_data.progressActiveState(force_poll=True)
                 self.assertEqual(job_data.jobState(first), first_state)
-                self.assertEqual(dict(job_data.conn.execute(
-                    "SELECT * FROM transfers WHERE action_id = ?", (action_id,)
-                ).fetchone()), first_action)
+                with job_data.conn as conn:
+                    self.assertEqual(dict(conn.execute(
+                        "SELECT * FROM transfers WHERE action_id = ?", (action_id,)
+                    ).fetchone()), first_action)
                 self.assertEqual(job_data.jobStatus(second), ActionStatus.COMPLETED)
                 self.assertEqual(self.harness.submission_count, 2)
 
@@ -559,7 +574,7 @@ class SchedulingReconciliationTests(unittest.TestCase):
         self.addCleanup(job_data.conn.close)
         job_id = job_data.enqueueJob(HarnessGlobusTransfer())
         manager = job_data.action_man[ActionClass.TRANSFER]
-        with patch.object(manager, "queryStatus", side_effect=RuntimeError("status outage")):
+        with patch.object(manager, "queryRecordedStatus", side_effect=RuntimeError("status outage")):
             job_data.startWorkflows([job_id])
             job_data.reconcileSchedulingActions()
         self.assertEqual(job_data.jobState(job_id)["head_action_status"], ActionStatus.SCHEDULING)
@@ -580,14 +595,15 @@ class SchedulingReconciliationTests(unittest.TestCase):
         first = job_data.enqueueJob(HarnessGlobusTransfer())
         second = job_data.enqueueJob(HarnessGlobusTransfer())
         job_data.startWorkflows([first, second])
-        first_api_key = job_data.conn.execute(
-            "SELECT api_key FROM transfers WHERE action_id = ?",
-            (job_data.jobState(first)["head_action_id"],),
-        ).fetchone()[0]
+        with job_data.conn as conn:
+            first_api_key = conn.execute(
+                "SELECT api_key FROM transfers WHERE action_id = ?",
+                (job_data.jobState(first)["head_action_id"],),
+            ).fetchone()[0]
         for api_key in self.harness.status_by_api_key:
             self.harness.status_by_api_key[api_key] = "SUCCEEDED"
-        job_data.conn.execute("UPDATE transfers SET last_update = 0")
-        job_data.conn.commit()
+        with job_data.conn as conn:
+            conn.execute("UPDATE transfers SET last_update = 0")
         other_polled = threading.Event()
 
         def poll(api_key):
@@ -633,12 +649,14 @@ class SchedulingReconciliationTests(unittest.TestCase):
         self._assert_persisted_states(
             job_data, job_id, ActionStatus.SCHEDULING, ActionStatus.SCHEDULING
         )
-        row = job_data.conn.execute("SELECT submission_attempts FROM transfers").fetchone()
+        with job_data.conn as conn:
+            row = conn.execute("SELECT submission_attempts FROM transfers").fetchone()
         self.assertEqual(row["submission_attempts"], 1)
 
         # Make the persisted attempt older than the configured retry delay.
         # The next reconciliation pass must now perform the deferred retry.
-        job_data.conn.execute("UPDATE transfers SET last_submission_attempt = 0")
+        with job_data.conn as conn:
+            conn.execute("UPDATE transfers SET last_submission_attempt = 0")
         job_data.reconcileSchedulingActions()
 
         self.assertEqual(self.harness.submission_count, 1)
@@ -744,14 +762,14 @@ class SchedulingReconciliationTests(unittest.TestCase):
         action_manager._test_crash_at = "action_canceling_persisted"
 
         with self.assertRaises(SimulatedCrash):
-            action_manager.cancelAction(action_id)
+            action_manager.cancelOrResumeCancelingAction(action_id)
         self._assert_persisted_states(
             job_data, job_id, ActionStatus.ACTIVE, ActionStatus.CANCELING
         )
         job_data.conn.close()
 
         recovered = self._new_job_data()
-        recovered.action_man[ActionClass.TRANSFER].cancelAction(action_id)
+        recovered.action_man[ActionClass.TRANSFER].cancelOrResumeCancelingAction(action_id)
         self.assertEqual(recovered.jobStatus(job_id), ActionStatus.ACTIVE)
         recovered.progressActiveState()
         self.assertEqual(recovered.jobStatus(job_id), ActionStatus.CANCELED)
@@ -841,15 +859,21 @@ class SchedulingReconciliationTests(unittest.TestCase):
         self.assertEqual(self.harness.cancellation_count, 1)
 
     def test_cancellation_of_unsubmitted_action_does_not_submit(self):
-        # Submission stopped after saving the workflow head, before creating
-        # a remote task. Cancellation must not start that task.
-        job_id = self._crash_while_starting("job_head_scheduling_persisted")
-        job_data = self._new_job_data()
+        """Cancel missing action intent before constructor recovery can submit it.
 
+        Interrupt selection after the workflow head is saved, then cancel on
+        that same JobData instance. A new JobData would instead recover and
+        submit the pending head immediately during construction.
+        """
+        job_data = self._new_job_data(crash_at='job_head_scheduling_persisted')
+        job_id = job_data.enqueueJob(HarnessGlobusTransfer())
+        with self.assertRaises(SimulatedCrash):
+            job_data.startWorkflows([job_id])
+        job_data._test_crash_at = None
         job_data.cancelJob(job_id)
-
         self.assertEqual(job_data.jobStatus(job_id), ActionStatus.CANCELED)
         self.assertEqual(self.harness.submission_count, 0)
+        job_data.conn.close()
 
     def test_cancellation_finds_submitted_action_without_saved_remote_id(self):
         # The remote task was accepted, but its ID was not saved locally.
@@ -867,7 +891,8 @@ class SchedulingReconciliationTests(unittest.TestCase):
         # The first name lookup cannot yet see an accepted remote task. Keep
         # the cancellation intent until a later lookup can find and stop it.
         job_id = self._crash_while_starting("remote_submission_completed")
-        self.harness.hidden_remote_lookup_count = 1
+        # Keep it hidden during constructor recovery and the cancel request.
+        self.harness.hidden_remote_lookup_count = 2
         job_data = self._new_job_data(scheduling_retry_delay=60)
 
         job_data.cancelJob(job_id)
@@ -895,10 +920,11 @@ class SchedulingReconciliationTests(unittest.TestCase):
         )
 
         # Simulate the retry delay expiring without sleeping in the test.
-        job_data.conn.execute(
-            "UPDATE transfers SET last_submission_attempt = 0 WHERE action_id = ?",
-            (job_data.jobState(job_id)["head_action_id"],),
-        )
+        with job_data.conn as conn:
+            conn.execute(
+                "UPDATE transfers SET last_submission_attempt = 0 WHERE action_id = ?",
+                (job_data.jobState(job_id)["head_action_id"],),
+            )
         job_data.progressActiveState()
         self.assertEqual(job_data.jobStatus(job_id), ActionStatus.CANCELED)
         self.assertEqual(self.harness.submission_count, 0)

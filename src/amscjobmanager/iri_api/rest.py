@@ -7,6 +7,7 @@ from typing import Callable
 import httpx
 
 from ..logging import wfapiLog
+from ..workers import WorkerInterrupted
 from .config import IRI_IMPLEMENTATIONS
 from .state import getImplementationClient, resolveImplementation
 
@@ -146,6 +147,8 @@ def submitTask(
         try:
             task_id = action()
             j = waitTask(task_id=task_id, poll_freq=poll_freq, implementation=implementation)
+        except WorkerInterrupted:
+            raise
         except Exception as exc:
             retry_errors.append(
                 f"attempt {attempt + 1}, submission/polling error: {exc}"

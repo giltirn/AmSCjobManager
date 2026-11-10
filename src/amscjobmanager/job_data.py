@@ -4,6 +4,7 @@ from .actions_base import ActionClass, actionClass
 from .globus_transfer_action import GlobusDataTransfers
 from .compute_action_manager import ComputeActions
 from .api_action_manager import APIActions
+from .database import LockedConnection
 from .action_manager import ActionManager, ActionStatus, SimulatedCrash, _ser, _unser
 from .logging import wfmanLog
 import time
@@ -15,13 +16,24 @@ class JobData:
 
     def __init__(self, filename: str | None = None, max_workflows_active=10,
                  *, _test_crash_at: str | None = None,
-                 _test_action_manager_factories=None):
+                 _test_action_manager_factories=None, poll_freq=30):
+        """Initialize workflow storage and recover unfinished action workers.
+
+        filename (str | None) is the SQLite path, or None for memory-only storage.
+        max_workflows_active (int, default 10) caps automatic starts; zero disables
+        automatic starts. poll_freq (float, default 30) is remote-action supervisor
+        delay in seconds; API sequences have no polling interval. _test_crash_at (str | None) selects a test crash boundary;
+        _test_action_manager_factories (dict[ActionClass, callable] | None) overrides
+        manager constructors for tests. Return None after restoring supervision
+        of unfinished stored actions; pending workflows are not started.
+        """
         if filename is not None and "~" in str(filename):
             raise ValueError("Database paths containing '~' are not supported")
         db_path = ":memory:" if filename is None else str(Path(filename))
         self.max_workflows_active = max_workflows_active
-        self.conn = sqlite3.connect(db_path, check_same_thread=False)
-        self.conn.row_factory = sqlite3.Row
+        connection = sqlite3.connect(db_path, check_same_thread=False)
+        connection.row_factory = sqlite3.Row
+        self.conn = LockedConnection(connection)
         
         self._test_crash_at = _test_crash_at
         manager_factories = {
@@ -32,7 +44,8 @@ class JobData:
         if _test_action_manager_factories:
             manager_factories.update(_test_action_manager_factories)
         self.action_man: dict[ActionClass, ActionManager] = {
-            action_class: factory(self.conn, _test_crash_at=self._test_crash_at)
+            action_class: factory(self.conn, _test_crash_at=self._test_crash_at,
+                                  **({} if action_class == ActionClass.API else {"poll_freq": poll_freq}))
             for action_class, factory in manager_factories.items()
         }
 
@@ -67,6 +80,15 @@ class JobData:
                     "INSERT OR IGNORE INTO action_ids(action_id) VALUES (?)",
                     (max_existing_action_id,),
                 )
+
+        # Recover existing work only after every manager/table and the shared
+        # ID allocator are ready. Pending workflows still require explicit start.
+        try:
+            self.resumeActions()
+        except BaseException:
+            self.stopWorkers()
+            self.conn.close()
+            raise
 
     def _allocateActionId(self, conn):
         """Allocate the durable, cross-action-class ID for a new action."""
@@ -109,10 +131,11 @@ class JobData:
         if type(cancel_running) is not bool:
             raise TypeError("cancel_running must be a boolean")
 
-        job = self.conn.execute(
-            "SELECT head_action_id, head_action_class, head_action_status "
-            "FROM jobs WHERE job_id = ?", (job_id,),
-        ).fetchone()
+        with self.conn as conn:
+            job = conn.execute(
+                "SELECT head_action_id, head_action_class, head_action_status "
+                "FROM jobs WHERE job_id = ?", (job_id,),
+            ).fetchone()
         if job is None:
             raise ValueError(f"Unknown job_id: {job_id}")
 
@@ -183,9 +206,9 @@ class JobData:
                     action_manager = self.action_man[action_class]
                     workflow = _unser(job["workflow"])
                     action = workflow[job["workflow_stage"]]
-                    if action_manager.cancelAction(
-                        action_id, recovery=(action, job["job_id"])
-                    ) is None:
+                    action_manager.cancelOrResumeCancelingAction(action_id, recovery=(action, job["job_id"]))
+                    status, _ = action_manager.queryRecordedStatus(action_id)
+                    if status in (ActionStatus.SCHEDULING, ActionStatus.ACTIVE, ActionStatus.CANCELING):
                         continue
 
                 self._maybeSimulateCrash("action_canceled_before_job_head_update")
@@ -296,8 +319,8 @@ class JobData:
         api_status = None
         if state['head_action_class'] != ActionClass.NONE and state['head_action_id'] is not None:
             # Read the cached provider status without causing a second poll.
-            _, api_status = self.action_man[state['head_action_class']].queryStatus(
-                state['head_action_id'], update_freq=float('inf')
+            _, api_status = self.action_man[state['head_action_class']].queryRecordedStatus(
+                state['head_action_id']
             )
         return action_status, api_status
 
@@ -385,10 +408,9 @@ class JobData:
         for action_class, action, job_id, action_id in pending_actions:
             wfmanLog(f"Initiating action of type {action_class.name} for {job_id}")
             aman = self.action_man[action_class]
-            if not aman.startAction(action, job_id, action_id):
-                continue
+            aman.startOrResumeAction(action, job_id, action_id)
             try:
-                action_status, _ = aman.queryStatus(action_id)
+                action_status, _ = aman.queryRecordedStatus(action_id)
             except SimulatedCrash:
                 raise
             except Exception as exc:
@@ -450,9 +472,9 @@ class JobData:
 
         Supply the stored action and its JobData-issued ID to the action
         manager, which owns recovery of its record and any remote submission.
-        ActionManager first searches for a remote action under the durable
-        action name; only an unfindable action is retried according to its
-        persisted submission backoff policy.
+        Resume missing worker supervision for recovery; a live worker is reused
+        and already progresses independently. Read cached state to update workflow
+        heads. Repeated calls do not drive submission attempts individually.
         """
         with self.conn as conn:
             scheduling_jobs = conn.execute(
@@ -469,15 +491,15 @@ class JobData:
             aman = self.action_man[action_class]
             workflow = _unser(job["workflow"])
             action = workflow[job["workflow_stage"]]
-            if aman.startAction(action, job["job_id"], action_id):
-                try:
-                    action_status, _ = aman.queryStatus(action_id)
-                except SimulatedCrash:
-                    raise
-                except Exception as exc:
-                    wfmanLog(f"Could not poll action {action_id} for job {job['job_id']}: {exc}")
-                    continue
-                updates.append((job["job_id"], action_id, action_status))
+            aman.startOrResumeAction(action, job["job_id"], action_id)
+            try:
+                action_status, _ = aman.queryRecordedStatus(action_id)
+            except SimulatedCrash:
+                raise
+            except Exception as exc:
+                wfmanLog(f"Could not read action {action_id} for job {job['job_id']}: {exc}")
+                continue
+            updates.append((job["job_id"], action_id, action_status))
 
         if updates:
             with self.conn as conn:
@@ -487,15 +509,14 @@ class JobData:
                         (action_status.name, int(time.time()), job_id, action_id),
                     )
         
-    def progressActiveActions(self, poll_freq=30, force_poll=False):
-        """
-        Find active actions and try to progress their status.
-        poll_freq: control the minimum time lag between manager polls of the API for status updates. Queries within this period return only the cached status.
-        force_poll: force the manager to poll the API for status updates, use wisely!
-        Failed polls are logged and leave that workflow unchanged for a later pass.
+    def progressActiveActions(self, force_poll=False):
+        """Copy recorded action states to ACTIVE workflow heads.
 
-        Return: dict  job_id -> new status
-        """       
+        force_poll (bool, default False) wakes supervisors for an earlier poll;
+        this call does not wait for API results. Return dict[int, ActionStatus]
+        mapping changed workflow IDs to their new head status. Read failures are
+        logged and leave that workflow unchanged until a later pass.
+        """
         with self.conn as conn:
             active_actions = conn.execute("SELECT head_action_id, job_id, head_action_type, head_action_class FROM jobs WHERE head_action_status = ?", (ActionStatus.ACTIVE.name, )).fetchall()
 
@@ -504,9 +525,9 @@ class JobData:
             job_id = t['job_id']
             action_class = getattr(ActionClass, t['head_action_class'], None)
             aman = self.action_man[action_class] 
-            # Poll independently so an unavailable resource cannot block other workflows.
+            # Observe each supervisor independently without waiting for provider I/O.
             try:
-                action_status, _ = aman.queryStatus(t['head_action_id'], update_freq=poll_freq, force_update = force_poll)
+                action_status, _ = aman.queryRecordedStatus(t['head_action_id'], force_update = force_poll)
             except SimulatedCrash:
                 raise
             except Exception as exc:
@@ -525,14 +546,15 @@ class JobData:
         return updates
 
 
-    def progressActiveState(self, poll_freq=30, force_poll=False):
+    def progressActiveState(self, force_poll=False):
+        """Observe action supervision and advance completed workflow stages.
+
+        force_poll (bool, default False) requests earlier polls without waiting.
+        Return None. Existing workers progress independently of these calls.
         """
-        Updates knowledge of action state and then progresses the workflow for those actions that have completed
-        poll_freq: control the minimum time lag between manager polls of the API for status updates. Queries within this period return only the cached status.
-        force_poll: force the manager to poll the API for status updates, use wisely!"""
         self.reconcileCancelingActions()
         self.reconcileSchedulingActions()
-        self.progressActiveActions(poll_freq=poll_freq, force_poll=force_poll)
+        self.progressActiveActions(force_poll=force_poll)
         self.progressActiveWorkflows()
     
     def countWorkflowsWithStatus(self, statuses : ActionStatus | list[ActionStatus]):
@@ -555,3 +577,35 @@ class JobData:
         Get all active actions and returning a list of dictionaries, each containing "api_key", "api_status" and other custom fields defined on a per-action basis
         """
         return self.action_man[action_class].getActiveActions()
+
+    def stopWorkers(self) -> None:
+        """Take no arguments; signal all action managers' workers and return None.
+
+        Does not cancel accepted remote jobs or alter durable workflow state.
+        """
+        for manager in self.action_man.values():
+            manager.stopWorkers()
+
+    def resumeActions(self) -> None:
+        """Recover worker supervision for current unfinished workflow heads.
+
+        Take no arguments; return None. Called during construction after storage
+        and action managers are initialized. This restores persisted work, not
+        individual execution steps or paused workflows. Historical action records
+        are not scanned or restarted,
+        including work deliberately abandoned with cancel_running=False.
+        Supervisors recover their own state and run independently afterward.
+        """
+        with self.conn as conn:
+            jobs = conn.execute('SELECT job_id, workflow, workflow_stage, head_action_id, head_action_class, '
+                                'head_action_status FROM jobs WHERE head_action_status IN (?, ?, ?)',
+                                (ActionStatus.SCHEDULING.name, ActionStatus.ACTIVE.name, ActionStatus.CANCELING.name)).fetchall()
+        for job in jobs:
+            if job['head_action_id'] is None:
+                raise RuntimeError(f"Unfinished job {job['job_id']} has no action ID")
+            action = _unser(job['workflow'])[job['workflow_stage']]
+            manager = self.action_man[ActionClass[job['head_action_class']]]
+            if job['head_action_status'] == ActionStatus.CANCELING.name:
+                manager.cancelOrResumeCancelingAction(job['head_action_id'], recovery=(action, job['job_id']))
+            else:
+                manager.startOrResumeAction(action, job['job_id'], job['head_action_id'])

@@ -20,6 +20,9 @@ from .config import IRI_IMPLEMENTATIONS
 from .state import IRIComputeClient, getConfiguredImplementations, tokens
 from .state import special_globus_endpoints
 from .filesystem import getMountedFilesystems
+from ..workers import Workers, WorkerInterrupted
+
+_authentication_workers = Workers(blocking=True)
 
 def load_globus_tokens(token_file: Path) -> dict | None:
     if "~" in str(token_file):
@@ -48,6 +51,8 @@ def refresh_globus_tokens(client: globus_sdk.NativeAppAuthClient, refresh_token:
     try:
         token_response = client.oauth2_refresh_token(refresh_token)
         return token_response.by_resource_server[server]
+    except WorkerInterrupted:
+        raise
     except GlobusAPIError as exc:
         wfapiLog(
             f"IRI token refresh failed ({exc.http_status}); switching to interactive login."
@@ -55,7 +60,7 @@ def refresh_globus_tokens(client: globus_sdk.NativeAppAuthClient, refresh_token:
         return None
     except Exception as exc:
         wfapiLog(
-            f"IRI token refresh failed other error (Exception: {exc}, Server response: {token_response}, Resource server: {server}); switching to interactive login."
+            f"IRI token refresh failed ({type(exc).__name__}) for {server}; switching to interactive login."
         )
         return None
 
@@ -68,6 +73,12 @@ GLOBUS_CLIENT_ID = "eb18f0bb-4c76-43b5-88f1-750782be30ad" #Femtomeas, ckelly@bnl
 RESOURCE_SERVER = "auth.globus.org"
 
 def interactive_globus_login(client: globus_sdk.NativeAppAuthClient, implementation: str) -> dict:
+    """Block for IRI authorization and return its granted token dictionary.
+
+    client (NativeAppAuthClient) owns the OAuth flow; implementation (str)
+    selects configured scopes and session policy. Rejected exchanges prompt
+    again using that same flow. Tokens are persisted by the caller afterward.
+    """
     resource_server = IRI_IMPLEMENTATIONS[implementation]["resource_server"]
     required_scopes = set(IRI_IMPLEMENTATIONS[implementation]["required_scopes"])
     client.oauth2_start_flow(
@@ -83,13 +94,16 @@ def interactive_globus_login(client: globus_sdk.NativeAppAuthClient, implementat
 
     Enter authorization code: """
 
-    accept = False
-    while(not accept):
+    # Only code exchange is retried. Missing terminal input and subsequent
+    # validation/persistence errors must reach the caller rather than re-prompt.
+    while True:
+        code = wfapiUserQuery("IRI API login", query)
         try:
-            code = wfapiUserQuery("IRI API login", query)
             token_response = client.oauth2_exchange_code_for_tokens(code)
-            accept = True
-        except Exception as e:
+            break
+        except WorkerInterrupted:
+            raise
+        except Exception:
             continue
 
     assert resource_server in token_response.by_resource_server.keys()
@@ -130,7 +144,14 @@ def _load_amsc_pat(key_path: str) -> dict[str, str]:
 def setupIRIapiCompute(
     implementation: str, key_path: str, token_type: str = "globus"
 ) -> IRIComputeClient:
-    """Create an IRI client using the selected authentication method."""
+    """Authenticate in a shared worker and return an IRIComputeClient.
+
+    implementation (str) selects a configured provider, key_path (str) is its
+    token JSON filename and token_type (str) is 'globus' or 'amsc_pat', default
+    'globus'. Calls for the same pending credential context share a worker and
+    block for its result by default. The caller owns client registration; workers never
+    modify the implementation-client cache. Authentication failures propagate.
+    """
     if implementation not in IRI_IMPLEMENTATIONS:
         raise ValueError(f"Unknown IRI implementation: {implementation!r}")
 
@@ -142,7 +163,9 @@ def setupIRIapiCompute(
         factory = client_factories[token_type]
     except KeyError:
         raise ValueError(f"Unknown IRI token type: {token_type!r}") from None
-    return factory(implementation, key_path)
+    context = ('compute', implementation, str(Path(key_path).resolve()), token_type)
+    _, client = _authentication_workers.run(context, factory, implementation, key_path)
+    return client
 
 
 def _create_amsc_pat_client(implementation: str, key_path: str) -> IRIComputeClient:
@@ -256,17 +279,19 @@ def interactive_globus_transfer_login(
 
     Enter authorization code: """
 
-    accept = False
-    while(not accept):
+    while True:
         try:
             code = wfapiUserQuery("IRI Transfer API login", query)
-            token_response = client.oauth2_exchange_code_for_tokens(code)
-            accept = True
         except EOFError as exc:
             raise RuntimeError(
                 "Globus Transfer API authorization requires an interactive terminal"
             ) from exc
-        except Exception as e:
+        try:
+            token_response = client.oauth2_exchange_code_for_tokens(code)
+            break
+        except WorkerInterrupted:
+            raise
+        except Exception:
             continue
 
     return _globus_transfer_tokens_from_response(token_response)
@@ -306,46 +331,57 @@ def refresh_globus_transfer_tokens(client: globus_sdk.NativeAppAuthClient, store
     return iri_auth_data, globus_auth_data
 
 def setupIRIapiGlobusTransfer(key_path, *, authorization_parameters: dict | None = None):
-    """Load/refresh transfer credentials or interactively satisfy an auth challenge.
+    """Authenticate in a worker, then install the two transfer access tokens.
 
-    key_path stores both transfer-service token sets. When optional
-    authorization_parameters is supplied, bypass refresh of the old session
-    and obtain new tokens using those requirements. Persist successfully
-    granted credentials before updating the in-memory token cache. Return None.
+    key_path (str | Path) stores IRI and direct Globus token sets.
+    authorization_parameters (dict | None) supplies optional challenge
+    requirements and bypasses refresh when supplied. Calls with matching
+    credentials/requirements share a pending worker. Block until credentials
+    are saved by default, then update the token cache on the calling thread.
+    Return None; failures leave the old cache intact. Calls from an action
+    worker wait here too, without blocking the workflow manager. No server is required.
     """
-    client =  globus_sdk.NativeAppAuthClient(GLOBUS_CLIENT_ID)
+    def authenticate() -> tuple[dict, dict]:
+        """Authenticate/save the captured credentials; return the two token dictionaries.
 
-    wfapiLog("setupIRIapiGlobusTransfer checking stored tokens at",key_path)
-    stored = load_globus_tokens(Path(key_path))
-    auth_data = None
-    globus_auth_data = None
-    if authorization_parameters is None and stored and stored.get("refresh_token"):
-        refreshed = refresh_globus_transfer_tokens(client, stored)
-        if refreshed is not None:
-            auth_data, globus_auth_data = refreshed
+        The result contains IRI tokens at index 0 and direct Globus tokens at
+        index 1. This worker entry point keeps its call stack through blocking
+        input and never updates the shared token cache.
+        """
+        client = globus_sdk.NativeAppAuthClient(GLOBUS_CLIENT_ID)
+        wfapiLog("setupIRIapiGlobusTransfer checking stored tokens at", key_path)
+        stored = load_globus_tokens(Path(key_path))
+        auth_data = None
+        globus_auth_data = None
+        if authorization_parameters is None and stored and stored.get("refresh_token"):
+            refreshed = refresh_globus_transfer_tokens(client, stored)
+            if refreshed is not None:
+                auth_data, globus_auth_data = refreshed
 
-    if auth_data == None:
-        if authorization_parameters is None:
-            auth_data, globus_auth_data = interactive_globus_transfer_login(client)
-        else:
-            auth_data, globus_auth_data = interactive_globus_transfer_login(
-                client, authorization_parameters=authorization_parameters,
-            )
+        if auth_data is None:
+            if authorization_parameters is None:
+                auth_data, globus_auth_data = interactive_globus_transfer_login(client)
+            else:
+                auth_data, globus_auth_data = interactive_globus_transfer_login(
+                    client, authorization_parameters=authorization_parameters,
+                )
 
-    stored_tokens = dict(auth_data)
-    stored_tokens["globus_transfer"] = globus_auth_data
-    save_globus_tokens(Path(key_path), stored_tokens)
+        # Save before publishing results. The calling thread alone installs
+        # cached access tokens, avoiding background mutation of client state.
+        stored_tokens = dict(auth_data)
+        stored_tokens["globus_transfer"] = globus_auth_data
+        save_globus_tokens(Path(key_path), stored_tokens)
+        expires_at = auth_data.get("expires_at_seconds")
+        if expires_at:
+            ttl = int(expires_at - time.time())
+            wfapiLog(f"\nAccess token valid for ~{max(ttl, 0)} seconds.")
+        wfapiLog(f"Saved token data to {key_path}")
+        wfapiLog(f"Granted scopes: {auth_data.get('scope', '')}")
+        return auth_data, globus_auth_data
 
-    expires_at = auth_data.get("expires_at_seconds")
-    if expires_at:
-        ttl = int(expires_at - time.time())
-        wfapiLog(f"\nAccess token valid for ~{max(ttl, 0)} seconds.")
-
-    wfapiLog(f"Saved token data to {key_path}")
-    wfapiLog(f"Granted scopes: {auth_data.get('scope', '')}")
-
+    context = ('transfer', str(Path(key_path).resolve()),
+               json.dumps(authorization_parameters, sort_keys=True))
+    _, granted = _authentication_workers.run(context, authenticate)
+    auth_data, globus_auth_data = granted
     tokens['iriapi_transfer_base'] = auth_data['access_token']
     tokens['globus_transfer'] = globus_auth_data['access_token']
-
-
-

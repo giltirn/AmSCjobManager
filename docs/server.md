@@ -65,7 +65,8 @@ with code `manager_unavailable` instead of presenting cached records as current.
 The same error applies before manager startup and after shutdown. Health is
 checked before acquiring the lock and again after acquiring it, to cover a
 failure while the request was waiting. Tool discovery remains available.
-The server does not automatically restart a failed manager.
+The server does not automatically restart a failed manager. Manager instances
+are single-use; recovery requires a new manager/server using the same database.
 
 ## Query workflows
 
@@ -167,8 +168,9 @@ Enums are returned as their string names. Internal serialized workflows are
 excluded. The MCP structured result wraps the list in `result`, following the
 SDK's schema convention; the CLI unwraps this field into each operation's result.
 
-`refresh=true` forces polling of all active workflow heads, even if one workflow
-was selected. It propagates statuses to workflow records without submitting or
+`refresh=true` wakes supervisors to poll all active workflow heads without
+waiting for results; responses contain currently recorded status. This applies even
+when one workflow was selected. It propagates statuses to workflow records without submitting or
 advancing steps. Failed polls log errors and retain cached values. Compute head
 status `ACTIVE` includes provider states `new`, `queued`, and `active`, so inspect
 `api_status` to distinguish queueing from execution. `workflow_status` remains

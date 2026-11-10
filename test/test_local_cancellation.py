@@ -1,5 +1,7 @@
 """Real local processes exercise cancellation and workflow integration offline."""
 
+
+
 import os
 from pathlib import Path
 import signal
@@ -11,6 +13,7 @@ from unittest.mock import patch
 from types import SimpleNamespace
 
 from amscjobmanager import api_general as api, local_api
+from action_manager_helpers import DirectComputeActions
 from amscjobmanager.action_manager import ActionStatus
 from amscjobmanager.compute_actions import ExecuteBatchScriptComputeAction
 from amscjobmanager.iri_api import compute
@@ -19,6 +22,11 @@ from amscjobmanager.job_data import JobData
 
 class LocalCancellationTests(unittest.TestCase):
     def setUp(self):
+        # These tests isolate the checked-in reconciliation bodies; real
+        # asynchronous lifecycles and crash recovery have separate integration tests.
+        adapter = patch('amscjobmanager.job_data.ComputeActions', DirectComputeActions)
+        adapter.start()
+        self.addCleanup(adapter.stop)
         self.temporary = tempfile.TemporaryDirectory()
         self.directory = Path(self.temporary.name)
         self.status = local_api.LocalJobStatusWrapper(None)
@@ -261,7 +269,8 @@ class LocalCancellationTests(unittest.TestCase):
                 nodes=1, ranks_per_node=1, gpus_per_rank=0,
             ))
             jobs.startWorkflows([workflow_id])
-            jobid = jobs.conn.execute("SELECT api_key FROM computes").fetchone()[0]
+            with jobs.conn as conn:
+                jobid = conn.execute("SELECT api_key FROM computes").fetchone()[0]
             with local_api._local_jobs_lock:
                 self.jobs.append((jobid, local_api._local_jobs.get(jobid)))
             self._wait_for(lambda: (self.directory / "ready").exists())
@@ -270,14 +279,17 @@ class LocalCancellationTests(unittest.TestCase):
                 with self.assertRaises(PermissionError):
                     jobs.cancelJob(workflow_id)
             self.assertEqual(jobs.jobState(workflow_id)["head_action_status"], ActionStatus.CANCELING)
-            self.assertEqual(jobs.conn.execute("SELECT action_status FROM computes").fetchone()[0], "CANCELING")
+            with jobs.conn as conn:
+                self.assertEqual(conn.execute("SELECT action_status FROM computes").fetchone()[0], "CANCELING")
             self.assertEqual(local_api.getJobState(jobid), "active")
             # The normal reconciliation path then finishes the same cancellation.
             jobs.reconcileCancelingActions()
             self.assertEqual(jobs.jobState(workflow_id)["head_action_status"], ActionStatus.CANCELED)
             self.assertEqual(local_api.getJobState(jobid), "canceled")
-            self.assertEqual(jobs.conn.execute("SELECT action_status FROM computes").fetchone()[0], "CANCELED")
-            self.assertEqual(jobs.conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0], 1)
+            with jobs.conn as conn:
+                self.assertEqual(conn.execute("SELECT action_status FROM computes").fetchone()[0], "CANCELED")
+            with jobs.conn as conn:
+                self.assertEqual(conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0], 1)
         finally:
             jobs.conn.close()
 

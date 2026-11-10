@@ -380,8 +380,8 @@ class MCPToolTests(unittest.IsolatedAsyncioTestCase):
         unavailable, then fail its progression function inside the worker and
         wait for the thread to exit. Status calls must promptly return the
         structured error, while tool discovery still works on the same MCP
-        connection. Restart the worker after removing the injected failure and
-        verify a successful listing, proving the listener itself survived.
+        connection. The failed single-use manager must reject restart while the
+        listener continues serving tool discovery and unavailable-manager errors.
 
         Args:
             self (MCPToolTests): unittest-created test instance; no
@@ -408,10 +408,10 @@ class MCPToolTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(response.is_error)
             self.assertEqual(response.structured_content['error']['code'], 'manager_unavailable')
             self.assertEqual([tool.name for tool in (await call_mcp(client)).tools], ['list_workflows'])
-            manager.start()
+            with self.assertRaisesRegex(RuntimeError, 'cannot be restarted'):
+                manager.start()
             response = await asyncio.wait_for(call_mcp(client, 'list_workflows', {}), timeout=3)
-            self.assertFalse(response.is_error)
-            self.assertEqual(response.structured_content, {'result': []})
+            self.assertEqual(response.structured_content['error']['code'], 'manager_unavailable')
             manager.stop(wait_until_done=False)
             response = await asyncio.wait_for(call_mcp(client, 'list_workflows', {}), timeout=3)
             self.assertEqual(response.structured_content['error']['code'], 'manager_unavailable')

@@ -1,11 +1,14 @@
 """Check compute resource gating and submission recovery across crashes."""
 
+
+
 from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
 
 from amscjobmanager import api_general, compute_action_manager, compute_actions
+from action_manager_helpers import DirectComputeActions
 from amscjobmanager.action_manager import ActionStatus, SimulatedCrash
 from amscjobmanager.actions_base import ActionClass
 from amscjobmanager.compute_actions import ExecuteBatchScriptComputeAction
@@ -14,6 +17,11 @@ from amscjobmanager.job_data import JobData
 
 class ComputeResourceSchedulingTests(unittest.TestCase):
     def setUp(self):
+        # These tests isolate the checked-in reconciliation bodies; real
+        # asynchronous lifecycles and crash recovery have separate integration tests.
+        adapter = patch('amscjobmanager.job_data.ComputeActions', DirectComputeActions)
+        adapter.start()
+        self.addCleanup(adapter.stop)
         self.tmpdir = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmpdir.cleanup)
         self.db_path = Path(self.tmpdir.name) / "manager.sqlite"
@@ -60,9 +68,10 @@ class ComputeResourceSchedulingTests(unittest.TestCase):
 
     def _assert_scheduling_without_attempt(self, job_data, job_id):
         self.assertEqual(job_data.jobState(job_id)["head_action_status"], ActionStatus.SCHEDULING)
-        action = job_data.conn.execute(
-            "SELECT action_status, submission_attempts, api_key FROM computes"
-        ).fetchone()
+        with job_data.conn as conn:
+            action = conn.execute(
+                "SELECT action_status, submission_attempts, api_key FROM computes"
+            ).fetchone()
         self.assertEqual(action["action_status"], ActionStatus.SCHEDULING.name)
         self.assertEqual(action["submission_attempts"], 0)
         self.assertIsNone(action["api_key"])
@@ -80,10 +89,11 @@ class ComputeResourceSchedulingTests(unittest.TestCase):
         job_data.reconcileSchedulingActions()
         self.assertEqual(self.submit.call_count, 1)
         self.assertEqual(job_data.jobState(job_id)["head_action_status"], ActionStatus.ACTIVE)
-        self.assertEqual(
-            job_data.conn.execute("SELECT submission_attempts FROM computes").fetchone()[0],
-            1,
-        )
+        with job_data.conn as conn:
+            self.assertEqual(
+                conn.execute("SELECT submission_attempts FROM computes").fetchone()[0],
+                1,
+            )
 
     def test_status_query_error_defers_and_recovers_after_restart(self):
         self.resource_status.side_effect = RuntimeError("resource status unavailable")
@@ -161,10 +171,11 @@ class ComputeResourceSchedulingTests(unittest.TestCase):
         job_id = job_data.enqueueJob(self._action())
         with self.assertRaises(SimulatedCrash):
             job_data.startWorkflows([job_id])
-        self.assertEqual(
-            job_data.conn.execute("SELECT submission_attempts FROM computes").fetchone()[0],
-            1,
-        )
+        with job_data.conn as conn:
+            self.assertEqual(
+                conn.execute("SELECT submission_attempts FROM computes").fetchone()[0],
+                1,
+            )
         self.submit.assert_not_called()
         job_data.conn.close()
 
@@ -172,10 +183,11 @@ class ComputeResourceSchedulingTests(unittest.TestCase):
         recovered = self._new_job_data()
         recovered.reconcileSchedulingActions()
         self.assertEqual(recovered.jobState(job_id)["head_action_status"], ActionStatus.SCHEDULING)
-        self.assertEqual(
-            recovered.conn.execute("SELECT submission_attempts FROM computes").fetchone()[0],
-            1,
-        )
+        with recovered.conn as conn:
+            self.assertEqual(
+                conn.execute("SELECT submission_attempts FROM computes").fetchone()[0],
+                1,
+            )
 
         self.resource_status.return_value = True
         recovered.reconcileSchedulingActions()

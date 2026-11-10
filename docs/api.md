@@ -26,22 +26,22 @@ the library does not expand paths using the manager host's username.
 
 | Entry point | Arguments and result |
 | --- | --- |
-| `JobManager(filename=None, poll_freq=30, max_workflows_active=10)` | Creates a manager and JobData; no background thread starts yet. |
-| `manager.start()` | Starts progression in a background thread. |
+| `JobManager(filename=None, poll_freq=30, max_workflows_active=10)` | Creates a single-use manager and JobData, immediately recovering workers for unfinished persisted actions. The workflow-progression thread starts later. |
+| `manager.start()` | Starts progression in a background thread. Repeated calls while running are harmless; calls after shutdown or failure raise an error. |
 | `manager.isAlive()` | Returns whether its background thread is running. |
 | `with manager as jobs:` | Locks access and yields JobData. Does not manage thread lifetime. |
 | `manager(operation)` | Calls `operation(job_data)` under lock and returns its result. |
-| `manager.stop(wait_until_done=True, *, close_database=False)` | Waits according to its arguments, requests shutdown, and joins the thread. |
+| `manager.stop(wait_until_done=True, *, close_database=False)` | Waits according to its arguments, permanently shuts down the instance, and joins the thread. Repeated shutdown is safe; recovery requires a new manager. |
 | `JobData.enqueueJob(workflow, job_group=None)` | Accepts one action or a nonempty list; returns the integer workflow ID. |
 | `JobData.jobStatus(job_id)` | Returns a coarse `ActionStatus`; scheduling/intermediate completion appear as `ACTIVE`. |
 | `JobData.headActionStatus(job_id, force_poll=False, return_api_status=False)` | Returns the head `ActionStatus`, optionally paired with its provider status string; forced polling refreshes all active heads. Options are keyword-only. |
 | `JobData.jobState(job_id)` | Returns a state dictionary with enum-valued head status/class and serialized workflow. |
 | `JobData.listWorkflows(job_id=None, statuses=None)` | Lists state dictionaries in ID order, optionally filtering by ID and overall `ActionStatus` value(s). Includes terminal workflows; an explicit unknown ID raises `ValueError`. Does not poll. |
 | `JobData.cancelJob(job_id, cancel_running=True)` | Marks cancellation while retaining records; optionally cancels current remote work. Returns `None`; may raise while leaving `CANCELING`. |
-| `JobData.getActiveActions(action_class)` | Returns a list of info dictionaries for active actions of the selected `ActionClass`. Entries include workflow ID, remote `api_key`, and raw `api_status`. `ActionClass.API` returns an empty list because those stages execute synchronously. |
+| `JobData.getActiveActions(action_class)` | Returns a list of info dictionaries for active actions of the selected `ActionClass`. Entries include workflow ID, remote `api_key`, and raw `api_status`. `ActionClass.API` returns an empty list because unfinished API sequences retain `SCHEDULING`. |
 | `JobData.countWorkflowsWithStatus(statuses)` | Accepts one `ActionStatus` or a list; counts matching head statuses with a non-`NONE` head class. Fully completed workflows are excluded. |
 | `JobData.startWorkflows(job_ids=None)` | Reconciles submissions, then starts selected eligible workflows or fills automatic slots. |
-| `JobData.progressActiveState(poll_freq=30, force_poll=False)` | Reconciles cancellation/submission, polls active actions, and progresses successful workflows. Failed polls are logged and deferred per action while other workflows progress. Used by JobManager or an application driving JobData manually. |
+| `JobData.progressActiveState(force_poll=False)` | Restores missing supervision, observes recorded action states, and progresses successful workflows. Forced polling requests an early worker poll without waiting or changing its interval. Failed polls are logged and deferred per action while other workflows progress. Used by JobManager or an application driving JobData manually. |
 
 When a manager thread runs, call these JobData operations through its lock.
 See [operations](operations.md) for status semantics and recovery limits.

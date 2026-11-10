@@ -71,8 +71,11 @@ this change does not add MCP workflow submission tools.
 IDs, serialized definition, status, `next_operation`, update timestamp and any
 failure reason. There are no remote task IDs or submission-attempt fields.
 
-The manager commits the action's `SCHEDULING` intent before executing anything.
-After each successful operation it commits `next_operation`, the zero-based
+The manager commits the action's `SCHEDULING` intent before launching its
+worker. That thread runs all remaining operations sequentially, retaining
+its stack across API calls and user queries. `JobData` need not call it again
+for execution to continue. Unfinished operations leave the cursor unchanged.
+After each successful operation the worker commits `next_operation`, the zero-based
 index of the next unfinished operation. A value equal to `operation_count`
 means all operations have finished. SQLite enforces integer, nonnegative cursor
 storage; the manager also validates it against the persisted sequence length.
@@ -93,19 +96,22 @@ The cursor remains at the failed operation, the reason is available through
 index. There is no automatic retry of failed stages. Status queries never execute
 operations, even when a forced poll is requested.
 
-`queryStatus` returns `(ActionStatus, None)`: these stages have no provider
+`queryRecordedStatus` returns `(ActionStatus, None)`: these stages have no provider
 status. `getActionInfo` includes `next_operation`, `operation_count`, operation
 type names, and `error`, alongside the common `job_id`, `api_key=None` and
 `api_status=None` fields.
 
-Cancellation of interrupted work records `CANCELED` directly without replaying
-or undoing operations: there is no external cancellation to reconcile. JobData
-retains its separate workflow-level cancellation recovery. Existing files remain. Cancellation and other
-requests using the manager lock wait for an executing sequence to finish.
+Cancellation with no live worker records `CANCELED` directly without replaying
+or undoing operations. If an operation is still running, cancellation retains
+`CANCELING` until the execution worker finishes or acknowledges interruption,
+after which a separate cancellation worker records `CANCELED`.
+Later operations are never started. Existing file effects remain; JobData retains
+its separate workflow-level cancellation recovery.
 
 ## Keep API stages short
 
-API sequences run synchronously and occupy the manager while executing.
+API operations run on background workers and do not occupy the manager while
+waiting. They are intended for short preparation and postprocessing.
 **Long-running local programs should be compute actions with `machine="local"`**,
 using asynchronous execution, monitoring and cancellation. Large transfers should
 be separate `GlobusTransfer` stages rather than blocking uploads or downloads.

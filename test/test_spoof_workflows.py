@@ -1,5 +1,7 @@
 """End-to-end mixed workflow tests against the deterministic SPOOF API."""
 
+
+
 import os
 
 # api_general selects its implementation at import time.  Set this before any
@@ -9,6 +11,7 @@ os.environ["AMSC_JOB_MANAGER_API_IMPL"] = "SPOOF"
 import unittest
 from unittest.mock import call, patch
 
+from action_manager_helpers import DirectAPIActions, DirectComputeActions, DirectGlobusActions
 from amscjobmanager import spoof_api
 from amscjobmanager.iri_api import state
 from amscjobmanager.action_manager import ActionStatus
@@ -20,6 +23,17 @@ from amscjobmanager.job_data import JobData
 
 class SpoofWorkflowTests(unittest.TestCase):
     def setUp(self):
+        # These tests isolate the checked-in reconciliation bodies; real
+        # asynchronous lifecycles and crash recovery have separate integration tests.
+        adapter = patch('amscjobmanager.job_data.ComputeActions', DirectComputeActions)
+        adapter.start()
+        self.addCleanup(adapter.stop)
+        adapter = patch('amscjobmanager.job_data.GlobusDataTransfers', DirectGlobusActions)
+        adapter.start()
+        self.addCleanup(adapter.stop)
+        adapter = patch('amscjobmanager.job_data.APIActions', DirectAPIActions)
+        adapter.start()
+        self.addCleanup(adapter.stop)
         # Zero delay makes each remote status query deterministically complete.
         spoof_api.resetSpoofActionState(completion_delay=0)
         self.job_data = JobData()
@@ -198,7 +212,7 @@ class SpoofWorkflowTests(unittest.TestCase):
         self.job_data.cancelJob(job_id)
         self.assertEqual(self.job_data.jobStatus(job_id), ActionStatus.CANCELED)
         self.assertEqual(
-            self.job_data.action_man[ActionClass.COMPUTE].queryStatus(
+            self.job_data.action_man[ActionClass.COMPUTE].queryRecordedStatus(
                 action_id, force_update=True
             )[0],
             ActionStatus.CANCELED,

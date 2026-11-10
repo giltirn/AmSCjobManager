@@ -29,7 +29,7 @@ import tempfile
 from pathlib import Path, PurePosixPath
 from urllib.parse import quote, urljoin, urlsplit, urlunsplit
 
-from ..logging import wfapiLog
+from ..logging import wfapiLog, wfapiUserQuery
 
 from .config import IRI_IMPLEMENTATIONS, registerImplementation
 from .configuration_models import DiscoveredImplementation, ImplementationCache
@@ -153,7 +153,7 @@ def _mount_path_root(mount_path: str) -> str:
         if understood:
             inferred = str(PurePosixPath(*root))
             while True:
-                answer = input(f"Mount path {mount_path!r}: use filesystem root {inferred!r}? [y/n]: ").strip().lower()
+                answer = wfapiUserQuery("IRI discovery", f"Mount path {mount_path!r}: use filesystem root {inferred!r}? [y/n]: ").strip().lower()
                 if answer in {"y", "yes"}:
                     return inferred
                 if answer in {"n", "no"}:
@@ -162,7 +162,7 @@ def _mount_path_root(mount_path: str) -> str:
         else:
             wfapiLog(f"Could not infer a filesystem root from mount path {mount_path!r}.")
         while True:
-            supplied = input(f"Filesystem root for mount path {mount_path!r}: ").strip()
+            supplied = wfapiUserQuery("IRI discovery", f"Filesystem root for mount path {mount_path!r}: ").strip()
             path = PurePosixPath(supplied)
             if path.is_absolute() and ".." not in path.parts and "{" not in supplied and "}" not in supplied and "~" not in supplied:
                 return str(path)
@@ -256,7 +256,7 @@ def _machine_name(implementation: str, resource: dict) -> str:
     try:
         if re.fullmatch(r"[a-z0-9][a-z0-9_-]*", suggested):
             while True:
-                answer = input(f"Compute resource {label!r} ({resource['id']}): use machine name {suggested!r}? [y/n]: ").strip().lower()
+                answer = wfapiUserQuery("IRI discovery", f"Compute resource {label!r} ({resource['id']}): use machine name {suggested!r}? [y/n]: ").strip().lower()
                 if answer in {"y", "yes"}:
                     return suggested
                 if answer in {"n", "no"}:
@@ -265,7 +265,7 @@ def _machine_name(implementation: str, resource: dict) -> str:
         else:
             wfapiLog(f"Could not derive a valid machine name from compute resource {label!r}.")
         while True:
-            supplied = input(f"Machine name for compute resource {label!r} ({resource['id']}): ").strip()
+            supplied = wfapiUserQuery("IRI discovery", f"Machine name for compute resource {label!r} ({resource['id']}): ").strip()
             if supplied != "local" and re.fullmatch(r"[a-z0-9][a-z0-9_-]*", supplied):
                 return supplied
             wfapiLog("Use lowercase letters, digits, underscores or hyphens, starting with a letter or digit; 'local' is reserved.")
@@ -308,9 +308,9 @@ def discoverImplementation(
             return cached
     try:
         if api_url is None:
-            api_url = previous["api_base"] if previous else input(f"IRI API URL for {name!r}: ").strip()
+            api_url = previous["api_base"] if previous else wfapiUserQuery("IRI discovery", f"IRI API URL for {name!r}: ").strip()
         if api_version is None:
-            api_version = previous["api_version"] if previous else int(input(f"IRI API version for {name!r} (1 or 2): ").strip())
+            api_version = previous["api_version"] if previous else int(wfapiUserQuery("IRI discovery", f"IRI API version for {name!r} (1 or 2): ").strip())
     except EOFError as exc:
         raise ValueError(
             f"Unknown IRI provider {name!r}: specify api_url and api_version "

@@ -2,7 +2,13 @@
 def cmdlinePrint(*args, **kwargs):
     print(*args, **kwargs)
 def cmdlineInput(query):
-    return input(query + " : ").strip()
+    """Ask query (str) through the user hook; return the response string.
+
+    Import locally because logging uses this module's default print sink.
+    """
+    from .logging import wfapiUserQuery
+
+    return wfapiUserQuery('', query + ' : ')
 
 input_func = cmdlineInput
 

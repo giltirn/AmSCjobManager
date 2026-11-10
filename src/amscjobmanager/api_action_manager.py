@@ -1,28 +1,33 @@
 """Durable execution of synchronous API operation sequences."""
 
-import sqlite3
 import time
 
 from .action_manager import ActionManager, ActionStatus, SimulatedCrash, _ser, _unser
 from .api_actions import APIAction
 from .logging import wfmanLog
+from .database import DatabaseClosed, LockedConnection
+from .workers import Workers, WorkerInterrupted, checkForThreadCurrentWorkerInterruption
 
 
 class APIActions(ActionManager):
     """Own API action records and checkpoint each completed operation.
 
-    Execution is synchronous under the caller's manager lock. Interrupted
+    Operations run on workers outside the caller's manager lock. Interrupted
     operations must be replay-safe; previously checkpointed operations are
     skipped. Ordinary operation failures mark the action FAILED.
     """
 
-    def __init__(self, connection: sqlite3.Connection, *, _test_crash_at: str | None = None):
-        """Create the API action table on connection (sqlite3.Connection).
+    def __init__(self, connection: LockedConnection, *, _test_crash_at: str | None = None,
+                 workers: Workers | None = None):
+        """Create the API action table on connection (LockedConnection).
 
-        connection must use sqlite3.Row records and is owned by JobData.
+        connection yields a SQLite connection with sqlite3.Row records and is
+        owned by JobData. All SQL access stays inside its context blocks.
+        workers (Workers | None) supplies execution, default a new registry.
         _test_crash_at (str | None) selects a test-only crash boundary; default
         None disables injection. Return None; no remote API is contacted.
         """
+        super().__init__(workers=workers)
         self.conn = connection
         self._test_crash_at = _test_crash_at
         with self.conn as conn:
@@ -42,36 +47,55 @@ class APIActions(ActionManager):
         if point == self._test_crash_at:
             raise SimulatedCrash(point)
 
-    def startAction(self, action: APIAction, job_id: int, action_id: int) -> bool:
-        """Execute or recover an API sequence under its caller-assigned identity.
+    def _recordAction(self, action: APIAction, job_id: int, action_id: int, status: ActionStatus) -> bool:
+        """Persist a missing API record, retaining existing records unchanged.
 
-        action (APIAction) supplies the definition only for a missing record.
-        job_id (int) is the positive workflow ID; action_id (int) is the positive
-        global ID always allocated by JobData. Return True when the stored
-        status can be read (including failure). Execution is synchronous, so
-        this implementation never returns False. Existing terminal records are
-        not executed again. Simulated crashes propagate without marking failure.
+        action (APIAction) is the stored definition; job_id/action_id (positive
+        ints) identify workflow/action; status (ActionStatus) is the initial
+        intent. Return True for a new record, False if it already exists.
         """
-        # SCHEDULING covers the entire unfinished synchronous sequence, including
-        # operations already in progress. JobData keeps the workflow head in
-        # SCHEDULING until this call returns, so its existing scheduling recovery
-        # calls startAction again after a crash and resumes at next_operation.
-        # ACTIVE is reserved here for externally running work that needs polling;
-        # API status queries only read records and never execute operations.
-        created = False
         with self.conn as conn:
-            if not self.hasAction(action_id):
-                conn.execute(
-                    'INSERT INTO api_actions '
-                    '(action_id, job_id, details, action_status, last_update) VALUES (?, ?, ?, ?, ?)',
-                    (action_id, job_id, _ser(action), ActionStatus.SCHEDULING.name, int(time.time())),
-                )
-                created = True
-        if created:
+            if self.hasAction(action_id):
+                return False
+            conn.execute('INSERT INTO api_actions '
+                         '(action_id, job_id, details, action_status, last_update) VALUES (?, ?, ?, ?, ?)',
+                         (action_id, job_id, _ser(action), status.name, int(time.time())))
+        return True
+
+    def startOrResumeAction(self, action: APIAction, job_id: int, action_id: int) -> None:
+        """Start an API sequence or recover execution from its saved checkpoint.
+
+        action supplies the APIAction definition for a missing record. job_id
+        and action_id (positive ints) are assigned by JobData. Existing terminal
+        records are retained. Resumption is recovery after the previous worker
+        stopped: unfinished work continues from its saved cursor. A live worker
+        is reused and executes the sequence without repeated calls.
+        Return None without waiting for the sequence or cancellation to finish.
+        """
+        if self._recordAction(action, job_id, action_id, ActionStatus.SCHEDULING):
             self._maybeSimulateCrash('action_intent_persisted')
-        row = self.conn.execute('SELECT * FROM api_actions WHERE action_id = ?', (action_id,)).fetchone()
+        status, _ = self.queryRecordedStatus(action_id)
+        if status == ActionStatus.CANCELING:
+            self._startCancellationWorker(action_id, complete_cancellation=self._completeCancellation)
+        elif status == ActionStatus.SCHEDULING:
+            self._startExecutionWorker(
+                action_id, execute_action=self._executeAction,
+                complete_cancellation=self._completeCancellation,
+            )
+
+    def _executeAction(self, action_id: int) -> None:
+        """Execute remaining operations sequentially for positive action_id; return None.
+
+        The worker owns this call stack across user queries. It commits a
+        cursor after each success without holding a database lock during the
+        operation. Recovery replays the unfinished operation after a crash.
+        A recorded CANCELING intent returns without replay; WorkerInterrupted
+        propagates out of an interrupted call before _completeCancellation starts.
+        """
+        with self.conn as conn:
+            row = conn.execute('SELECT * FROM api_actions WHERE action_id = ?', (action_id,)).fetchone()
         if row['action_status'] != ActionStatus.SCHEDULING.name:
-            return True
+            return
 
         index = row['next_operation']
         try:
@@ -83,6 +107,9 @@ class APIActions(ActionManager):
             if not 0 <= index <= len(action.operations):
                 raise ValueError(f'Invalid next_operation {index} for {len(action.operations)} operations')
             for index in range(index, len(action.operations)):
+                # Keep the entire remaining sequence on this worker's
+                # stack; another workflow can progress while an operation waits.
+                checkForThreadCurrentWorkerInterruption()
                 self._maybeSimulateCrash(f'api_operation_{index}_started')
                 action.operations[index].execute(row['job_id'])
                 self._maybeSimulateCrash(f'api_operation_{index}_completed')
@@ -93,70 +120,96 @@ class APIActions(ActionManager):
                 status = (ActionStatus.COMPLETED if index + 1 == len(action.operations)
                           else ActionStatus.SCHEDULING)
                 with self.conn as conn:
-                    conn.execute('UPDATE api_actions SET next_operation = ?, action_status = ?, '
+                    conn.execute("UPDATE api_actions SET next_operation = ?, action_status = CASE WHEN action_status = 'CANCELING' THEN action_status ELSE ? END, "
                                  'last_update = ? WHERE action_id = ?',
                                  (index + 1, status.name, int(time.time()), action_id))
                 self._maybeSimulateCrash(f'api_operation_{index}_checkpoint_persisted')
+                checkForThreadCurrentWorkerInterruption()
             # Empty sequences also complete without leaving a scheduling record.
             if not action.operations or row['next_operation'] == len(action.operations):
                 with self.conn as conn:
                     conn.execute('UPDATE api_actions SET action_status = ?, last_update = ? '
-                                 'WHERE action_id = ?',
-                                 (ActionStatus.COMPLETED.name, int(time.time()), action_id))
+                                 'WHERE action_id = ? AND action_status = ?',
+                                 (ActionStatus.COMPLETED.name, int(time.time()), action_id, ActionStatus.SCHEDULING.name))
             self._maybeSimulateCrash('api_action_completed')
-        except SimulatedCrash:
+        except (WorkerInterrupted, SimulatedCrash, DatabaseClosed):
             raise
         except Exception as exc:
             error = f'{type(exc).__name__}: {exc}'
             wfmanLog(f'API action {action_id} (job {row["job_id"]}), operation {index} failed: {error}')
-            with self.conn as conn:
-                conn.execute('UPDATE api_actions SET action_status = ?, error = ?, last_update = ? '
-                             'WHERE action_id = ?',
-                             (ActionStatus.FAILED.name, error, int(time.time()), action_id))
-        return True
+            self._recordWorkerFailure(action_id, exc)
 
-    def cancelAction(self, action_id: int, *, recovery: tuple[APIAction, int] | None = None) -> int:
-        """Persist cancellation without executing or undoing operations.
+    def cancelOrResumeCancelingAction(self, action_id: int, *, recovery: tuple[APIAction, int] | None = None) -> None:
+        """Request API-sequence cancellation or recover its pending completion.
 
-        action_id (int) is the positive global ID. recovery optionally contains
-        the stored APIAction at index 0 and positive workflow ID at index 1, to
-        restore a missing record. Return action_id after resolving cancellation.
-        Raise ValueError if the record is missing without recovery information.
-        A running operation cannot be interrupted through the manager lock.
+        action_id is a positive int. recovery optionally supplies the stored
+        APIAction at index 0 and its workflow ID at index 1. Without a live
+        operation, mark CANCELED directly. A live sequence first gets CANCELING
+        intent and a cooperative interrupt; earlier file effects remain.
+        Return None without waiting; an existing cancellation worker is reused.
         """
-        # Cancellation has no external side effect to reconcile. Commit CANCELED
-        # directly, including when restoring a record missing after a crash.
+        if recovery is not None:
+            action, job_id = recovery
+            self._recordAction(action, job_id, action_id, ActionStatus.CANCELED)
+        # Record intent and signal under the handoff lock so an interrupt cannot
+        # arrive late and abort the worker's cancellation-completion phase.
+        with self._worker_lock:
+            status, _ = self.queryRecordedStatus(action_id)
+            if status == ActionStatus.CANCELED:
+                return
+            worker = self._action_workers.get(action_id)
+            running = worker is not None and not worker.future.done()
+            if status != ActionStatus.CANCELING:
+                status = ActionStatus.CANCELING if running else ActionStatus.CANCELED
+                with self.conn as conn:
+                    conn.execute('UPDATE api_actions SET action_status = ?, last_update = ? WHERE action_id = ?',
+                                 (status.name, int(time.time()), action_id))
+                if running:
+                    self.workers.interrupt(action_id)
+        if status == ActionStatus.CANCELING:
+            self._startCancellationWorker(action_id, complete_cancellation=self._completeCancellation)
+
+    def _completeCancellation(self, action_id: int) -> None:
+        """Acknowledge API-sequence cancellation after its operation has finished running.
+
+        action_id (int) is its positive global ID. Return None after changing
+        CANCELING to CANCELED. Keep the operation cursor and previous file effects;
+        no remote cancellation or replay of the sequence is needed.
+        """
         with self.conn as conn:
-            if recovery is not None and not self.hasAction(action_id):
-                action, job_id = recovery
-                conn.execute('INSERT INTO api_actions '
-                             '(action_id, job_id, details, action_status, last_update) VALUES (?, ?, ?, ?, ?)',
-                             (action_id, job_id, _ser(action), ActionStatus.CANCELED.name, int(time.time())))
-            else:
-                updated = conn.execute(
-                    'UPDATE api_actions SET action_status = ?, last_update = ? WHERE action_id = ?',
-                    (ActionStatus.CANCELED.name, int(time.time()), action_id),
-                ).rowcount
-                if not updated:
-                    raise ValueError(f'Unknown action_id: {action_id}')
-        return action_id
+            conn.execute('UPDATE api_actions SET action_status = ?, last_update = ? '
+                         'WHERE action_id = ? AND action_status = ?',
+                         (ActionStatus.CANCELED.name, int(time.time()), action_id, ActionStatus.CANCELING.name))
+
+    def _recordWorkerFailure(self, action_id: int, error: Exception) -> None:
+        """Record unexpected error for positive action_id; preserve cancellation, return None."""
+        with self.conn as conn:
+            conn.execute('UPDATE api_actions SET action_status = ?, error = ?, last_update = ? '
+                         'WHERE action_id = ? AND action_status != ?',
+                         (ActionStatus.FAILED.name, f'{type(error).__name__}: {error}', int(time.time()),
+                          action_id, ActionStatus.CANCELING.name))
 
     def hasAction(self, action_id: int) -> bool:
         """Return whether positive int action_id has a stored API action record."""
-        return self.conn.execute('SELECT 1 FROM api_actions WHERE action_id = ?', (action_id,)).fetchone() is not None
+        with self.conn as conn:
+            return conn.execute('SELECT 1 FROM api_actions WHERE action_id = ?', (action_id,)).fetchone() is not None
 
     def getMaxActionId(self) -> int | None:
         """Take no arguments; return the highest stored int ID, or None if empty."""
-        return self.conn.execute('SELECT MAX(action_id) FROM api_actions').fetchone()[0]
+        with self.conn as conn:
+            return conn.execute('SELECT MAX(action_id) FROM api_actions').fetchone()[0]
 
-    def queryStatus(self, action_id: int, update_freq=30, force_update=False) -> tuple[ActionStatus, None]:
-        """Return (ActionStatus, None) for positive integer action_id.
+    def queryRecordedStatus(self, action_id: int, *, force_update=False) -> tuple[ActionStatus, None]:
+        """Read the recorded state of an API sequence.
 
-        update_freq (float, default 30 seconds) and force_update (bool, default
-        False) are accepted for interface compatibility. No polling or execution
+        action_id (int) is its positive global ID. Return (ActionStatus, None):
+        index 0 is recorded state; index 1 is None because there is no provider
+        status for API sequences. force_update (bool, default False) is accepted for interface
+        compatibility and ignored. No polling or execution
         occurs. Raise ValueError for an unknown action ID.
         """
-        row = self.conn.execute('SELECT action_status FROM api_actions WHERE action_id = ?', (action_id,)).fetchone()
+        with self.conn as conn:
+            row = conn.execute('SELECT action_status FROM api_actions WHERE action_id = ?', (action_id,)).fetchone()
         if row is None:
             raise ValueError(f'Unknown action_id: {action_id}')
         return ActionStatus[row['action_status']], None
@@ -164,17 +217,8 @@ class APIActions(ActionManager):
     def updateStatuses(self) -> None:
         """Take no arguments; return None because there is no external state to poll."""
 
-    def waitForAction(self, action_id: int, check_freq=30) -> ActionStatus:
-        """Return the stored ActionStatus for positive integer action_id.
-
-        check_freq (float, default 30 seconds) is unused: operations execute
-        synchronously, so no ACTIVE work exists to wait for. Execution/recovery
-        is performed by startAction, never by status queries.
-        """
-        return self.queryStatus(action_id)[0]
-
     def getActiveActions(self) -> list[dict]:
-        """Take no arguments; return [] since synchronous actions never enter ACTIVE."""
+        """Take no arguments; return [] because API sequences retain SCHEDULING until completion."""
         return []
 
     def getActionInfo(self, action_id: int) -> dict:
@@ -184,7 +228,8 @@ class APIActions(ActionManager):
         next_operation (zero-based int, equal to operation_count on completion),
         operation_count (int), operations (list[str] names), and error (str | None).
         """
-        row = self.conn.execute('SELECT * FROM api_actions WHERE action_id = ?', (action_id,)).fetchone()
+        with self.conn as conn:
+            row = conn.execute('SELECT * FROM api_actions WHERE action_id = ?', (action_id,)).fetchone()
         if row is None:
             raise ValueError(f'Unknown action_id: {action_id}')
         return dict(_unser(row['details']).getInfo(), job_id=row['job_id'], api_key=None,

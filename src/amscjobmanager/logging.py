@@ -24,10 +24,10 @@ def wfapiLog(*args, **kwargs):
 
 
 def defaultAPIuserQueryFunc(title: str, query: str) -> str:
-    """Print title (str), block on query (str), and return the stripped answer.
+    """Print title (str), ask query (str) in the terminal and return a stripped answer.
 
-    This is the default input implementation for wfapiUserQuery. It can run
-    on an authentication worker; input and its failures remain synchronous.
+    This is the default api_query_user_func hook for direct Python use. Server
+    frontends replace that hook with their query queue's ask function.
     """
     if len(title):
         print(title)
@@ -35,15 +35,17 @@ def defaultAPIuserQueryFunc(title: str, query: str) -> str:
             
 api_query_user_func = defaultAPIuserQueryFunc
 
+
 def wfapiUserQuery(title: str, query: str) -> str:
     """Ask through the configured hook and return its response string.
 
     title (str) describes the interaction; query (str) is the question or login
-    URL/prompt. The default hook blocks and strips whitespace. Authentication
-    workers retain their execution state while this call waits; no completion
-    callback or condition ID is passed through the query interface.
+    URL/prompt. Always call api_query_user_func: its default implementation asks
+    in the terminal; the server utility installs its queue's ask function instead.
+    Authentication workers retain their execution state while this call waits;
+    no completion callback or condition ID is passed through the query interface.
     """
     checkForThreadCurrentWorkerInterruption()
-    response = api_query_user_func(title,query)
+    response = api_query_user_func(title, query)
     checkForThreadCurrentWorkerInterruption()
     return response

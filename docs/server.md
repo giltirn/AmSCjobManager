@@ -2,9 +2,10 @@
 
 The optional server exposes workflow listing and status through MCP Streamable
 HTTP. The command-line client supports traditional commands and JSON requests,
-calling the same tools as an MCP agent. Workflow
-submission, cancellation, privileged operations, and authentication challenges
-are not exposed by this prototype.
+calling the same tools as an MCP agent. Pending user questions, including
+configuration and authentication requests, can be listed and answered through
+the same listener. Workflow submission, cancellation and privileged operations
+are not yet exposed as MCP commands.
 
 ## Start the server
 
@@ -16,11 +17,15 @@ python utilities/manager_server.py manager-config.json \
     --database workflows.sqlite --port 8765 --log-file manager.log
 ```
 
-The listener binds to `127.0.0.1` and serves `/mcp`. It owns a normal background
-`JobManager`, which resumes and progresses workflows in its database. Run only
-one manager/server against that database. Stopping the server closes its manager
-without canceling remote jobs. The tools are read-only, but normal background
-workflow processing continues.
+The listener binds to `127.0.0.1` and serves `/mcp`. Its `ServerRuntime` owns
+asynchronous initialization, a user-query queue, and the eventual background
+`JobManager`. Initialization starts after HTTP is listening, so configuration or
+authentication questions can be answered even before a manager exists. Once ready,
+the manager recovers/progresses workflows in its database. Pending questions keep
+the asking worker waiting while unrelated workflows continue. Run only one
+manager/server against that database. Stopping closes the queue and manager
+without canceling accepted remote jobs. Workflow tools remain read-only; replying
+delivers text to a waiting operation.
 
 Successful HTTP startup prints an administrator notice to stdout:
 
@@ -29,7 +34,10 @@ Server started: http://127.0.0.1:8765/mcp (PID 12345, log: /path/to/manager.log)
 ```
 
 The notice is flushed immediately and appears only after the listener has bound
-its socket. Bind/configuration failures do not produce a success notice.
+its socket. This confirms listener readiness, not completion of manager
+initialization. Bind failures do not produce a success notice; initialization
+failures are logged while the listener remains available. `Workflow manager ready`
+in the log indicates successful initialization.
 Graceful shutdown, including Ctrl-C and SIGTERM, prints
 `Server terminating: http://127.0.0.1:8765/mcp`. Ctrl-C completes manager cleanup
 and exits successfully without a KeyboardInterrupt/CancelledError traceback.
@@ -47,16 +55,25 @@ redirect stdout. MCP/Uvicorn use WARNING level: routine INFO/access messages
 are suppressed, while warnings/errors retain standard logging to stderr. This
 prevents per-request access logs from appearing alongside a client's JSON in
 the same terminal; the administrator lifecycle notices above are deliberate.
-Interactive queries retain their separate
-`wfapiUserQuery` hook.
+User questions always pass from `wfapiUserQuery` to `api_query_user_func`.
+The server utility replaces that hook with its queue's `ask` function before
+initialization and restores the previous hook on shutdown. Outside server mode,
+the default hook prompts in the terminal. Worker shutdown signals prevent late
+server calls from prompting after the terminal hook has been restored.
 
-The library factory `amscjobmanager.server.app.createServer(manager)` can also
-attach the same tools to an existing manager in an embedding application. The
-caller then owns manager and listener startup/shutdown. This is how the
-integration test submits its local workflow directly through Python before
-querying it over MCP; the prototype has no MCP submission tool.
-The frontend uses `server.runner.ManagerHTTPServer` to add socket-readiness and
-termination announcements to the same MCP application.
+`server.runner.ManagerHTTPServer(initialize_manager, port=8765, log_path=...)`
+constructs its own runtime and MCP server, then registers the tools through
+`server.tools.registerTools`. `initialize_manager` is a no-argument
+factory that configures the API and returns a new `JobManager`; it runs after
+listener startup. The server owns runtime startup/shutdown and emits readiness
+and termination announcements.
+
+Embedding callers install `logging.api_query_user_func = server.runtime.queries.ask`
+before running and restore the previous hook after shutdown, as the utility does.
+In-process SDK tests connect to `server.mcp_server` and explicitly start/stop
+`server.runtime` without opening an HTTP listener. The integration test submits
+its local workflow through Python before querying it over MCP; the prototype
+has no MCP submission tool.
 
 Workflow tools require a running manager. If its background thread fails, the
 manager logs the underlying exception through `wfmanLog` and releases its lock.
@@ -67,6 +84,64 @@ checked before acquiring the lock and again after acquiring it, to cover a
 failure while the request was waiting. Tool discovery remains available.
 The server does not automatically restart a failed manager. Manager instances
 are single-use; recovery requires a new manager/server using the same database.
+
+## Answer user questions
+
+The queue belongs to the server runtime, not an MCP connection. A CLI process can
+list questions, disconnect, and a later CLI process can answer them:
+
+```bash
+python utilities/manager_client.py list_user_queries
+python utilities/manager_client.py respond_to_user_query --help
+python utilities/manager_client.py respond_to_user_query \
+    --session-id SERVER_SESSION_UUID --query-id 1 --response ANSWER
+```
+
+For authorization codes, prefer a request document through stdin or a private
+file so the answer is not placed in process arguments or shell history:
+
+```bash
+python utilities/manager_client.py --file - < response.json
+```
+
+The document uses the session and query identifiers returned by the listing:
+
+```json
+{
+  "tool": "respond_to_user_query",
+  "arguments": {
+    "session_id": "SERVER_SESSION_UUID",
+    "query_id": 1,
+    "response": "ANSWER"
+  }
+}
+```
+
+`list_user_queries` returns pending records containing `session_id` (UUID string),
+`query_id` (positive session-local integer), `title`, `prompt`, and `created_at`
+(Unix seconds). Listing does not consume questions or include previous answers.
+Shared authentication can serve several workflows, so a question is not
+necessarily associated with one workflow ID.
+
+A response returns `accepted: true` in the CLI operation result. This acknowledges
+one-time delivery, not successful authentication or completion of the waiting
+operation. The asking worker performs token exchange and persists credentials
+through the existing API code. A rejected code can produce a new query number.
+Responses are not echoed, logged by the query service, or persisted in SQLite.
+
+The session UUID changes on restart. Replies to previous sessions return
+`stale_session`; answered, interrupted or unknown questions return
+`query_not_pending`; a closed runtime returns `query_queue_closed`. No question or
+response is recovered from the database. Instead, action recovery starts fresh
+workers that ask again if needed. Disconnecting a client does not invalidate its
+question. Action cancellation invalidates questions asked directly by that action's
+worker; shared authentication questions can remain needed by other callers.
+
+Query tools remain available during initialization and after manager failure.
+Workflow tools return `manager_unavailable` until the manager is ready and healthy.
+Shutdown closes the queue, wakes waiters and rejects late questions/replies.
+Answering questions does not unlock privileged sandbox operations; those controls
+and MCP workflow submission remain separate future work.
 
 ## Query workflows
 

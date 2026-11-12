@@ -1,4 +1,4 @@
-"""Read-only MCP tools and a real local workflow queried by a separate CLI process.
+"""MCP workflow inspection and a real local workflow queried by a CLI process.
 
 Run from the repository root using the same Python environment for installation
 and execution:
@@ -46,6 +46,7 @@ import unittest
 from unittest.mock import AsyncMock, patch
 
 from amscjobmanager.logging import wfmanLog
+from amscjobmanager import logging as manager_logging
 
 try:
     from mcp import Client
@@ -158,24 +159,25 @@ def serve_local_workflow(directory, ready, stop):
     Always request cancellation of the sleep workflow and close the manager
     on exit. The parent test removes the temporary directory after this returns.
     """
-    import uvicorn
     from amscjobmanager.compute_actions import ExecuteJobComputeAction
     from amscjobmanager.local_api import setStatusManagerDatabasePath
     from amscjobmanager.manager import JobManager
     from amscjobmanager.manager_config import readManagerConfigFile, setupManager
-    from amscjobmanager.server.app import createServer
+    from amscjobmanager.server.runner import ManagerHTTPServer
     from amscjobmanager import logging as manager_logging
 
     root = Path(directory)
     with (root / 'server.log').open('w') as log, redirect_stderr(log), \
          patch.object(manager_logging, 'wfman_log_func', partial(print, file=log, flush=True)), \
-         patch.object(manager_logging, 'api_log_func', partial(print, file=log, flush=True)):
+         patch.object(manager_logging, 'api_log_func', partial(print, file=log, flush=True)), \
+         patch.object(manager_logging, 'api_query_user_func'):
         config = root / 'config.json'
         config.write_text(json.dumps({'iri_implementations': {}, 'sandbox_directories': {'local': [directory]}}))
         setupManager(readManagerConfigFile(config))
         setStatusManagerDatabasePath(str(root / 'local.sqlite'))
         manager = JobManager(str(root / 'workflows.sqlite'), poll_freq=1)
-        server = None
+        server = ManagerHTTPServer(lambda: manager, port=0, log_path=root / 'server.log')
+        runtime = server.runtime
         thread = None
         job_id = None
         try:
@@ -196,7 +198,9 @@ def serve_local_workflow(directory, ready, stop):
                         machine='local', executable=executable, arguments=[], account='', queue='', time='60',
                         rundir=str(run_dir), nodes=1, ranks_per_node=1, gpus_per_rank=0,
                     ))
-            manager.start()
+            manager_logging.api_query_user_func = runtime.queries.ask
+            runtime.start()
+            runtime._startup_worker.future.result(timeout=3)
             # Wait for observable states instead of assuming a fixed startup
             # delay is enough for background submission and progression.
             deadline = time.monotonic() + 15
@@ -215,8 +219,6 @@ def serve_local_workflow(directory, ready, stop):
             with socket.socket() as listener:
                 listener.bind(('127.0.0.1', 0))
                 listener.listen()
-                app = createServer(manager).streamable_http_app(json_response=True)
-                server = uvicorn.Server(uvicorn.Config(app, log_level='warning'))
                 thread = threading.Thread(target=server.run, kwargs={'sockets': [listener]})
                 thread.start()
                 while not server.started:
@@ -225,6 +227,10 @@ def serve_local_workflow(directory, ready, stop):
                     time.sleep(0.02)
                 ready.send({'port': listener.getsockname()[1], 'workflow_id': job_id, **terminal_ids})
                 stop.wait(60)
+                # Cancel while storage is open; listener shutdown owns manager
+                # cleanup and closes the workflow database.
+                manager(lambda jobs: jobs.cancelJob(job_id))
+                job_id = None
                 server.should_exit = True
                 thread.join(timeout=10)
                 if thread.is_alive():
@@ -233,15 +239,14 @@ def serve_local_workflow(directory, ready, stop):
             ready.send({'error': f'{type(exc).__name__}: {exc}'})
             raise
         finally:
-            if server is not None:
-                server.should_exit = True
-            if thread is not None:
-                thread.join(timeout=10)
             try:
-                if job_id is not None:
+                if job_id is not None and manager.isAlive():
                     manager(lambda jobs: jobs.cancelJob(job_id))
             finally:
-                manager.stop(wait_until_done=False, close_database=True)
+                server.should_exit = True
+                if thread is not None:
+                    thread.join(timeout=10)
+                runtime.stop()
                 ready.close()
 
 
@@ -391,23 +396,28 @@ class MCPToolTests(unittest.IsolatedAsyncioTestCase):
             None when awaited: Checks report failures through unittest assertions.
         """
         from amscjobmanager.manager import JobManager
-        from amscjobmanager.server.app import createServer
+        from amscjobmanager.server.runner import ManagerHTTPServer
 
         manager = JobManager(max_workflows_active=0)
-        self.addCleanup(manager.stop, wait_until_done=False, close_database=True)
-        async with Client(createServer(manager), cache=None) as client:
+        server = ManagerHTTPServer(lambda: manager, port=0, log_path=Path(tempfile.gettempdir()) / 'amsc-mcp-test.log')
+        runtime = server.runtime
+        self.enterContext(patch.object(manager_logging, 'api_query_user_func', runtime.queries.ask))
+        self.addCleanup(runtime.stop)
+        async with Client(server.mcp_server, cache=None) as client:
             response = await asyncio.wait_for(call_mcp(client, 'list_workflows', {}), timeout=3)
             self.assertEqual(response.structured_content['error']['code'], 'manager_unavailable')
             with patch.object(manager.job_data, 'progressActiveState', side_effect=RuntimeError('injected manager crash')), \
                  patch('amscjobmanager.manager.wfmanLog') as log:
-                manager.start()
+                runtime.start()
+                await asyncio.to_thread(runtime._startup_worker.future.result, 3)
                 await asyncio.to_thread(manager._thread.join, 3)
                 self.assertFalse(manager._thread.is_alive())
                 self.assertIn('injected manager crash', log.call_args.args[0])
             response = await asyncio.wait_for(call_mcp(client, 'list_workflows', {'refresh': True}), timeout=3)
             self.assertTrue(response.is_error)
             self.assertEqual(response.structured_content['error']['code'], 'manager_unavailable')
-            self.assertEqual([tool.name for tool in (await call_mcp(client)).tools], ['list_workflows'])
+            self.assertEqual({tool.name for tool in (await call_mcp(client)).tools},
+                             {'list_workflows', 'list_user_queries', 'respond_to_user_query'})
             with self.assertRaisesRegex(RuntimeError, 'cannot be restarted'):
                 manager.start()
             response = await asyncio.wait_for(call_mcp(client, 'list_workflows', {}), timeout=3)
@@ -419,7 +429,8 @@ class MCPToolTests(unittest.IsolatedAsyncioTestCase):
     async def test_manager_health_is_rechecked_after_acquiring_lock(self):
         """If health changes while waiting for the lock, do not query cached records.
 
-        Simulate a healthy pre-lock check followed by a failed post-lock check.
+        Allow the runtime state and pre-lock health checks to succeed, then
+        fail the post-lock health check.
         The tool must return manager_unavailable without calling listWorkflows.
         This complements the real crash test with a deterministic race check.
 
@@ -431,12 +442,17 @@ class MCPToolTests(unittest.IsolatedAsyncioTestCase):
             None when awaited: Checks report failures through unittest assertions.
         """
         from amscjobmanager.manager import JobManager
-        from amscjobmanager.server.app import createServer
+        from amscjobmanager.server.runner import ManagerHTTPServer
 
         manager = JobManager(max_workflows_active=0)
-        self.addCleanup(manager.stop, wait_until_done=False, close_database=True)
-        async with Client(createServer(manager), cache=None) as client:
-            with patch.object(manager, 'isAlive', side_effect=[True, False]), \
+        server = ManagerHTTPServer(lambda: manager, port=0, log_path=Path(tempfile.gettempdir()) / 'amsc-mcp-test.log')
+        runtime = server.runtime
+        self.enterContext(patch.object(manager_logging, 'api_query_user_func', runtime.queries.ask))
+        self.addCleanup(runtime.stop)
+        runtime.start()
+        await asyncio.to_thread(runtime._startup_worker.future.result, 3)
+        async with Client(server.mcp_server, cache=None) as client:
+            with patch.object(manager, 'isAlive', side_effect=[True, True, False]), \
                  patch.object(manager.job_data, 'listWorkflows') as listing:
                 response = await call_mcp(client, 'list_workflows', {})
                 self.assertEqual(response.structured_content['error']['code'], 'manager_unavailable')
@@ -459,39 +475,40 @@ class MCPToolTests(unittest.IsolatedAsyncioTestCase):
         Returns:
             None when awaited: Checks report failures through unittest assertions.
         """
-        from amscjobmanager import logging as manager_logging
+        from amscjobmanager.server.runner import ManagerHTTPServer
 
         script = Path(__file__).resolve().parents[1] / 'utilities' / 'manager_server.py'
         main = runpy.run_path(str(script))['main']
-        previous_hooks = (manager_logging.wfman_log_func, manager_logging.api_log_func)
+        previous_hooks = (manager_logging.wfman_log_func, manager_logging.api_log_func, manager_logging.api_query_user_func)
         for fail in (False, True):
             with self.subTest(listener_fails=fail), tempfile.TemporaryDirectory() as directory:
                 log_path = Path(directory) / 'manager.log'
                 log_path.write_text('existing log\n')
                 output = io.StringIO()
 
-                def listener():
+                def listener(server):
                     """Simulate a listener run for log-routing assertions.
 
-                    No arguments; use the enclosing fail (bool) subtest flag.
+                    server (ManagerHTTPServer) owns the runtime; use the enclosing
+                    fail (bool) subtest flag.
                     Return None normally; raise RuntimeError when the enclosing
                     fail (bool) selects the listener-failure subtest. Emit a
                     manager log and an independent stdout message in both cases,
                     and mark the mocked listener started only on success.
                     """
+                    runtime = server.runtime
+                    runtime.start()
+                    runtime._startup_worker.future.result(timeout=2)
                     manager_logging.wfmanLog('listener manager message')
                     print('ordinary stdout')
                     if fail:
                         raise RuntimeError('listener failure')
-                    create.return_value.started = True
+                    server.started = True
 
                 with patch('amscjobmanager.manager_config.readManagerConfigFile'), \
                      patch('amscjobmanager.manager_config.setupManager', side_effect=lambda config: manager_logging.wfapiLog('setup API message')), \
                      patch('amscjobmanager.manager.JobManager') as manager, \
-                     patch('amscjobmanager.server.runner.ManagerHTTPServer') as create, redirect_stdout(output):
-                    create.return_value.started = False
-                    create.return_value.endpoint = 'http://127.0.0.1:8765/mcp'
-                    create.return_value.run.side_effect = listener
+                     patch.object(ManagerHTTPServer, 'run', listener), redirect_stdout(output):
                     arguments = ['unused.json', '--database', str(Path(directory) / 'jobs.sqlite'), '--log-file', str(log_path)]
                     if fail:
                         with self.assertRaisesRegex(RuntimeError, 'listener failure'):
@@ -506,7 +523,7 @@ class MCPToolTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn('Stopped AmSC Job Manager MCP server', log)
                 self.assertNotIn('ordinary stdout', log)
                 self.assertEqual(output.getvalue(), 'ordinary stdout\n')
-                self.assertEqual((manager_logging.wfman_log_func, manager_logging.api_log_func), previous_hooks)
+                self.assertEqual((manager_logging.wfman_log_func, manager_logging.api_log_func, manager_logging.api_query_user_func), previous_hooks)
 
     async def test_listing_statuses_errors_and_public_fields(self):
         """Exercise tool discovery, listing, filters, and validation through real MCP.
@@ -529,14 +546,19 @@ class MCPToolTests(unittest.IsolatedAsyncioTestCase):
         """
         from amscjobmanager.compute_actions import ExecuteJobComputeAction
         from amscjobmanager.manager import JobManager
-        from amscjobmanager.server.app import createServer
+        from amscjobmanager.server.runner import ManagerHTTPServer
 
         manager = JobManager(max_workflows_active=0)
-        self.addCleanup(manager.stop, wait_until_done=False, close_database=True)
-        manager.start()
-        async with Client(createServer(manager), cache=None) as client:
+        server = ManagerHTTPServer(lambda: manager, port=0, log_path=Path(tempfile.gettempdir()) / 'amsc-mcp-test.log')
+        runtime = server.runtime
+        self.enterContext(patch.object(manager_logging, 'api_query_user_func', runtime.queries.ask))
+        self.addCleanup(runtime.stop)
+        runtime.start()
+        await asyncio.to_thread(runtime._startup_worker.future.result, 3)
+        async with Client(server.mcp_server, cache=None) as client:
             tools = await call_mcp(client)
-            self.assertEqual([tool.name for tool in tools.tools], ['list_workflows'])
+            self.assertEqual({tool.name for tool in tools.tools},
+                             {'list_workflows', 'list_user_queries', 'respond_to_user_query'})
             result = await call_mcp(client, 'list_workflows', {})
             self.assertEqual(result.structured_content, {'result': []})
             action = ExecuteJobComputeAction(
@@ -883,11 +905,12 @@ class MCPSubprocessTests(unittest.TestCase):
                     self.assertEqual(result['results'][0]['error']['code'], 'workflow_not_found')
 
                 # Tool discovery must use the same endpoint and expose only
-                # the one read-only tool implemented by this prototype.
+                # workflow inspection and user interaction tools.
                 completed = run_client(base + ['--list-tools'], capture_output=True, text=True, timeout=15)
                 self.assertEqual(completed.returncode, 0, completed.stderr)
                 tools = json.loads(completed.stdout)['results'][0]['result']
-                self.assertEqual([tool['name'] for tool in tools], ['list_workflows'])
+                self.assertEqual({tool['name'] for tool in tools},
+                                 {'list_workflows', 'list_user_queries', 'respond_to_user_query'})
 
                 # stdin accepts the same request format as an inline string
                 # or file. Broken JSON must instead return a JSON error envelope.

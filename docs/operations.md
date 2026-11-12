@@ -294,6 +294,15 @@ Workers are daemon threads, so a noninterruptible API call cannot prevent proces
 exit. Closing storage fences late database updates; restart recovery uses the
 persisted intent and stable remote name.
 
-There is no server message handling yet. A future query service will keep
-questions in memory and reject old replies using a server-session identifier
-and per-session query number. Restarted operations can issue fresh questions.
+The optional MCP server routes questions through an in-memory `UserQueryQueue`.
+`list_user_queries` exposes pending prompts; `respond_to_user_query` delivers one
+answer using the server-session UUID and query number. The waiting worker then
+continues its original API/authentication call. Answers are not workflow records,
+are not logged by the queue, and do not persist across restart. Restarted workers
+ask fresh questions; old-session replies are rejected. See [server interactions](server.md#answer-user-questions).
+
+The server utility selects queue routing by setting `api_query_user_func` to the
+queue's `ask` function. It restores the previous hook on shutdown. Outside server
+mode, direct Python calls use the default terminal hook.
+The listener starts before asynchronous configuration/manager construction, so
+bootstrap authentication questions can be answered through MCP too.

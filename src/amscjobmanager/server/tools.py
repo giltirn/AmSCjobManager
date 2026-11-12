@@ -1,14 +1,15 @@
-"""Read-only MCP tools attached to an existing JobManager."""
+"""MCP workflow inspection and user-interaction tools and response models."""
 
 import json
 from typing import Annotated, Literal
 
 from mcp.server import MCPServer
 from mcp.types import CallToolResult, TextContent, ToolAnnotations
-from pydantic import BaseModel, Field, StrictBool
+from pydantic import BaseModel, Field, StrictBool, StrictStr
 
-from ..manager import JobManager
 from ..action_manager import ActionStatus
+from .queries import QueryResponseError
+from .runtime import ServerRuntime
 
 
 class WorkflowSummary(BaseModel):
@@ -47,29 +48,37 @@ class WorkflowSummary(BaseModel):
     last_status_change: int | None = Field(description='Recorded Unix timestamp in whole seconds; not necessarily the last API poll time.')
 
 
-def createServer(manager: JobManager) -> MCPServer:
-    """Return an MCP server exposing read-only tools for manager.
+class UserQuerySummary(BaseModel):
+    """Pending server question; responses are deliberately excluded.
 
-    Args:
-        manager (JobManager): Existing manager whose public API supplies tool
-            results. Its background thread must be started for workflow calls.
-
-    Returns:
-        MCPServer: Configured SDK server with the list_workflows tool. This
-            creates neither a listener nor a separate manager/database.
-
-    The caller owns manager startup/shutdown and the HTTP listener. SDK worker
-    threads execute synchronous tools under the manager lock. No database
-    connection is opened by this interface and no workflow is submitted.
-    The manager must be started before workflow tools are called; stopped or
-    failed managers return manager_unavailable while the listener stays usable.
+    session_id (str) is the server-session UUID, query_id (int) is positive and
+    session-local, title/prompt (str) are instructions, and created_at (float)
+    is the Unix creation time in seconds. IDs are not workflow IDs/list indices.
     """
-    # The SDK passes this level to Uvicorn, whose INFO access logger writes
-    # to stdout. Suppress routine framework/access chatter so a background
-    # server sharing the client's terminal cannot pollute JSON output.
-    server = MCPServer("AmSC Job Manager", log_level="WARNING")
 
-    @server.tool(annotations=ToolAnnotations(read_only_hint=True, destructive_hint=False))
+    session_id: str = Field(description='Server-session UUID required when replying; changes on restart.')
+    query_id: int = Field(description='Positive query number within this server session; not a workflow ID or list index.')
+    title: str = Field(description='Short description of the requested user interaction.')
+    prompt: str = Field(description='Question or authentication URL/instructions for the user.')
+    created_at: float = Field(description='Question creation time as Unix seconds.')
+
+
+class QueryResponseReceipt(BaseModel):
+    """Delivery acknowledgment: accepted=True means queued, not authenticated."""
+
+    accepted: Literal[True] = Field(description='Response delivered once. Authentication/API execution continues separately and may ask another question.')
+
+
+def registerTools(mcp_server: MCPServer, runtime: ServerRuntime) -> None:
+    """Register workflow inspection and user-interaction tools on an MCP server.
+
+    mcp_server (MCPServer) receives the tool handlers and response schemas;
+    runtime (ServerRuntime) supplies manager readiness, workflow state and its
+    query queue. Return None. Registration starts no workers or listeners.
+    Workflow tools require a live manager; query tools remain available during
+    initialization or failure without acquiring the manager/database lock.
+    """
+    @mcp_server.tool(annotations=ToolAnnotations(read_only_hint=True, destructive_hint=False))
     def list_workflows(
         workflow_id: Annotated[int, Field(gt=0, strict=True, description='Select a positive workflow database ID, not a list index. Omit to list all workflows.')] | None = None,
         refresh: Annotated[StrictBool, Field(description='Wake supervisors to poll active workflow heads before filtering. Returns recorded state without waiting; no steps are submitted or advanced.')] = False,
@@ -116,12 +125,14 @@ def createServer(manager: JobManager) -> MCPServer:
         """
         # Check before waiting for the lock, then again after acquiring it:
         # the background thread may have failed while this request waited.
-        error = {"code": "manager_unavailable", "message": "The workflow manager is not running; check the server log"}
+        error = {"code": "manager_unavailable",
+                 "message": f'The workflow manager is {runtime.state}; check pending user queries and the server log'}
         summaries = []
         selected_statuses = None if statuses is None else [ActionStatus[status] for status in statuses]
-        if manager.isAlive():
-            with manager as jobs:
-                if manager.isAlive():
+        current_manager = runtime.manager
+        if current_manager is not None and current_manager.isAlive():
+            with current_manager as jobs:
+                if current_manager.isAlive():
                     error = None
                     try:
                         states = jobs.listWorkflows(workflow_id, selected_statuses)
@@ -158,4 +169,44 @@ def createServer(manager: JobManager) -> MCPServer:
             content=[TextContent(type="text", text=json.dumps(records))],
         )
 
-    return server
+    @mcp_server.tool(annotations=ToolAnnotations(read_only_hint=True, destructive_hint=False))
+    def list_user_queries() -> Annotated[CallToolResult, list[UserQuerySummary]]:
+        """List unanswered user questions, including during manager initialization.
+
+        Take no arguments. Return CallToolResult with is_error=False and
+        {'result': list[dict]}, ordered by query_id. Fields are documented
+        by UserQuerySummary. An empty list means no pending questions.
+        Listing does not consume requests or expose previous responses.
+        Questions may be shared authentication needs rather than belong to
+        a single workflow. No manager or database lock is acquired.
+        """
+        records = [UserQuerySummary(**item).model_dump(mode='json') for item in runtime.queries.listPending()]
+        return CallToolResult(structured_content={'result': records},
+                              content=[TextContent(type='text', text=json.dumps(records))])
+
+    @mcp_server.tool(annotations=ToolAnnotations(read_only_hint=False, destructive_hint=False))
+    def respond_to_user_query(
+        session_id: Annotated[StrictStr, Field(description='Server-session UUID from list_user_queries.')],
+        query_id: Annotated[int, Field(gt=0, strict=True, description='Positive pending query number from list_user_queries; not a workflow ID.')],
+        response: Annotated[StrictStr, Field(description='Response text. Delivery does not confirm successful authentication. Use JSON file/stdin input to avoid putting codes in command arguments.')],
+    ) -> Annotated[CallToolResult, QueryResponseReceipt]:
+        """Deliver one response and allow the waiting worker to continue.
+
+        session_id (UUID str) and query_id (positive int) identify a pending
+        question; response (str) is the answer, including an empty string.
+        Return CallToolResult with {'accepted': True} on delivery.
+        This confirms delivery only; rejected authorization may produce a
+        new question. API calls execute on the asking worker, not this tool.
+        Stale, closed, answered or interrupted requests return is_error=True
+        with {'error': {'code': str, 'message': str}}. No answer is echoed,
+        logged or persisted, and no sandbox privileges are granted.
+        """
+        try:
+            runtime.queries.respond(session_id, query_id, response)
+        except QueryResponseError as exc:
+            return CallToolResult(is_error=True,
+                                  structured_content={'error': {'code': exc.code, 'message': str(exc)}},
+                                  content=[TextContent(type='text', text=str(exc))])
+        receipt = QueryResponseReceipt(accepted=True).model_dump(mode='json')
+        return CallToolResult(structured_content=receipt,
+                              content=[TextContent(type='text', text=json.dumps(receipt))])

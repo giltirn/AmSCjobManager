@@ -226,6 +226,31 @@ leave transaction, retry, and workflow decisions to the manager. The simulator
 and test-only factory hooks let tests replace remote behavior without changing
 the production persistence path.
 
+## Server user interactions
+
+`server.queries.UserQueryQueue` owns session-local pending questions, response
+validation and condition waits; it uses no database or MCP dependency.
+`server.runtime.ServerRuntime` owns the queue and asynchronous configuration/
+manager startup. `server.runner.ManagerHTTPServer` constructs this runtime from
+a manager factory. `server.tools.registerTools` registers the query and workflow
+handlers on its MCP server; response models live alongside those handlers. Its
+`mcp_server` supports in-process SDK tests. Query tools use only the queue lock,
+never the manager or SQLite lock. Runtime failure does not take down the listener.
+
+`wfapiUserQuery` always calls the documented `api_query_user_func` hook. The
+server utility installs `runtime.queries.ask` before startup and restores the
+previous hook after shutdown; the default hook prompts in the terminal.
+`workers.prepareThreadWorkerContext` clears inherited Worker identity while retaining the
+root worker's shutdown signal. Descendant workers therefore reject late calls
+after server shutdown, even after the terminal hook has been restored. Normal
+action interrupts do not propagate to shared authentication workers.
+
+Run `test_server_queries.py` for queue races, interruption, shared OAuth routing,
+startup and shutdown tests. Run `test_mcp_queries.py` with the server extra for SDK
+and real HTTP/CLI tests, including killing a queried server and recovering its
+SQLite workflow with a fresh session. These use fake credentials/provider calls;
+no live site is required. Query replies are omitted from diagnostic output.
+
 ## Crash hooks
 
 `JobData(..., _test_crash_at=POINT)` passes a test-only crash point to its action

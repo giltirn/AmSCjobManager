@@ -1,4 +1,4 @@
-"""Run a read-only MCP listener backed by a persistent JobManager."""
+"""Run MCP workflow inspection and user-query routing for a persistent JobManager."""
 
 import argparse
 from functools import partial
@@ -20,12 +20,13 @@ def main(argv=None) -> int:
 
     Returns:
         int: 0 after normal listener shutdown, including Ctrl-C. Invalid CLI arguments raise
-            argparse's SystemExit; configuration, file, or startup failures
-            propagate rather than being returned as an exit-code integer.
+            argparse's SystemExit. Listener/file failures propagate. Manager
+            initialization failures are logged and keep the listener available
+            with manager_unavailable responses and query tools.
 
-    The server owns its manager and closes the database when the listener
-    exits; shutdown does not cancel remote jobs. Restore the original logging
-    hooks before closing the log file. Only one server should own this database.
+    The runtime initializes its manager after listener startup and closes its
+    database when the listener exits; shutdown does not cancel remote jobs.
+    Restore the original logging and query hooks before closing the log file. Only one server should own this database.
     Readiness and termination notices are also written to stdout for the admin;
     routine request logging stays in the configured log destinations.
     """
@@ -48,9 +49,11 @@ def main(argv=None) -> int:
     from amscjobmanager import logging as manager_logging
 
     # Install the library's logging hooks before configuration or background
-    # activity. Leave stdout and the separate user-query hook untouched.
+    # activity. Query routing is selected explicitly below for server mode;
+    # stdout remains available for administrator lifecycle notices.
     with log_path.open('a', buffering=1) as log:
-        previous_hooks = (manager_logging.wfman_log_func, manager_logging.api_log_func)
+        previous_hooks = (manager_logging.wfman_log_func, manager_logging.api_log_func,
+                          manager_logging.api_query_user_func)
         manager_logging.wfman_log_func = partial(print, file=log, flush=True)
         manager_logging.api_log_func = partial(print, file=log, flush=True)
         try:
@@ -59,21 +62,30 @@ def main(argv=None) -> int:
             from amscjobmanager.manager import JobManager
             from amscjobmanager.server.runner import ManagerHTTPServer
 
-            setupManager(readManagerConfigFile(args.config))
-            manager = JobManager(args.database, poll_freq=args.poll_interval)
+            def initialize_manager() -> JobManager:
+                """Configure the API and construct a manager on the startup worker.
+
+                Take no arguments; use the parsed config/database/poll settings.
+                Return JobManager. Configuration and constructor recovery can
+                ask questions while the already-running listener serves replies.
+                """
+                setupManager(readManagerConfigFile(args.config))
+                return JobManager(args.database, poll_freq=args.poll_interval)
+
+            server = ManagerHTTPServer(initialize_manager, port=args.port, log_path=log_path)
+            manager_logging.api_query_user_func = server.runtime.queries.ask
             try:
-                manager.start()
-                server = ManagerHTTPServer(manager, port=args.port, log_path=log_path)
                 server.run()
             except KeyboardInterrupt:
                 # Uvicorn/asyncio may re-raise Ctrl-C after graceful HTTP
                 # shutdown. It is an admin stop request, not a server failure.
                 pass
             finally:
-                manager.stop(wait_until_done=False, close_database=True)
+                server.runtime.stop()
                 manager_logging.wfmanLog('Stopped AmSC Job Manager MCP server')
         finally:
-            manager_logging.wfman_log_func, manager_logging.api_log_func = previous_hooks
+            (manager_logging.wfman_log_func, manager_logging.api_log_func,
+             manager_logging.api_query_user_func) = previous_hooks
     return 0
 
 

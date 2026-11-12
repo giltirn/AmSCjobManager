@@ -681,17 +681,18 @@ class ActionWorkerTests(unittest.TestCase):
         jobs = JobData(self.root / 'cancel-before-entry.sqlite', poll_freq=.01)
         action = ExecuteJobComputeAction('local', '', '', '60', '/bin/true', [], str(self.root), 1, 1, 0)
 
-        def gated_thread(*, target, name, daemon):
+        def gated_thread(*, target, args=(), name, daemon):
             """Return a real Thread that delays target (callable) until released.
 
-            name (str) and daemon (bool) retain the production thread settings.
+            args (tuple) is forwarded to target. name (str) and daemon (bool)
+            retain the production thread settings.
             """
             def enter():
                 """Wait at the startup gate, then invoke the captured worker target."""
                 ready.set()
                 if not release.wait(2):
                     raise TimeoutError('Test did not release the worker')
-                target()
+                target(*args)
             return Thread(target=enter, name=name, daemon=daemon)
 
         try:

@@ -2,6 +2,7 @@ from .job_data import JobData
 import threading
 from .action_manager import ActionStatus
 from .logging import wfmanLog
+from .workers import prepareThreadWorkerContext
 import time
             
 class JobManager:
@@ -48,7 +49,7 @@ class JobManager:
                 if self._thread.is_alive():
                     return
                 raise RuntimeError('JobManager cannot be restarted; create a new JobManager for recovery')
-            self._thread = threading.Thread(target=self._run)
+            self._thread = threading.Thread(target=prepareThreadWorkerContext().run, args=(self._run,))
             try:
                 self._thread.start()
             except BaseException:

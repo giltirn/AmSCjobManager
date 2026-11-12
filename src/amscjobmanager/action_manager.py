@@ -172,7 +172,8 @@ class ActionManager(ABC):
                         return
                     self._action_workers.pop(action_id, None)
                     self.workers.discard(action_id)
-                    if on_completion is not None and not worker.stop.is_set():
+                    if (on_completion is not None and not worker.stop.is_set() and
+                            (worker.ancestor_stop is None or not worker.ancestor_stop.is_set())):
                         try:
                             on_completion()
                         except DatabaseClosed:

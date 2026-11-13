@@ -242,6 +242,14 @@ action states and advances workflow stages.
 Nested calls can wait for shared authentication without occupying the workflow
 manager. Independent implementations initialize under separate client locks.
 
+Authentication workers do not inherit their callers' shutdown state. Canceling
+an action or stopping a JobManager stops its caller's wait, while shared
+authentication can continue. There is no waiter counting; unused questions may
+remain pending until answered or the server shuts down. Server shutdown closes
+the query queue and explicitly stops outstanding authentication workers. Late
+answers/provider responses are ignored at interruption checks, and later calls
+can start fresh authentication. Each component retains its own worker registry.
+
 Action workers write their own records through the same `LockedConnection`
 context manager as `JobData`. It holds a reentrant lock and yields the persistent,
 ordinary SQLite connection for each `with self.conn as conn:` block. All SQL

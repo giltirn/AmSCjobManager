@@ -213,43 +213,111 @@ class ServerQueryTests(unittest.TestCase):
         self.assertEqual(second.future.result(timeout=2), 'shared-answer')
         self.assertEqual(calls, ['authentication'])
 
-    def test_late_background_question_is_interrupted_after_server_shutdown(self):
-        """Reject a late authentication-style question after its server stops.
+    def test_first_callers_shutdown_leaves_shared_authentication_running(self):
+        """Keep authentication independent of the first caller's registry lifetime.
 
-        A separate worker waits in a simulated API call during shutdown. Once
-        released, its inherited shutdown signal must prevent terminal input
-        even though the server utility has restored the default query hook.
+        Stop the first caller's registry while a second registry still waits on
+        the same authentication context. The original question must remain valid
+        and its answer must reach the surviving caller without another login.
+        """
+        queue = UserQueryQueue()
+        first_callers, second_callers = Workers(), Workers()
+        authentication = Workers(blocking=True)
+        for registry in (first_callers, second_callers, authentication):
+            self.addCleanup(registry.stop)
+        self.addCleanup(queue.close)
+
+        def authenticate():
+            """Ask once for the shared authentication context and return its answer."""
+            return queue.ask('authentication', 'Code?')
+
+        def caller():
+            """Wait for shared authentication and return its response string."""
+            return authentication.run('credentials', authenticate)[1]
+
+        first = first_callers.start('caller', caller)
+        question = self._waitPending(queue)[0]
+        second = second_callers.start('caller', caller)
+        first_callers.stop()
+        with self.assertRaises(WorkerInterrupted):
+            first.future.result(timeout=2)
+        self.assertEqual(self._waitPending(queue)[0], question)
+        queue.respond(question['session_id'], question['query_id'], 'accepted')
+        self.assertEqual(second.future.result(timeout=2), 'accepted')
+
+    def test_server_shutdown_discards_late_authentication_and_next_session_reasks(self):
+        """Ignore a late OAuth response and start fresh authentication after shutdown.
+
+        Answer a real queued login, then block its mocked provider exchange.
+        Shutdown must stop authentication without waiting for that exchange.
+        Release the old response after restoring terminal input: no credentials
+        may be saved or client constructed. A new server using the same token
+        path must ask again and persist only its newly accepted credentials.
         """
         entered, release = Event(), Event()
-        background = Workers()
-        self.addCleanup(background.stop)
-        handles = []
+        self.addCleanup(release.set)
+        self.addCleanup(auth.stopAuthenticationWorkers)
+        token_path = self.root / 'late-token.json'
+        granted = {'access_token': 'fake-token', 'scope': 'test-scope'}
+        client = Mock()
+        client.oauth2_get_authorize_url.return_value = 'https://example.invalid/authorize'
 
-        def authenticate_later():
-            """Delay an authentication question until shutdown; return a response if possible."""
-            entered.set()
-            if not release.wait(2):
-                raise TimeoutError('Test did not release background work')
-            return manager_logging.wfapiUserQuery('late authentication', 'Code')
+        def exchange(code):
+            """Delay the old code's provider reply; return fake OAuth tokens for either code."""
+            if code == 'old-code':
+                entered.set()
+                if not release.wait(3):
+                    raise TimeoutError('Old exchange was not released')
+            return SimpleNamespace(by_resource_server={'test-resource': granted})
+
+        client.oauth2_exchange_code_for_tokens.side_effect = exchange
 
         def initialize():
-            """Launch detached authentication-style work and return a memory-only manager."""
-            handles.append(background.start('authentication', authenticate_later))
+            """Authenticate normally and return a new memory-only workflow manager."""
+            auth.setupIRIapiCompute('query-test', str(token_path))
             return JobManager(max_workflows_active=0)
 
         runtime = ServerRuntime(initialize)
         self.addCleanup(runtime.stop)
-        with patch('builtins.input', side_effect=AssertionError('Late terminal prompt')):
+        with patch.dict(auth.IRI_IMPLEMENTATIONS, {'query-test': {'resource_server': 'test-resource',
+                        'required_scopes': ['test-scope'], 'session_policy': 'test-policy'}}), \
+             patch.object(auth.globus_sdk, 'NativeAppAuthClient', return_value=client), \
+             patch.object(auth, 'IRIComputeClient', return_value='authenticated') as build, \
+             patch('builtins.input', side_effect=AssertionError('Late terminal prompt')):
             try:
                 with patch.object(manager_logging, 'api_query_user_func', runtime.queries.ask):
                     runtime.start()
+                    question = self._waitPending(runtime.queries)[0]
+                    runtime.queries.respond(question['session_id'], question['query_id'], 'old-code')
                     self.assertTrue(entered.wait(1))
-                    runtime._startup_worker.future.result(timeout=2)
+                    context = ('compute', 'query-test', str(token_path.resolve()), 'globus')
+                    with auth._authentication_workers._lock:
+                        old_worker = auth._authentication_workers._tasks[context]
                     runtime.stop()
+                    runtime._startup_worker.future.result(timeout=2)
             finally:
                 release.set()
             with self.assertRaises(WorkerInterrupted):
-                handles[0].future.result(timeout=2)
+                old_worker.future.result(timeout=2)
+            self.assertFalse(token_path.exists())
+            build.assert_not_called()
+            with self.assertRaises(QueryResponseError):
+                runtime.queries.respond(question['session_id'], question['query_id'], 'stale')
+
+            fresh = ServerRuntime(initialize)
+            self.addCleanup(fresh.stop)
+            with patch.object(manager_logging, 'api_query_user_func', fresh.queries.ask):
+                fresh.start()
+                new_question = self._waitPending(fresh.queries)[0]
+                self.assertNotEqual(new_question['session_id'], question['session_id'])
+                # Repeated cleanup of the old server must not stop the new flow.
+                runtime.stop()
+                fresh.queries.respond(new_question['session_id'], new_question['query_id'], 'new-code')
+                fresh._startup_worker.future.result(timeout=2)
+                self.assertEqual(fresh.state, 'running')
+                self.assertEqual(json.loads(token_path.read_text()), granted)
+                build.assert_called_once()
+                fresh.stop()
 
     def test_configured_query_hook_receives_the_prompt(self):
         """Send the prompt directly to the configured hook and return its exact answer."""

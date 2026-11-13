@@ -20,9 +20,22 @@ from .config import IRI_IMPLEMENTATIONS
 from .state import IRIComputeClient, getConfiguredImplementations, tokens
 from .state import special_globus_endpoints
 from .filesystem import getMountedFilesystems
-from ..workers import Workers, WorkerInterrupted
+from ..workers import Workers, WorkerInterrupted, checkForThreadCurrentWorkerInterruption
 
 _authentication_workers = Workers(blocking=True)
+
+
+def stopAuthenticationWorkers() -> None:
+    """Abandon outstanding IRI/Globus authentication at server/application shutdown.
+
+    Take no arguments; return None after signaling the shared authentication
+    workers without waiting for provider calls or terminal input. Late responses
+    are rejected at interruption checks. Saved credentials remain available;
+    subsequent authentication calls can create fresh workers. Stopping an
+    individual action or JobManager does not call this function.
+    """
+    _authentication_workers.stop()
+
 
 def load_globus_tokens(token_file: Path) -> dict | None:
     if "~" in str(token_file):
@@ -201,6 +214,8 @@ def _create_globus_client(implementation: str, key_path: str) -> IRIComputeClien
     if missing:
         raise RuntimeError(f"Missing required scopes: {sorted(missing)}")
 
+    # A provider reply arriving after shutdown must not save credentials.
+    checkForThreadCurrentWorkerInterruption()
     save_globus_tokens(Path(key_path), auth_data)
 
     expires_at = auth_data.get("expires_at_seconds")
@@ -368,6 +383,7 @@ def setupIRIapiGlobusTransfer(key_path, *, authorization_parameters: dict | None
 
         # Save before publishing results. The calling thread alone installs
         # cached access tokens, avoiding background mutation of client state.
+        checkForThreadCurrentWorkerInterruption()
         stored_tokens = dict(auth_data)
         stored_tokens["globus_transfer"] = globus_auth_data
         save_globus_tokens(Path(key_path), stored_tokens)

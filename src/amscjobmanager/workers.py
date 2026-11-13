@@ -3,33 +3,15 @@
 from __future__ import annotations
 
 from concurrent.futures import Future, TimeoutError
-from contextvars import Context, ContextVar, copy_context
+from contextvars import ContextVar
 from dataclasses import dataclass, field
-from threading import Event, Lock, Thread
+from threading import Event, RLock, Thread
 from typing import Callable, Hashable
 
 
 # The ContextVar holds a separate current Worker for each worker thread;
 # setting it in one thread does not change the value seen by another.
 _thread_current_worker: ContextVar[Worker | None] = ContextVar('amsc_worker', default=None)
-
-
-# Descendant threads retain the root worker's shutdown signal, even when a
-# workflow thread has no current Worker. Normal call interrupts are not inherited.
-_thread_worker_shutdown: ContextVar[Event | None] = ContextVar('amsc_worker_shutdown', default=None)
-
-
-def prepareThreadWorkerContext() -> Context:
-    """Copy caller context for a new thread without inheriting its worker handle.
-
-    Take no arguments; return contextvars.Context. Inherited shutdown and other
-    context variables are retained, but the new thread has no current Worker
-    until its own entry point sets one. Used by action/authentication workers
-    and the workflow-progression thread.
-    """
-    context = copy_context()
-    context.run(_thread_current_worker.set, None)
-    return context
 
 
 class WorkerInterrupted(RuntimeError):
@@ -51,30 +33,36 @@ def getThreadCurrentWorkerInterruptionEvent() -> Event | None:
 def checkForThreadCurrentWorkerInterruption() -> None:
     """Interrupt the current worker call if interruption or shutdown was requested.
 
-    Take no arguments; return None if execution may continue. Descendant
-    threads also honor an inherited root shutdown signal outside a worker.
-    Otherwise raise WorkerInterrupted without clearing either signal.
+    Take no arguments; return None if execution may continue, including outside
+    a worker. Otherwise raise WorkerInterrupted without clearing either signal.
     The action manager decides whether to complete action cancellation or exit
     for shutdown; this check performs no provider calls or database updates.
     """
     worker = _thread_current_worker.get()
-    shutdown = _thread_worker_shutdown.get()
-    if ((worker is not None and (worker.interrupt.is_set() or worker.stop.is_set())) or
-            (shutdown is not None and shutdown.is_set())):
+    if worker is not None and (worker.interrupt.is_set() or worker.stop.is_set()):
         raise WorkerInterrupted('Worker call interrupted')
 
 
 @dataclass
 class Worker:
-    """Runtime handle: result Future and interrupt, stop and wake Events.
+    """Hold an operation's result and cooperative interruption/shutdown signals.
 
-    ancestor_stop is the inherited root shutdown Event, or None for a root
-    worker. It stops late descendant calls when their server/manager shuts down.
-    Normal action interrupts do not propagate through it. All handles disappear
-    on process exit and are never serialized.
+    future (Future) holds the operation's result or exception.
+    interrupt (Event) asks the current call to finish running. It can be cleared
+    once handled, allowing action cancellation API calls to proceed after normal
+    execution has stopped. Setting it does not itself cancel remote work.
+    stop (Event) requests permanent shutdown of this worker, without canceling
+    remote work. It remains set even when interrupt is cleared, preventing
+    execution from continuing or handing off to action cancellation. Workers.stop()
+    sets both signals; subsequent work requires a new Worker.
+    wake (Event) ends a polling sleep early, including for an explicit poll request.
+
+    Signals apply only to this worker; callers and shared authentication have
+    independent lifetimes. They are checked cooperatively and cannot forcibly
+    terminate a thread or an in-progress API call. All handles disappear on
+    process exit and are never serialized.
     """
 
-    ancestor_stop: Event | None = None
     future: Future = field(default_factory=Future)
     interrupt: Event = field(default_factory=Event)
     stop: Event = field(default_factory=Event)
@@ -92,19 +80,20 @@ class Workers:
         """
         self.blocking = blocking
         self._tasks: dict[Hashable, Worker] = {}
-        self._lock = Lock()
+        self._lock = RLock()
 
     def start(self, context: Hashable, operation: Callable, *args, **kwargs) -> Worker:
         """Start/reuse context (Hashable) and return its in-memory Worker handle.
 
         operation (Callable) and args/kwargs are used for a new worker only.
         Does not wait for completion. Results stay available until explicitly
-        consumed or discarded, allowing one supervisor per action.
+        consumed or discarded, allowing one supervisor per action. A stopped
+        worker is replaced so a later authentication session can start fresh.
         """
         with self._lock:
             worker = self._tasks.get(context)
-            if worker is None:
-                worker = Worker(ancestor_stop=_thread_worker_shutdown.get())
+            if worker is None or worker.stop.is_set():
+                worker = Worker()
                 self._tasks[context] = worker
 
                 def execute() -> None:
@@ -116,7 +105,6 @@ class Workers:
                     if not worker.future.set_running_or_notify_cancel():
                         return
                     token = _thread_current_worker.set(worker)
-                    shutdown_token = _thread_worker_shutdown.set(worker.ancestor_stop or worker.stop)
                     try:
                         # The entry point handles interruption, including signals
                         # arriving before its thread starts, so it can clean up.
@@ -124,11 +112,10 @@ class Workers:
                     except BaseException as exc:
                         worker.future.set_exception(exc)
                     finally:
-                        _thread_worker_shutdown.reset(shutdown_token)
                         _thread_current_worker.reset(token)
 
                 try:
-                    Thread(target=prepareThreadWorkerContext().run, args=(execute,), name='amsc-worker', daemon=True).start()
+                    Thread(target=execute, name='amsc-worker', daemon=True).start()
                 except BaseException:
                     del self._tasks[context]
                     raise
@@ -141,10 +128,14 @@ class Workers:
         args/kwargs are used only when creating it. ready=False means unfinished
         and result=None; ready=True returns the operation's result, including
         None. Completed results/errors are consumed once. Blocking registries
-        wait; a interrupted parent worker can stop waiting for shared authentication
+        wait; an interrupted parent worker can stop waiting for shared authentication
         without interrupting authentication needed by another caller.
         """
-        worker = self.start(context, operation, *args, **kwargs)
+        # Serialize the caller's interruption check and registration with stop(),
+        # so server shutdown cannot miss a new authentication worker.
+        with self._lock:
+            checkForThreadCurrentWorkerInterruption()
+            worker = self.start(context, operation, *args, **kwargs)
         if not self.blocking and not worker.future.done():
             return False, None
         try:
@@ -153,7 +144,9 @@ class Workers:
             while True:
                 checkForThreadCurrentWorkerInterruption()
                 try:
-                    return True, worker.future.result(timeout=.05)
+                    result = worker.future.result(timeout=.05)
+                    checkForThreadCurrentWorkerInterruption()
+                    return True, result
                 except TimeoutError:
                     if worker.future.done():
                         raise
@@ -224,7 +217,7 @@ def clearThreadCurrentWorkerInterruptUnlessStopping() -> None:
     """Clear a handled worker interrupt while preserving any shutdown request.
 
     Take no arguments; clear the current worker's handled interrupt and return
-    None. If its own or inherited root shutdown signal is set, leave that
+    None, including outside a worker. If its stop signal is set, leave that
     signal intact and raise WorkerInterrupted so the call exits instead.
     Action managers call this only when a recorded CANCELING intent is ready
     for _completeCancellation, after normal execution has finished running or during
@@ -232,9 +225,7 @@ def clearThreadCurrentWorkerInterruptUnlessStopping() -> None:
     proceed; it neither resumes a thread/remote job nor changes database state.
     """
     worker = _thread_current_worker.get()
-    shutdown = _thread_worker_shutdown.get()
     if worker is not None:
         worker.interrupt.clear()
-    if ((worker is not None and worker.stop.is_set()) or
-            (shutdown is not None and shutdown.is_set())):
-        raise WorkerInterrupted('Worker shutdown requested')
+        if worker.stop.is_set():
+            raise WorkerInterrupted('Worker shutdown requested')

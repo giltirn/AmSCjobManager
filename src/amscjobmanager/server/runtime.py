@@ -109,15 +109,27 @@ class ServerRuntime:
 
         Take no arguments; return None. Close the queue before releasing waiting
         workers, and close manager storage. Repeated stop is safe. A slow API
-        call may finish later; inherited worker shutdown prevents new prompts,
-        and startup cannot publish a late manager. The caller restores its query
-        hook after this method returns.
+        call may finish later; authentication is explicitly stopped so late
+        replies cannot prompt after shutdown. Startup cannot publish a late
+        manager. The caller restores its query hook after this method returns.
         """
+        from ..iri_api.auth import stopAuthenticationWorkers
+
         with self._lock:
+            if self._state == 'stopped':
+                return
             self._state = 'stopped'
             manager = self._manager
             self._manager = None
             self.queries.close()
             self._workers.stop()
-        if manager is not None:
-            manager.stop(wait_until_done=False, close_database=True)
+            stop_authentication = self._startup_worker is not None
+
+        # Stop callers before authentication so no active manager/startup worker
+        # can register a new login after the authentication registry is stopped.
+        try:
+            if manager is not None:
+                manager.stop(wait_until_done=False, close_database=True)
+        finally:
+            if stop_authentication:
+                stopAuthenticationWorkers()

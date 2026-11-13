@@ -240,10 +240,14 @@ never the manager or SQLite lock. Runtime failure does not take down the listene
 `wfapiUserQuery` always calls the documented `api_query_user_func` hook. The
 server utility installs `runtime.queries.ask` before startup and restores the
 previous hook after shutdown; the default hook prompts in the terminal.
-`workers.prepareThreadWorkerContext` clears inherited Worker identity while retaining the
-root worker's shutdown signal. Descendant workers therefore reject late calls
-after server shutdown, even after the terminal hook has been restored. Normal
-action interrupts do not propagate to shared authentication workers.
+Worker threads set their own `_thread_current_worker` handle; no thread context
+or ancestor shutdown signal is inherited. Action managers retain their own
+registries, and authentication remains shared by credential context. Stopping an
+individual caller leaves authentication pending, even if nobody still needs it.
+Server shutdown explicitly calls `auth.stopAuthenticationWorkers`, alongside
+closing the query queue and stopping its startup/manager workers. Late OAuth
+responses are checked for shutdown before credentials are saved. Stopped workers
+are replaced on later calls, so a new server can ask fresh questions.
 
 Run `test_server_queries.py` for queue races, interruption, shared OAuth routing,
 startup and shutdown tests. Run `test_mcp_queries.py` with the server extra for SDK

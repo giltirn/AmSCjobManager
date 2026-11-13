@@ -87,6 +87,24 @@ The `with manager` block acquires the database lock; it does not start or stop
 the manager. Keep the application alive to monitor work and call `stop()` on
 shutdown. See [operations](operations.md) for a complete monitoring pattern.
 
+For retry-safe submission, supply an optional `submission_key` through either
+JobManager's locked context or its callable interface:
+
+```python
+job_id = manager(lambda jobs: jobs.enqueueJob(
+    workflow, job_group="example-calculations", submission_key="campaign-42/run-7",
+))
+```
+
+Keys are exact strings, unique within the workflow database and retained across
+restarts, completion, and cancellation. Repeating a key returns the original
+workflow ID without comparing or replacing its actions, group, or recorded
+progress. Reuse the key when retrying after a lost response; choose a new key
+for changed work. Leaving it as `None` always creates a new workflow.
+Use one live JobData instance per database, including the instance owned by a
+JobManager. Its connection lock serializes concurrent submissions through that
+instance; separate instances or processes are not coordinated.
+
 ## Compute parameters
 
 Both compute action types inherit these required fields:

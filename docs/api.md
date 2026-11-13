@@ -32,7 +32,7 @@ the library does not expand paths using the manager host's username.
 | `with manager as jobs:` | Locks access and yields JobData. Does not manage thread lifetime. |
 | `manager(operation)` | Calls `operation(job_data)` under lock and returns its result. |
 | `manager.stop(wait_until_done=True, *, close_database=False)` | Waits according to its arguments, permanently shuts down the instance, and joins the thread. Repeated shutdown is safe; recovery requires a new manager. |
-| `JobData.enqueueJob(workflow, job_group=None)` | Accepts one action or a nonempty list; returns the integer workflow ID. |
+| `JobData.enqueueJob(workflow, job_group=None, *, submission_key=None)` | Accepts one action or a nonempty list; returns the integer workflow ID. Reusing an optional string key returns the original ID without changing that workflow. |
 | `JobData.jobStatus(job_id)` | Returns a coarse `ActionStatus`; scheduling/intermediate completion appear as `ACTIVE`. |
 | `JobData.headActionStatus(job_id, force_poll=False, return_api_status=False)` | Returns the head `ActionStatus`, optionally paired with its provider status string; forced polling refreshes all active heads. Options are keyword-only. |
 | `JobData.jobState(job_id)` | Returns a state dictionary with enum-valued head status/class and serialized workflow. |

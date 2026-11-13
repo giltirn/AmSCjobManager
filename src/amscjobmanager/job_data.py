@@ -12,7 +12,12 @@ import json
 from typing import Tuple
 
 class JobData:
-    """The primary component of the workflow manager. It provides submission, tracking and updating of workflows backed by a database. State is updated upon calls to its functions."""
+    """Submit, track and progress workflows backed by a database.
+
+    Use one live JobData instance per database. Its connection lock serializes
+    threads sharing this instance; separate instances/processes are not
+    coordinated. Close the previous instance before reopening for recovery.
+    """
 
     def __init__(self, filename: str | None = None, max_workflows_active=10,
                  *, _test_crash_at: str | None = None,
@@ -49,11 +54,12 @@ class JobData:
             for action_class, factory in manager_factories.items()
         }
 
-        with self.conn as conn:        
+        with self.conn as conn:
             conn.execute("""
             CREATE TABLE IF NOT EXISTS jobs (
             job_id INTEGER PRIMARY KEY,
             job_group TEXT,
+            submission_key TEXT UNIQUE,
             workflow BLOB NOT NULL,
             workflow_stage INTEGER NOT NULL,
             head_action_type TEXT,
@@ -98,21 +104,46 @@ class JobData:
         if point == self._test_crash_at:
             raise SimulatedCrash(point)
        
-    def enqueueJob(self, workflow, job_group = None):
-        """Insert a job workflow into the queued workflows but do not start it"""
-        if not isinstance(workflow, list):
-            workflow = [workflow]
-        assert len(workflow) > 0
-        with self.conn as conn:        
-            cur = conn.execute("INSERT INTO jobs(job_group, workflow, workflow_stage, head_action_type, head_action_class, head_action_status, last_status_change) VALUES (?,?,?,?,?,?,?)",
-                               (job_group, _ser(workflow), -1,
-                                type(workflow[0]).__name__,
-                                actionClass(workflow[0]).name,
-                                ActionStatus.PENDING.name,
-                                int(time.time())
-                                ) )
-            job_id = cur.lastrowid
-            return job_id
+    def enqueueJob(self, workflow, job_group=None, *, submission_key: str | None = None) -> int:
+        """Queue a workflow, or return its original ID when a submission key is reused.
+
+        workflow (action object | nonempty list[action]) contains the ordered
+        workflow stages. job_group (str | None) is optional, nonunique metadata.
+        submission_key (str | None) is an optional identifier unique within this
+        database, compared exactly and retained for completed/canceled workflows.
+        None always creates a new workflow. An existing key returns its original
+        workflow without comparing or changing the supplied stages or group.
+
+        Return the positive integer database workflow ID, not a stage index.
+        A new workflow and its key are committed together, without starting it.
+        Reuse the same key after a lost response; use a new key for changed work.
+        Access through JobManager's context/callable interface while it runs.
+        """
+        if submission_key is not None and not isinstance(submission_key, str):
+            raise TypeError('submission_key must be a string or None')
+
+        with self.conn as conn:
+            # Return retries without serializing replacement payloads or touching
+            # the original record, including its terminal status and timestamps.
+            if submission_key is not None:
+                existing = conn.execute('SELECT job_id FROM jobs WHERE submission_key = ?',
+                                        (submission_key,)).fetchone()
+                if existing is not None:
+                    return existing['job_id']
+
+            if not isinstance(workflow, list):
+                workflow = [workflow]
+            assert len(workflow) > 0
+
+            # The connection lock covers both lookup and insertion, so concurrent
+            # callers sharing this JobData cannot insert the same key twice.
+            cur = conn.execute(
+                "INSERT INTO jobs(job_group, submission_key, workflow, workflow_stage, head_action_type, "
+                "head_action_class, head_action_status, last_status_change) VALUES (?,?,?,?,?,?,?,?)",
+                (job_group, submission_key, _ser(workflow), -1, type(workflow[0]).__name__,
+                 actionClass(workflow[0]).name, ActionStatus.PENDING.name, int(time.time())),
+            )
+            return cur.lastrowid
 
     def cancelJob(self, job_id: int, cancel_running: bool = True) -> None:
         """Mark a workflow canceled and optionally cancel its remote action.
@@ -254,6 +285,8 @@ class JobData:
             and are independent of workflow/action IDs. Each dictionary has:
                 job_id (int): Positive workflow database key.
                 job_group (str | None): Group supplied when enqueuing.
+                submission_key (str | None): Optional database-unique submission
+                    identifier, retained after completion/cancellation.
                 workflow (bytes): Pickled list of action objects; not JSON.
                 workflow_stage (int): Zero-based action position, -1 before
                     the first action, or the action count after full completion.

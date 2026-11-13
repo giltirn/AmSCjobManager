@@ -9,6 +9,9 @@ class JobManager:
 
     Construction recovers unfinished actions through JobData. Once stopped or
     failed, this instance cannot restart; create a new manager for recovery.
+    Submit through ``with manager as jobs: jobs.enqueueJob(...)`` or the callable
+    interface. Both accept JobData's optional submission_key for retry-safe
+    submission, with uniqueness and persistence owned by JobData.
     """
 
     def __init__(self, filename: str | None = None, poll_freq=30, max_workflows_active=10):

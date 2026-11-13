@@ -198,7 +198,10 @@ are polled. Previously `FAILED` or `CANCELED` workflows stay stopped; there is n
 public automatic retry/resume operation for those states.
 
 Keep database files private and action definitions compatible: reopening
-unpickles stored Python objects. Use one manager process per workflow database.
+unpickles stored Python objects. Use one live JobData instance per workflow
+database, whether used directly or owned by a JobManager. Locks coordinate only
+threads sharing that instance; multiple instances/processes are not supported.
+Close the previous instance before reopening the database for recovery.
 Remote names currently contain only the action ID; independent databases can
 reuse those IDs, so overlapping managers against the same remote account can
 produce ambiguous name/label discovery. Cross-service recovery is not an

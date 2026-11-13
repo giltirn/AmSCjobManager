@@ -103,7 +103,6 @@ class APIActions(ActionManager):
             action = _unser(row['details'])
             if not isinstance(action, APIAction):
                 raise TypeError('Stored action must be an APIAction')
-            action.__post_init__()
             if not 0 <= index <= len(action.operations):
                 raise ValueError(f'Invalid next_operation {index} for {len(action.operations)} operations')
             for index in range(index, len(action.operations)):

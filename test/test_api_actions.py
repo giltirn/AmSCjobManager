@@ -6,6 +6,7 @@ and inspect file effects to distinguish replay from skipped checkpoints.
 
 
 
+from pydantic import ValidationError
 from pathlib import Path
 import sqlite3
 import sys
@@ -67,7 +68,7 @@ class APIActionTests(unittest.TestCase):
             operation.execute(7)
         self.assertEqual((self.root / '7' / 'download').read_text(), 'hello <JOBID> π')
         self.assertEqual(actionClass(APIAction(operations)), ActionClass.API)
-        with self.assertRaises(TypeError):
+        with self.assertRaises(ValidationError):
             APIAction([object()])
 
     def test_directory_file_conflict_and_binary_write(self):

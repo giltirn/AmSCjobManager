@@ -48,6 +48,8 @@ def _format_schema(schema: dict, *, root: dict | None = None, label='', indent=0
         kind = ' | '.join(kind)
     constraints = [f'{key}={schema[key]}' for key in
                    ('minimum', 'maximum', 'exclusiveMinimum', 'exclusiveMaximum', 'minItems', 'maxItems') if key in schema]
+    if 'const' in schema:
+        constraints.append('value: ' + json.dumps(schema['const']))
     if 'enum' in schema:
         constraints.append('choices: ' + ', '.join(json.dumps(value) for value in schema['enum']))
     if constraints:
@@ -67,6 +69,12 @@ def _format_schema(schema: dict, *, root: dict | None = None, label='', indent=0
         lines.append(_format_schema(field, root=root, label=field_label, indent=indent + 2, seen=seen))
     if schema.get('type') == 'array':
         lines.append(_format_schema(schema.get('items', {}), root=root, label='[0..]', indent=indent + 2, seen=seen))
+    # Expand structured union variants so stage/operation type tags and their
+    # individual fields appear in generated help, including nested API stages.
+    if branches and any('$ref' in branch or 'properties' in branch for branch in branches):
+        for index, branch in enumerate(branches, start=1):
+            lines.append(_format_schema(branch, root=root, label=f'option {index}',
+                                        indent=indent + 2, seen=seen))
     return '\n'.join(lines)
 
 
@@ -129,7 +137,8 @@ def parse_tool_arguments(tool: Tool, arguments: list[str]) -> ToolRequest | str:
 
         if '-h' in arguments or '--help' in arguments:
             outputs = _format_schema(tool.output_schema) if tool.output_schema else 'No structured output schema advertised by the server.'
-            return parser.format_help() + '\nOutputs (server schema):\n' + outputs + '\n'
+            return (parser.format_help() + '\nInputs (server schema):\n' + _format_schema(schema)
+                    + '\n\nOutputs (server schema):\n' + outputs + '\n')
         parsed, unknown = parser.parse_known_args(arguments)
         if unknown:
             raise ValueError('Unrecognized tool arguments: ' + ' '.join(unknown))

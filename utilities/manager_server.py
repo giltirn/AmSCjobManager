@@ -1,4 +1,4 @@
-"""Run MCP workflow inspection and user-query routing for a persistent JobManager."""
+"""Run MCP workflow management and user-query routing for a persistent JobManager."""
 
 import argparse
 from functools import partial

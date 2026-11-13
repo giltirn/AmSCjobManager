@@ -286,3 +286,24 @@ check backend selection before imports, path namespaces, destination argument
 order, keyword-only arguments, parameter units, state transitions, and sandbox
 exceptions. Run the SPOOF reference example after changing its walkthrough.
 Describe capabilities and error handling that the code currently implements.
+
+## Native workflow schemas and MCP lifecycle tools
+
+Built-in stage/operation definitions use Pydantic dataclasses with strict field
+shapes and forbidden extra keys. Keyword-only `type` discriminator fields preserve
+positional Python constructors. `workflow.Workflow` is a nonempty tagged stage
+list, and `workflow_adapter` validates/dumps this same representation for Python
+JSON use and the MCP submission tool. APIAction has its own tagged operation
+union. WriteFile serializes bytes as a Base64 object while keeping raw bytes in
+Python and pickle storage. Custom Python actions remain supported by JobData;
+only the built-in union is accepted from JSON/MCP.
+
+`submit_workflow` and `cancel_workflow` in `server/tools.py` use the public
+JobData methods under the JobManager lock, with health checks before/after lock
+acquisition. They return a small workflow ID/status receipt without awaiting
+provider work. Cancellation always requests remote cancellation. Submission keys
+are delegated to JobData; tools do not maintain another deduplication store.
+The generic CLI discovers these tools and prints nested union schemas in help.
+Run `test_workflow_schema.py` and `test_mcp_workflows.py` for native JSON/pickle,
+malformed inputs, local execution, simulated Globus work, HTTP/CLI lifecycle and
+submission-key recovery tests.

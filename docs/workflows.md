@@ -207,3 +207,14 @@ Run this in a fresh process: backend selection and the local status database
 are initialized once. Local resource parameters do not impose limits on the
 process. Persistent use requires directories and database files that outlive
 the temporary directory in this demonstration.
+
+## JSON workflow representations
+
+Built-in actions and API operations are Pydantic dataclasses. Their positional
+Python constructors remain available, and `amscjobmanager.workflow.workflow_adapter`
+exports/imports complete nonempty workflow lists with `dump_json`/`validate_json`.
+Each stage and API operation has a `type` discriminator. Binary `WriteFile`
+contents round-trip as a tagged Base64 object; Python constructors still accept
+raw bytes. See [server workflow submission](server.md#submit-and-cancel-workflows)
+for the shared JSON schema and client examples. Custom derived Python actions
+continue to use the Python API; they are not part of the MCP stage allowlist.

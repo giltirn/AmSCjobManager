@@ -1,4 +1,6 @@
-from dataclasses import dataclass
+from dataclasses import field
+from pydantic import ConfigDict, StrictStr
+from pydantic.dataclasses import dataclass
 from typing import Literal
 from .actions_base import replaceJobIdSubstring, TransferActionBase
 from .api_general import (
@@ -9,21 +11,24 @@ from .action_manager import ActionStatus
 from .async_action_manager import AsyncActionManager
 import sqlite3
 
-@dataclass
+@dataclass(config=ConfigDict(extra="forbid"))
 class GlobusTransfer(TransferActionBase):
     """Transfer between collections, using Globus-visible paths by default.
 
     source_path is a file or directory in the source collection; dest_path is
     a directory in the destination collection. Set either path type to
     "filesystem" to translate a configured machine path to a Globus path.
+    Endpoint strings identify configured tags or UUIDs. Both path types default
+    to 'globus'; paths support <JOBID>. type is always 'globus_transfer'.
     """
     #The <JOBID> substring will be replaced by the job index if present in the path strings
-    dest_endpoint: str
-    dest_path: str
-    source_endpoint: str 
-    source_path: str
+    dest_endpoint: StrictStr
+    dest_path: StrictStr
+    source_endpoint: StrictStr
+    source_path: StrictStr
     source_path_type: Literal["filesystem", "globus"] = "globus"
     dest_path_type: Literal["filesystem", "globus"] = "globus"
+    type: Literal["globus_transfer"] = field(default="globus_transfer", kw_only=True)
 
     def initiateAction(self, job_id, name: str | None = None)-> str:
         source_path = replaceJobIdSubstring(self.source_path, job_id)

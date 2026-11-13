@@ -417,7 +417,7 @@ class MCPToolTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(response.is_error)
             self.assertEqual(response.structured_content['error']['code'], 'manager_unavailable')
             self.assertEqual({tool.name for tool in (await call_mcp(client)).tools},
-                             {'list_workflows', 'list_user_queries', 'respond_to_user_query'})
+                             {'list_workflows', 'list_user_queries', 'respond_to_user_query', 'submit_workflow', 'cancel_workflow'})
             with self.assertRaisesRegex(RuntimeError, 'cannot be restarted'):
                 manager.start()
             response = await asyncio.wait_for(call_mcp(client, 'list_workflows', {}), timeout=3)
@@ -558,7 +558,7 @@ class MCPToolTests(unittest.IsolatedAsyncioTestCase):
         async with Client(server.mcp_server, cache=None) as client:
             tools = await call_mcp(client)
             self.assertEqual({tool.name for tool in tools.tools},
-                             {'list_workflows', 'list_user_queries', 'respond_to_user_query'})
+                             {'list_workflows', 'list_user_queries', 'respond_to_user_query', 'submit_workflow', 'cancel_workflow'})
             result = await call_mcp(client, 'list_workflows', {})
             self.assertEqual(result.structured_content, {'result': []})
             action = ExecuteJobComputeAction(
@@ -910,7 +910,7 @@ class MCPSubprocessTests(unittest.TestCase):
                 self.assertEqual(completed.returncode, 0, completed.stderr)
                 tools = json.loads(completed.stdout)['results'][0]['result']
                 self.assertEqual({tool['name'] for tool in tools},
-                                 {'list_workflows', 'list_user_queries', 'respond_to_user_query'})
+                                 {'list_workflows', 'list_user_queries', 'respond_to_user_query', 'submit_workflow', 'cancel_workflow'})
 
                 # stdin accepts the same request format as an inline string
                 # or file. Broken JSON must instead return a JSON error envelope.

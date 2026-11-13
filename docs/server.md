@@ -1,11 +1,12 @@
 # MCP server prototype
 
-The optional server exposes workflow listing and status through MCP Streamable
-HTTP. The command-line client supports traditional commands and JSON requests,
+The optional server exposes workflow submission, cancellation, listing and
+status through MCP Streamable HTTP. The command-line client supports traditional commands and JSON requests,
 calling the same tools as an MCP agent. Pending user questions, including
 configuration and authentication requests, can be listed and answered through
-the same listener. Workflow submission, cancellation and privileged operations
-are not yet exposed as MCP commands.
+the same listener. Workflows can combine both compute action forms, Globus
+transfers and API-operation stages. Privileged sandbox changes and unsafe
+API overrides remain unavailable.
 
 ## Start the server
 
@@ -24,8 +25,8 @@ authentication questions can be answered even before a manager exists. Once read
 the manager recovers/progresses workflows in its database. Pending questions keep
 the asking worker waiting while unrelated workflows continue. Run only one
 manager/server against that database. Stopping closes the queue and manager
-without canceling accepted remote jobs. Workflow tools remain read-only; replying
-delivers text to a waiting operation.
+without canceling accepted remote jobs. Use `cancel_workflow` to request remote
+cancellation explicitly; replying to a question delivers text to its waiting operation.
 
 Successful HTTP startup prints an administrator notice to stdout:
 
@@ -71,9 +72,8 @@ and termination announcements.
 Embedding callers install `logging.api_query_user_func = server.runtime.queries.ask`
 before running and restore the previous hook after shutdown, as the utility does.
 In-process SDK tests connect to `server.mcp_server` and explicitly start/stop
-`server.runtime` without opening an HTTP listener. The integration test submits
-its local workflow through Python before querying it over MCP; the prototype
-has no MCP submission tool.
+`server.runtime` without opening an HTTP listener. Tests cover existing Python
+submissions as well as complete MCP/CLI submission and cancellation pathways.
 
 Workflow tools require a running manager. If its background thread fails, the
 manager logs the underlying exception through `wfmanLog` and releases its lock.
@@ -84,6 +84,108 @@ checked before acquiring the lock and again after acquiring it, to cover a
 failure while the request was waiting. Tool discovery remains available.
 The server does not automatically restart a failed manager. Manager instances
 are single-use; recovery requires a new manager/server using the same database.
+
+## Submit and cancel workflows
+
+`submit_workflow(stages, job_group=None, submission_key=None)` persists an ordered,
+nonempty list of built-in actions. It returns `workflow_id` (the positive database
+ID) and `workflow_status` (the recorded overall status). This confirms persistence;
+provider submission and execution happen on background workers. Authentication
+questions can be answered through the existing query tools. Stage failures appear
+in workflow status and the server log.
+
+`submission_key` is optional. Reusing an exact string returns the original
+workflow without replacing its stages or group, including after completion or
+cancellation. Omit it to create new work every time. The client never retries
+requests automatically; reuse the key after a timeout or lost response when the
+outcome is uncertain. `job_group` remains an optional, nonunique label.
+
+For example, save the following as `submission.json` and submit it with
+`python utilities/manager_client.py --file submission.json`:
+
+```json
+{
+  "tool": "submit_workflow",
+  "arguments": {
+    "submission_key": "example-run-1",
+    "job_group": "examples",
+    "stages": [
+      {
+        "type": "api",
+        "operations": [
+          {"type": "make_directory", "machine": "local", "path": "/tmp/amsc-example"},
+          {"type": "write_file", "machine": "local", "path": "/tmp/amsc-example/input", "content": "hello"}
+        ]
+      },
+      {
+        "type": "execute_job",
+        "machine": "local", "account": "", "queue": "", "time": "60",
+        "rundir": "/tmp/amsc-example", "nodes": 1, "ranks_per_node": 1, "gpus_per_rank": 0,
+        "executable": "/bin/cat", "arguments": ["input"],
+        "pre_launch": "printf starting", "post_launch": "printf finished"
+      }
+    ]
+  }
+}
+```
+
+Every stage requires a `type` tag:
+
+| Stage type | Fields in addition to `type` |
+| --- | --- |
+| `execute_job` | `machine`, `account`, `queue`, `time` (seconds as a string), `rundir`, `nodes`, `ranks_per_node`, `gpus_per_rank`, `executable`, `arguments`; optional `pre_launch`, `post_launch`, `exclusive` (default true). |
+| `batch_script` | The same target/resource fields as `execute_job`, with `script_body` instead of executable/arguments/hooks; optional `exclusive` (default true). Batch scheduler headers are handled as described in the compute API documentation. |
+| `globus_transfer` | `source_endpoint`, `source_path`, `dest_endpoint`, `dest_path`; optional `source_path_type` and `dest_path_type`, both defaulting to `globus`. Destination is a directory; `filesystem` paths require a configured endpoint mapping. |
+| `api` | `operations`, an ordered list (default empty) of the operations below. |
+
+API operations use their own `type` tags. `make_directory` takes `machine`, `path`
+and optional `create_parents` (default true). `write_file` takes `machine`, `path`
+and `content`. `upload_file` and `download_file` take `machine`, `dest_path` and
+`source_path`; their local paths refer to the manager host. `copy_file` takes
+`dest_path` and `source_path` on the manager host. `run_local` takes `executable`,
+`arguments`, `cwd` and optional positive `timeout` in seconds (default 60).
+Long-running local programs should be local compute actions. Operations must
+be safe to replay after partial execution or a crash before their checkpoint.
+
+`write_file.content` accepts UTF-8 text or an object such as `{"base64": "AP8="}`
+for binary data. Unknown fields, unsupported stage/operation types and malformed
+binary content are rejected before enqueueing the workflow. Target availability,
+filesystem checks and provider-specific validation occur during stage execution.
+All filesystem API operations enforce their normal sandbox checks. Shell scripts
+and executables, including `run_local`, retain the operating-system permissions
+of the executing user; their child-process writes are not kernel-sandboxed.
+
+Traditional options use the same discovered schema; pass each stage as a JSON
+argument after `--stages`. For larger workflows, use `--file` or stdin:
+
+```bash
+python utilities/manager_client.py submit_workflow --submission-key setup-1 \
+    --stages '{"type":"api","operations":[{"type":"make_directory","machine":"local","path":"/tmp/example"}]}'
+python utilities/manager_client.py submit_workflow --help
+python utilities/manager_client.py cancel_workflow --workflow-id 1
+```
+
+`cancel_workflow` retains the workflow and requests cancellation of its current
+compute or transfer task. Its receipt may report `CANCELING`; query
+`list_workflows` until the final state is recorded. Pending workflows can become
+`CANCELED` immediately. Repeated cancellation is safe, previous file effects are
+retained, and there is no option to abandon a running remote task.
+
+Python code uses the same Pydantic dataclasses and JSON schema:
+
+```python
+from amscjobmanager.workflow import workflow_adapter
+
+# stages is an ordinary list of the existing built-in action objects.
+encoded = workflow_adapter.dump_json(stages)  # bytes containing JSON
+restored = workflow_adapter.validate_json(encoded)  # native action objects
+schema = workflow_adapter.json_schema()
+```
+
+Existing positional Python constructors remain supported. JSON import/export
+supports the built-in stage union; custom Python-derived actions remain usable
+through the Python workflow API. Database persistence continues using trusted
+pickle records. No arbitrary class loading or pickle input is exposed over MCP.
 
 ## Answer user questions
 
@@ -141,7 +243,7 @@ Query tools remain available during initialization and after manager failure.
 Workflow tools return `manager_unavailable` until the manager is ready and healthy.
 Shutdown closes the queue, wakes waiters and rejects late questions/replies.
 Answering questions does not unlock privileged sandbox operations; those controls
-and MCP workflow submission remain separate future work.
+remain future work.
 
 ## Query workflows
 
@@ -353,3 +455,9 @@ help through both `-h TOOL` and `TOOL -h`, schema-derived types/defaults, one-co
 and execution, invalid arguments rejected before execution,
 tool discovery, error/skip/continuation responses, JSON files/stdin, and input
 validation. Cleanup cancels the local job and stops the test server.
+
+`test_mcp_workflows.py` exercises submission/cancellation through the real SDK and
+HTTP CLI, including both compute forms, API operations, a simulated asynchronous
+Globus provider, pending/active cancellation, generated nested-schema help and
+submission-key reuse after server restart. `test_workflow_schema.py` verifies
+native JSON/pickle round trips and rejects invalid schemas before execution.

@@ -1,5 +1,6 @@
 import re
-from dataclasses import dataclass
+from pydantic import ConfigDict, StrictStr
+from pydantic.dataclasses import dataclass
 from enum import Enum
 
 """Actions are classes of operations that can be performed via the AmSC infrastructure"""
@@ -8,7 +9,7 @@ def replaceJobIdSubstring(in_str, job_id):
     """Replace instances of <JOBID> with the job index in path strings"""
     return re.sub(r'<JOBID>', str(job_id), in_str)
 
-@dataclass
+@dataclass(config=ConfigDict(extra="forbid"))
 class TransferActionBase:
     """Base class of all transfer actions"""
 
@@ -30,12 +31,19 @@ class TransferActionBase:
         """Initiate the action and return the API key; name identifies the action."""
         raise NotImplementedError("Derived class must implement initiateAction")
 
-@dataclass
+@dataclass(config=ConfigDict(extra="forbid"))
 class ComputeActionBase:
-    machine : str
-    account : str
-    queue : str
-    time : str
+    """Common target and scheduling attributes for compute action definitions.
+
+    machine (str) selects a configured target or local; account/queue (str)
+    select the project and scheduler queue. time (str) is walltime in seconds.
+    Subclasses define execution fields and may implement provider operations.
+    """
+
+    machine : StrictStr
+    account : StrictStr
+    queue : StrictStr
+    time : StrictStr
 
     def queryResourceStatus(self) -> bool:
         """Return whether this action's compute resource reports being up.

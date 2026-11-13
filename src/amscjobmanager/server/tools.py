@@ -1,4 +1,4 @@
-"""MCP workflow inspection and user-interaction tools and response models."""
+"""MCP workflow submission, inspection, cancellation and user-interaction tools."""
 
 import json
 from typing import Annotated, Literal
@@ -8,6 +8,7 @@ from mcp.types import CallToolResult, TextContent, ToolAnnotations
 from pydantic import BaseModel, Field, StrictBool, StrictStr
 
 from ..action_manager import ActionStatus
+from ..workflow import Workflow
 from .queries import QueryResponseError
 from .runtime import ServerRuntime
 
@@ -69,8 +70,21 @@ class QueryResponseReceipt(BaseModel):
     accepted: Literal[True] = Field(description='Response delivered once. Authentication/API execution continues separately and may ask another question.')
 
 
+class WorkflowReceipt(BaseModel):
+    """Recorded workflow state after submission or a cancellation request.
+
+    workflow_id (positive int) is the database ID, not a stage/list index.
+    workflow_status (str) is the overall ActionStatus name. Submission confirms
+    persistence, not remote execution; cancellation may remain CANCELING while
+    background workers contact the provider. Reused keys can return terminal work.
+    """
+
+    workflow_id: int = Field(gt=0, description='Positive workflow database ID, independent of stage/action IDs.')
+    workflow_status: str = Field(description='Recorded overall workflow status; cancellation may remain CANCELING until confirmed.')
+
+
 def registerTools(mcp_server: MCPServer, runtime: ServerRuntime) -> None:
-    """Register workflow inspection and user-interaction tools on an MCP server.
+    """Register workflow lifecycle and user-interaction tools on an MCP server.
 
     mcp_server (MCPServer) receives the tool handlers and response schemas;
     runtime (ServerRuntime) supplies manager readiness, workflow state and its
@@ -78,6 +92,95 @@ def registerTools(mcp_server: MCPServer, runtime: ServerRuntime) -> None:
     Workflow tools require a live manager; query tools remain available during
     initialization or failure without acquiring the manager/database lock.
     """
+    @mcp_server.tool(annotations=ToolAnnotations(read_only_hint=False, destructive_hint=True))
+    def submit_workflow(
+        stages: Annotated[Workflow, Field(description='Ordered nonempty list of execute_job, batch_script, globus_transfer or api stages. Each stage requires its type tag; API operations have their own type tags.')],
+        job_group: Annotated[StrictStr | None, Field(description='Optional nonunique campaign/group label.')] = None,
+        submission_key: Annotated[StrictStr | None, Field(description='Optional exact-string idempotency key. Reuse after an uncertain response to retrieve the original workflow; changed work requires a new key.')] = None,
+    ) -> Annotated[CallToolResult, WorkflowReceipt]:
+        """Persist an ordered workflow for background execution, or retrieve a keyed submission.
+
+        stages (nonempty list of Pydantic action dataclasses) contains tagged
+        compute, Globus transfer and API stages in execution order. API stages
+        contain ordered, replay-safe operations. job_group (str | None) is a
+        nonunique label; submission_key (str | None) identifies one submission
+        within this database. None always creates new work. Reusing a key returns
+        the original workflow without replacing its stages, group or status.
+
+        Return CallToolResult with WorkflowReceipt fields at structured_content's
+        root: workflow_id (positive int) and workflow_status (ActionStatus name,
+        str). Persistence is acknowledged without waiting for provider submission
+        or execution. Stage/path/provider failures are recorded asynchronously.
+        All API writes use existing sandbox checks; no unsafe override is exposed.
+        Programs and shell snippets retain the job user's ordinary permissions.
+        File paths refer to the manager host or configured target, not the CLI host.
+        Authentication questions appear through list_user_queries.
+
+        An unavailable manager returns is_error=True and an error object with
+        code manager_unavailable and a message string. Invalid stage schemas are
+        rejected by MCP before any workflow is enqueued. There is no automatic
+        client retry: retain submission_key to retry an uncertain outcome safely.
+        """
+        # Enqueue only while the manager is healthy, checking again after the
+        # lock is acquired. JobData owns persistence and key deduplication.
+        error = {'code': 'manager_unavailable',
+                 'message': f'The workflow manager is {runtime.state}; check pending user queries and the server log'}
+        manager = runtime.manager
+        if manager is not None and manager.isAlive():
+            with manager as jobs:
+                if manager.isAlive():
+                    workflow_id = jobs.enqueueJob(stages, job_group, submission_key=submission_key)
+                    receipt = WorkflowReceipt(workflow_id=workflow_id,
+                                              workflow_status=jobs.jobStatus(workflow_id).name).model_dump(mode='json')
+                    error = None
+        if error is not None:
+            return CallToolResult(is_error=True, structured_content={'error': error},
+                                  content=[TextContent(type='text', text=error['message'])])
+        return CallToolResult(structured_content=receipt,
+                              content=[TextContent(type='text', text=json.dumps(receipt))])
+
+    @mcp_server.tool(annotations=ToolAnnotations(read_only_hint=False, destructive_hint=True, idempotent_hint=True))
+    def cancel_workflow(
+        workflow_id: Annotated[int, Field(gt=0, strict=True, description='Positive workflow database ID, not a stage index or provider job/task ID.')],
+    ) -> Annotated[CallToolResult, WorkflowReceipt]:
+        """Request workflow cancellation, including its current compute or transfer job.
+
+        workflow_id (positive int) identifies the persisted workflow. Call the
+        public JobData cancellation path with remote cancellation enabled;
+        queued workflows are canceled directly, and workers reconcile active
+        remote cancellation. Completed filesystem effects are retained.
+
+        Return CallToolResult with WorkflowReceipt fields workflow_id (int) and
+        workflow_status (str) at structured_content's root. CANCELING means the
+        request is recorded and background cancellation is still pending; inspect
+        list_workflows for its outcome. Canceled workflows remain in the database
+        and repeated requests are safe. This neither deletes files nor removes
+        submission keys. There is no option to abandon running remote work.
+        Unavailable/unknown workflows return is_error=True with an error object
+        containing code manager_unavailable/workflow_not_found and message (str).
+        """
+        # Persist cancellation under the normal manager lock. Remote API work
+        # remains on action workers so client calls and other workflows continue.
+        error = {'code': 'manager_unavailable',
+                 'message': f'The workflow manager is {runtime.state}; check pending user queries and the server log'}
+        manager = runtime.manager
+        if manager is not None and manager.isAlive():
+            with manager as jobs:
+                if manager.isAlive():
+                    try:
+                        jobs.cancelJob(workflow_id)
+                    except ValueError as exc:
+                        error = {'code': 'workflow_not_found', 'message': str(exc)}
+                    else:
+                        receipt = WorkflowReceipt(workflow_id=workflow_id,
+                                                  workflow_status=jobs.jobStatus(workflow_id).name).model_dump(mode='json')
+                        error = None
+        if error is not None:
+            return CallToolResult(is_error=True, structured_content={'error': error},
+                                  content=[TextContent(type='text', text=error['message'])])
+        return CallToolResult(structured_content=receipt,
+                              content=[TextContent(type='text', text=json.dumps(receipt))])
+
     @mcp_server.tool(annotations=ToolAnnotations(read_only_hint=True, destructive_hint=False))
     def list_workflows(
         workflow_id: Annotated[int, Field(gt=0, strict=True, description='Select a positive workflow database ID, not a list index. Omit to list all workflows.')] | None = None,

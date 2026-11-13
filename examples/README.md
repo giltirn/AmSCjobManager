@@ -4,6 +4,31 @@
 multi-machine execution. [`mpi_workflow.py`](mpi_workflow.py) submits a real
 MPI calculation using the IRI backend, including its local implementation.
 
+## Run a local workflow through the MCP server and CLI
+
+Install the server extra into your active Python environment, then run:
+
+```bash
+python -m pip install -e '.[server]'
+bash examples/mcp_workflow.sh
+```
+
+The script starts its own server on loopback port 8765; pass a different port as
+an argument, for example `bash examples/mcp_workflow.sh 8766`. Its configuration,
+logs and SQLite databases live in a unique `/tmp/amsc-mcp-example.*` directory.
+Bash heredocs create the configuration and workflow JSON directly, and standard
+`sed` commands extract the workflow ID and status from the formatted CLI
+responses. It submits a two-stage workflow through the CLI: an API stage creates
+a working directory and writes `input.txt` containing `1`, then a local compute
+stage runs one Bash process (one node, one rank) to add one and write `output.txt`.
+No MPI installation, remote credentials, or existing configuration is required.
+
+After completion, it prints the output contents and the expected value `2`.
+The server is stopped automatically on exit; interruption requests cancellation
+of unfinished work. Files and databases remain at the printed `/tmp` location
+for inspection. The library's default IRI backend is required; the script checks
+this without changing `AMSC_JOB_MANAGER_API_IMPL`.
+
 ## Run MPI locally
 
 Install an MPI C++ compiler and launcher. The bundled local profile uses

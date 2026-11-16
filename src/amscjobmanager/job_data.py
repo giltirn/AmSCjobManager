@@ -5,7 +5,7 @@ from .globus_transfer_action import GlobusDataTransfers
 from .compute_action_manager import ComputeActions
 from .api_action_manager import APIActions
 from .database import LockedConnection
-from .action_manager import ActionManager, ActionStatus, SimulatedCrash, _ser, _unser
+from .action_manager import ActionManager, ActionStatus, ActionStatusGroup, SimulatedCrash, initializeActionStatusViews, _ser, _unser
 from .logging import wfmanLog
 import time
 import json
@@ -40,6 +40,7 @@ class JobData:
         connection.row_factory = sqlite3.Row
         connection.execute('PRAGMA foreign_keys = ON')
         self.conn = LockedConnection(connection)
+        initializeActionStatusViews(self.conn)
         
         self._test_crash_at = _test_crash_at
         manager_factories = {
@@ -183,8 +184,7 @@ class JobData:
             if job['workflow_status'] == ActionStatus.CANCELED.name:
                 return
             already_canceling = job['workflow_status'] == ActionStatus.CANCELING.name
-            needs_cancellation = job['head_action_status'] in (
-                ActionStatus.SCHEDULING.name, ActionStatus.ACTIVE.name, ActionStatus.PROVIDER_HELD.name)
+            needs_cancellation = ActionStatus[job['head_action_status']] in ActionStatusGroup.EXECUTING.value
             remote_cancel = already_canceling or (cancel_running and needs_cancellation)
 
             # Record chain-wide intent and close queued stages before releasing
@@ -230,7 +230,7 @@ class JobData:
                     manager.cancelOrResumeCancelingAction(
                         action_id, recovery=(_unser(job['action_details']), job['job_id']))
                     status, _ = manager.queryRecordedStatus(action_id)
-                    if status in (ActionStatus.SCHEDULING, ActionStatus.ACTIVE, ActionStatus.PROVIDER_HELD, ActionStatus.CANCELING):
+                    if status in ActionStatusGroup.EXECUTING.value or status == ActionStatus.CANCELING:
                         continue
 
                 self._maybeSimulateCrash('action_canceled_before_job_head_update')
@@ -409,14 +409,13 @@ class JobData:
 
                 # Keep the execution projection and overall outcome in one
                 # transaction. A late poll must never clear cancellation intent.
-                workflow_status = ActionStatus.ACTIVE.name if status in (
-                    ActionStatus.SCHEDULING.name, ActionStatus.ACTIVE.name, ActionStatus.PROVIDER_HELD.name,
-                    ActionStatus.COMPLETED.name) else status
-                conn.execute('UPDATE jobs SET workflow_status = ?, last_status_change = ? '
+                conn.execute('UPDATE jobs SET workflow_status = '
+                             '(SELECT workflow_status FROM action_status_mapping WHERE action_status = ?), '
+                             'last_status_change = ? '
                              'WHERE (job_id, workflow_stage) = '
                              '(SELECT job_id, workflow_stage FROM actions WHERE action_id = ?) '
                              'AND workflow_status IN (?, ?)',
-                             (workflow_status, timestamp, action_id, ActionStatus.PENDING.name, ActionStatus.ACTIVE.name))
+                             (status, timestamp, action_id, ActionStatus.PENDING.name, ActionStatus.ACTIVE.name))
 
     def progressWorkflows(self, condition: Tuple[str, list | None]):
         """Start or advance selected sequential workflows using their stored actions.
@@ -540,8 +539,9 @@ class JobData:
         IDs to their new head statuses. Log read failures and retain cached state.
         """
         with self.conn as conn:
-            jobs = conn.execute('SELECT * FROM workflow_heads WHERE head_action_status IN (?, ?) AND workflow_status = ?',
-                                (ActionStatus.ACTIVE.name, ActionStatus.PROVIDER_HELD.name, ActionStatus.ACTIVE.name)).fetchall()
+            jobs = conn.execute('SELECT * FROM workflow_heads WHERE head_action_status IN '
+                                "(SELECT action_status FROM action_status_groups WHERE group_name = 'LIVE') "
+                                'AND workflow_status = ?', (ActionStatus.ACTIVE.name,)).fetchall()
         updates = {}
         recorded = []
         for job in jobs:
@@ -557,7 +557,7 @@ class JobData:
                 updates[job['job_id']] = status
                 recorded.append((status.name, int(time.time()), job['head_action_id']))
                 wfmanLog(f"Progressed job {job['job_id']} action {job['head_action_type']} to {status.name}")
-        self._recordActionStatuses(recorded, (ActionStatus.ACTIVE, ActionStatus.PROVIDER_HELD))
+        self._recordActionStatuses(recorded, ActionStatusGroup.LIVE.value)
         return updates
 
     def progressActiveState(self, force_poll=False):
@@ -587,11 +587,16 @@ class JobData:
                                 ','.join('?' for _ in statuses) + ')',
                                 tuple(status.name for status in statuses)).fetchone()[0]
 
-    def getActiveActions(self, action_class : ActionClass)->dict:
+    def getLiveActions(self, action_class: ActionClass) -> list[dict]:
+        """List provider-owned LIVE actions of the selected category without polling.
+
+        action_class (ActionClass) selects COMPUTE, TRANSFER, or API. Return
+        list[dict] for ACTIVE/PROVIDER_HELD actions, containing job_id (positive
+        workflow ID), api_key (str | None provider ID), api_status (str | None),
+        and action-specific getInfo fields. API returns [] because its unfinished
+        operations are SCHEDULING, outside LIVE. List positions are not action IDs.
         """
-        Get all active actions and returning a list of dictionaries, each containing "api_key", "api_status" and other custom fields defined on a per-action basis
-        """
-        return self.action_man[action_class].getActiveActions()
+        return self.action_man[action_class].getLiveActions()
 
     def stopWorkers(self) -> None:
         """Take no arguments; signal all action managers' workers and return None.
@@ -610,10 +615,11 @@ class JobData:
         """
         with self.conn as conn:
             jobs = conn.execute('SELECT * FROM workflow_heads WHERE workflow_status = ? OR '
-                                '(workflow_status = ? AND head_action_status IN (?, ?, ?, ?))',
+                                '(workflow_status = ? AND (head_action_status IN '
+                                "(SELECT action_status FROM action_status_groups WHERE group_name = 'EXECUTING') "
+                                'OR head_action_status = ?))',
                                 (ActionStatus.CANCELING.name, ActionStatus.ACTIVE.name,
-                                 ActionStatus.SCHEDULING.name, ActionStatus.ACTIVE.name,
-                                 ActionStatus.PROVIDER_HELD.name, ActionStatus.CANCELING.name)).fetchall()
+                                 ActionStatus.CANCELING.name)).fetchall()
         for job in jobs:
             action = _unser(job['action_details'])
             manager = self.action_man[ActionClass[job['head_action_class']]]

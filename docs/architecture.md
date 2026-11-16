@@ -74,6 +74,19 @@ records workflow-wide cancellation intent. Globus INACTIVE and IRI compute held
 map to PROVIDER_HELD, preserving polling and cancellation of accepted work.
 A read-only `workflow_heads` view derives head metadata and action status.
 
+Two additional read-only views centralize status rules:
+
+- `action_status_groups(group_name, action_status)` defines LIVE (ACTIVE and
+  PROVIDER_HELD) and EXECUTING (SCHEDULING plus LIVE).
+- `action_status_mapping(action_status, workflow_status)` maps each head status
+  to its corresponding overall status. EXECUTING and COMPLETED map to ACTIVE;
+  other statuses map to themselves.
+
+The views are generated from the shared `ActionStatus`/`ActionStatusGroup`
+definitions used by Python checks. Polling and `getLiveActions()` select LIVE
+members; execution supervision selects EXECUTING. Waiting for completion also
+includes CANCELING explicitly, rather than defining another group.
+
 Action managers own their execution records. JobData copies their recorded
 statuses into `actions`, retaining completed stages after the head advances.
 The action projection and corresponding overall workflow status update commit

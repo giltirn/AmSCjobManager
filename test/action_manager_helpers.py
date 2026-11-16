@@ -7,7 +7,7 @@ exercises the real asynchronous supervisors and process-restart recovery.
 
 import time
 
-from amscjobmanager.action_manager import ActionStatus
+from amscjobmanager.action_manager import ActionStatus, ActionStatusGroup
 from amscjobmanager.api_action_manager import APIActions
 from amscjobmanager.compute_action_manager import ComputeActions
 from amscjobmanager.globus_transfer_action import GlobusDataTransfers
@@ -41,7 +41,7 @@ class DirectAsyncActions:
         status, api_status = super().queryRecordedStatus(action_id)
         with self.conn as conn:
             row = conn.execute(f'SELECT last_update FROM {self.table_name} WHERE action_id = ?', (action_id,)).fetchone()
-        if status in (ActionStatus.ACTIVE, ActionStatus.PROVIDER_HELD) and (force_update or int(time.time()) > row['last_update'] + self.poll_freq):
+        if status in ActionStatusGroup.LIVE.value and (force_update or int(time.time()) > row['last_update'] + self.poll_freq):
             self._pollAction(action_id)
             status, api_status = super().queryRecordedStatus(action_id)
         return status, api_status

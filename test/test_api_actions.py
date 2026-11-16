@@ -223,7 +223,7 @@ class APIActionTests(unittest.TestCase):
             self.assertEqual(manager.queryRecordedStatus(action_id, force_update=True), (ActionStatus.COMPLETED, None))
             self.assertEqual(manager.waitForAction(action_id), ActionStatus.COMPLETED)
             self.assertIsNone(manager.updateStatuses())
-            self.assertEqual(manager.getActiveActions(), [])
+            self.assertEqual(manager.getLiveActions(), [])
             for cursor in [-1, 1.5, 'bad']:
                 with self.assertRaises(sqlite3.IntegrityError), jobs.conn as conn:
                     conn.execute('UPDATE api_actions SET next_operation = ? WHERE action_id = ?', (cursor, action_id))

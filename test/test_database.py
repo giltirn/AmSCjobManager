@@ -6,6 +6,7 @@ from threading import Event
 import unittest
 
 from amscjobmanager.database import DatabaseClosed, LockedConnection
+from amscjobmanager.action_manager import ActionStatus, ActionStatusGroup, initializeActionStatusViews
 
 
 class DatabaseTests(unittest.TestCase):
@@ -33,6 +34,52 @@ class DatabaseTests(unittest.TestCase):
         with self.database as conn:
             self.assertIs(conn, original)
             self.assertEqual(conn.execute('SELECT value FROM effects').fetchall(), [('committed',)])
+
+    def test_status_views_define_shared_groups_and_workflow_mapping(self):
+        """Query both views and verify the SQL rules match the action lifecycle.
+
+        Every enum state must have a workflow mapping. LIVE excludes submission
+        and terminal states; EXECUTING adds submission. A completed head maps to
+        ACTIVE until JobData explicitly advances beyond the workflow's last stage.
+        """
+        initializeActionStatusViews(self.database)
+        with self.database as conn:
+            mapping = dict(conn.execute('SELECT action_status, workflow_status FROM action_status_mapping'))
+            groups = conn.execute('SELECT group_name, action_status FROM action_status_groups').fetchall()
+        self.assertEqual(mapping, {
+            'PENDING': 'PENDING', 'SCHEDULING': 'ACTIVE', 'ACTIVE': 'ACTIVE',
+            'PROVIDER_HELD': 'ACTIVE', 'COMPLETED': 'ACTIVE', 'FAILED': 'FAILED',
+            'CANCELING': 'CANCELING', 'CANCELED': 'CANCELED',
+        })
+        self.assertEqual(set(mapping), {status.name for status in ActionStatus})
+        self.assertEqual(set(groups), {
+            ('LIVE', 'ACTIVE'), ('LIVE', 'PROVIDER_HELD'),
+            ('EXECUTING', 'SCHEDULING'), ('EXECUTING', 'ACTIVE'), ('EXECUTING', 'PROVIDER_HELD'),
+        })
+        self.assertEqual(set(groups), {(group.name, status.name)
+                                       for group in ActionStatusGroup for status in group.value})
+
+    def test_status_views_are_read_only_and_initialization_preserves_records(self):
+        """Reject view mutations and safely initialize the shared rules repeatedly.
+
+        Action managers and JobData can share a connection; none may overwrite
+        existing records or turn library status rules into editable table data.
+        """
+        initializeActionStatusViews(self.database)
+        with self.database as conn:
+            conn.execute("INSERT INTO effects VALUES ('retained')")
+        initializeActionStatusViews(self.database)
+        for statement in (
+            "INSERT INTO action_status_groups VALUES ('LIVE', 'FAILED')",
+            "UPDATE action_status_mapping SET workflow_status = 'FAILED' WHERE action_status = 'ACTIVE'",
+        ):
+            with self.subTest(statement=statement), self.assertRaises(sqlite3.OperationalError):
+                with self.database as conn:
+                    conn.execute(statement)
+        with self.database as conn:
+            self.assertEqual(conn.execute('SELECT value FROM effects').fetchall(), [('retained',)])
+            self.assertEqual(conn.execute("SELECT workflow_status FROM action_status_mapping WHERE action_status = 'ACTIVE'").fetchone(),
+                             ('ACTIVE',))
 
     def test_concurrent_transaction_cannot_commit_another_threads_write(self):
         """Keep a failed transaction isolated from another thread's successful write.

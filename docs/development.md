@@ -168,8 +168,13 @@ and JobData's manager registry.
 `ActionManager` is the abstract workflow-facing interface in `action_manager.py`.
 Implementations own their database schemas and transitions. Its public methods
 are `startOrResumeAction`, `cancelOrResumeCancelingAction`, `hasAction`, `getMaxActionId`, `queryRecordedStatus`,
-`updateStatuses`, `waitForAction`, `getActiveActions`, `getActionInfo`, and
+`updateStatuses`, `waitForAction`, `getLiveActions`, `getActionInfo`, and
 `stopWorkers`.
+`getLiveActions` selects the LIVE group (ACTIVE and PROVIDER_HELD). EXECUTING
+adds SCHEDULING and is used for execution supervision and recovery. These are
+`ActionStatusGroup` members whose values are tuples of `ActionStatus` members.
+`initializeActionStatusViews` creates the shared read-only SQL group and workflow
+mapping views from the same definitions, including for standalone action managers.
 `getMaxActionId` reports execution history, not IDs of stages that are still queued.
 Internal reconciliation hooks are not part of the interface.
 JobData allocates all action IDs as primary keys when the workflow is enqueued and supplies the

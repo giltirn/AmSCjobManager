@@ -2,7 +2,7 @@
 
 import math
 import time
-from .action_manager import ActionManager, ActionStatus, SimulatedCrash, _ser, _unser
+from .action_manager import ActionManager, ActionStatus, ActionStatusGroup, SimulatedCrash, initializeActionStatusViews, _ser, _unser
 from .logging import wfmanLog
 from .database import DatabaseClosed, LockedConnection
 from .workers import Workers, WorkerInterrupted, checkForThreadCurrentWorkerInterruption, sleepCurrentThreadWorker
@@ -31,7 +31,8 @@ class AsyncActionManager(ActionManager):
     def __init__(self, connection: LockedConnection, table_name, api_action_status_map : dict,
                  *, _test_crash_at: str | None = None,
                  scheduling_retry_delay=30, max_submission_attempts=3, workers: Workers | None = None, poll_freq=30):
-        """
+        """Initialize remote-action storage, shared status views, and supervision settings.
+
         connection (LockedConnection) is JobData's shared locking context manager.
         table_name (str) names this manager's table; api_action_status_map
         (dict[str, ActionStatus]) maps provider states. scheduling_retry_delay
@@ -49,6 +50,7 @@ class AsyncActionManager(ActionManager):
         self._test_crash_at = _test_crash_at
         self.scheduling_retry_delay = scheduling_retry_delay
         self.max_submission_attempts = max_submission_attempts
+        initializeActionStatusViews(self.conn)
         
         with self.conn as conn:        
             conn.execute(f"""
@@ -164,7 +166,7 @@ class AsyncActionManager(ActionManager):
         status, _ = self.queryRecordedStatus(action_id)
         if status == ActionStatus.CANCELING:
             self._startCancellationWorker(action_id, complete_cancellation=self._completeCancellation)
-        elif status in (ActionStatus.SCHEDULING, ActionStatus.ACTIVE, ActionStatus.PROVIDER_HELD):
+        elif status in ActionStatusGroup.EXECUTING.value:
             self._startExecutionWorker(
                 action_id, execute_action=self._executeAction,
                 complete_cancellation=self._completeCancellation,
@@ -469,7 +471,7 @@ class AsyncActionManager(ActionManager):
         failures retain state and retry after interruptible poll_freq delays in
         seconds. WorkerInterrupted propagates to the shared worker entry point.
         """
-        executing = (ActionStatus.SCHEDULING, ActionStatus.ACTIVE, ActionStatus.PROVIDER_HELD)
+        executing = ActionStatusGroup.EXECUTING.value
         while True:
             # Follow durable execution state; cancellation hands control back
             # to the worker instead of sharing this submission/polling loop.
@@ -525,7 +527,7 @@ class AsyncActionManager(ActionManager):
         with self.conn as conn:
             action = conn.execute(f'SELECT machine, api_key, action_status FROM {self.table_name} WHERE action_id = ?',
                                   (action_id,)).fetchone()
-        if action['action_status'] not in (ActionStatus.ACTIVE.name, ActionStatus.PROVIDER_HELD.name):
+        if ActionStatus[action['action_status']] not in ActionStatusGroup.LIVE.value:
             return
         api_status = self._queryStatusInternal(action['machine'], action['api_key'])
         status = self.api_action_status_map[api_status]
@@ -549,8 +551,8 @@ class AsyncActionManager(ActionManager):
     def updateStatuses(self):
         """Take no arguments; wake ACTIVE and PROVIDER_HELD supervisors to poll, returning None."""
         with self.conn as conn:
-            actions = conn.execute(f'SELECT action_id FROM {self.table_name} WHERE action_status IN (?, ?)',
-                                   (ActionStatus.ACTIVE.name, ActionStatus.PROVIDER_HELD.name)).fetchall()
+            actions = conn.execute(f'SELECT action_id FROM {self.table_name} WHERE action_status IN '
+                                   "(SELECT action_status FROM action_status_groups WHERE group_name = 'LIVE')").fetchall()
         for action in actions:
             self.queryRecordedStatus(action['action_id'], force_update=True)
 
@@ -584,8 +586,8 @@ class AsyncActionManager(ActionManager):
             raise ValueError(f'Unknown action_id: {action_id}')
         return ActionStatus[action['action_status']], action['api_status']
 
-    def getActiveActions(self):
-        """List ACTIVE and PROVIDER_HELD actions without contacting providers.
+    def getLiveActions(self):
+        """List LIVE actions (ACTIVE and PROVIDER_HELD) without contacting providers.
 
         Take no arguments. Return list[dict] with job_id (int workflow ID),
         api_key (str | None provider ID), api_status (str | None raw state),
@@ -593,8 +595,8 @@ class AsyncActionManager(ActionManager):
         """
         out = []
         with self.conn as conn:
-            entries = conn.execute(f"SELECT job_id, api_key, api_status, details FROM {self.table_name} WHERE action_status IN (?, ?)",
-                                   (ActionStatus.ACTIVE.name, ActionStatus.PROVIDER_HELD.name)).fetchall()
+            entries = conn.execute(f'SELECT job_id, api_key, api_status, details FROM {self.table_name} WHERE action_status IN '
+                                   "(SELECT action_status FROM action_status_groups WHERE group_name = 'LIVE')").fetchall()
             for entry in entries:
                 action = _unser(entry['details'])
                 dc = action.getInfo()

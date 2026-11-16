@@ -91,7 +91,7 @@ class ProviderHeldTests(unittest.TestCase):
                 self.assertEqual(jobs.headActionStatus(job_id), ActionStatus.PROVIDER_HELD)
                 self.assertEqual(jobs.jobStatus(job_id), ActionStatus.ACTIVE)
                 self.assertEqual(len(jobs.listWorkflows(statuses=ActionStatus.ACTIVE)), 1)
-                self.assertEqual(len(manager.getActiveActions()), 1)
+                self.assertEqual(len(manager.getLiveActions()), 1)
                 for _ in range(2):
                     jobs.progressActiveState(force_poll=True)
                 self.assertFalse(output.exists())

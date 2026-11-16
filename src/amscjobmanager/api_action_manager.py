@@ -2,7 +2,7 @@
 
 import time
 
-from .action_manager import ActionManager, ActionStatus, SimulatedCrash, _ser, _unser
+from .action_manager import ActionManager, ActionStatus, SimulatedCrash, initializeActionStatusViews, _ser, _unser
 from .api_actions import APIAction
 from .logging import wfmanLog
 from .database import DatabaseClosed, LockedConnection
@@ -19,7 +19,7 @@ class APIActions(ActionManager):
 
     def __init__(self, connection: LockedConnection, *, _test_crash_at: str | None = None,
                  workers: Workers | None = None):
-        """Create the API action table on connection (LockedConnection).
+        """Create API action storage and shared status views on connection (LockedConnection).
 
         connection yields a SQLite connection with sqlite3.Row records and is
         owned by JobData. All SQL access stays inside its context blocks.
@@ -29,6 +29,7 @@ class APIActions(ActionManager):
         """
         super().__init__(workers=workers)
         self.conn = connection
+        initializeActionStatusViews(self.conn)
         self._test_crash_at = _test_crash_at
         with self.conn as conn:
             conn.execute('''CREATE TABLE IF NOT EXISTS api_actions (
@@ -216,8 +217,8 @@ class APIActions(ActionManager):
     def updateStatuses(self) -> None:
         """Take no arguments; return None because there is no external state to poll."""
 
-    def getActiveActions(self) -> list[dict]:
-        """Take no arguments; return [] because API sequences retain SCHEDULING until completion."""
+    def getLiveActions(self) -> list[dict]:
+        """Take no arguments; return [] because API sequences never enter the LIVE group."""
         return []
 
     def getActionInfo(self, action_id: int) -> dict:

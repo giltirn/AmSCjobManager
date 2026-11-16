@@ -5,7 +5,7 @@ from threading import RLock
 from typing import Callable
 import time
 
-from .database import DatabaseClosed
+from .database import DatabaseClosed, LockedConnection
 from .logging import wfmanLog
 from .workers import Workers, WorkerInterrupted, clearThreadCurrentWorkerInterruptUnlessStopping
 
@@ -33,6 +33,43 @@ class ActionStatus(Enum):
     CANCELED = 5 #cancellation was requested or the action was removed before submission
     CANCELING = 6 #cancellation intent is persisted but not yet reconciled
     PROVIDER_HELD = 7 #accepted work suspended by its provider; still live and cancellable
+
+
+class ActionStatusGroup(Enum):
+    """Reusable action-state groups shared by Python checks and SQL views.
+
+    Each value is a tuple of ActionStatus members. LIVE contains accepted work
+    still monitored remotely. EXECUTING adds submission/reconciliation in
+    progress; it does not imply that the provider is running a process.
+    """
+
+    LIVE = (ActionStatus.ACTIVE, ActionStatus.PROVIDER_HELD)
+    EXECUTING = (ActionStatus.SCHEDULING, *LIVE)
+
+
+def initializeActionStatusViews(connection: LockedConnection) -> None:
+    """Create read-only SQL views for action groups and head-to-workflow mapping.
+
+    connection (LockedConnection) supplies the shared SQLite connection. Return
+    None. action_status_groups has group_name/action_status (str enum names),
+    one row per membership. action_status_mapping has action_status/workflow_status
+    (str enum names), one row per ActionStatus. EXECUTING and COMPLETED heads
+    map to ACTIVE workflows; other statuses map to themselves. Final workflow
+    completion and cancellation intent remain explicit JobData transitions.
+    Existing views are retained; no action or workflow records are changed.
+    """
+    # Generate SQL literals exclusively from library enum names. The same group
+    # definitions drive in-memory checks and database conditions without drift.
+    memberships = ', '.join(f"('{group.name}', '{status.name}')"
+                            for group in ActionStatusGroup for status in group.value)
+    mapping = []
+    for status in ActionStatus:
+        workflow_status = ActionStatus.ACTIVE if (
+            status in ActionStatusGroup.EXECUTING.value or status == ActionStatus.COMPLETED) else status
+        mapping.append(f"('{status.name}', '{workflow_status.name}')")
+    with connection as conn:
+        conn.execute('CREATE VIEW IF NOT EXISTS action_status_groups(group_name, action_status) AS VALUES ' + memberships)
+        conn.execute('CREATE VIEW IF NOT EXISTS action_status_mapping(action_status, workflow_status) AS VALUES ' + ', '.join(mapping))
 
 
 class SimulatedCrash(RuntimeError):
@@ -299,25 +336,24 @@ class ActionManager(ABC):
         not start workers, perform provider polls or advance workflow stages.
         Exceptions retained by a worker, including simulated crashes, propagate
         to the caller. Call outside locks needed by the worker."""
-        unfinished = (ActionStatus.SCHEDULING, ActionStatus.ACTIVE, ActionStatus.PROVIDER_HELD, ActionStatus.CANCELING)
         while True:
             status, _ = self.queryRecordedStatus(action_id)
             with self._worker_lock:
                 worker = self._action_workers.get(action_id)
             if worker is not None and worker.future.done():
                 worker.future.result()
-            if status not in unfinished:
+            if status not in ActionStatusGroup.EXECUTING.value and status != ActionStatus.CANCELING:
                 if worker is not None:
                     worker.future.result()
                 return status
             time.sleep(check_freq)
 
     @abstractmethod
-    def getActiveActions(self) -> list[dict]:
-        """List provider-owned ACTIVE or PROVIDER_HELD actions and their monitoring information.
+    def getLiveActions(self) -> list[dict]:
+        """List LIVE actions and their monitoring information without provider requests.
 
         Take no arguments. Return list[dict], one entry per recorded action
-        whose status is ACTIVE or PROVIDER_HELD, without contacting providers. Each entry has
+        whose status is ACTIVE or PROVIDER_HELD (the LIVE group). Each entry has
         job_id (positive workflow ID, int), api_key (provider identifier, str or
         None), api_status (latest provider state, str or None), plus action-type
         details described by the implementation. List positions are not action

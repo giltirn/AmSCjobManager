@@ -532,7 +532,7 @@ class MCPToolTests(unittest.IsolatedAsyncioTestCase):
         manager. Disable automatic starts, enqueue two workflows,
         and cancel one before submission, so neither executable actually runs.
         Check empty/ordered listings, distinct workflow/head statuses, null
-        provider status, and exclusion of the internal serialized workflow.
+        provider status, and exclusion of serialized action definitions.
         Check that status filtering selects the canceled record, combining ID
         and status filters can return no match, and unknown IDs or malformed
         arguments produce MCP tool errors rather than successful responses.

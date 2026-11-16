@@ -41,7 +41,7 @@ class DirectAsyncActions:
         status, api_status = super().queryRecordedStatus(action_id)
         with self.conn as conn:
             row = conn.execute(f'SELECT last_update FROM {self.table_name} WHERE action_id = ?', (action_id,)).fetchone()
-        if status == ActionStatus.ACTIVE and (force_update or int(time.time()) > row['last_update'] + self.poll_freq):
+        if status in (ActionStatus.ACTIVE, ActionStatus.PROVIDER_HELD) and (force_update or int(time.time()) > row['last_update'] + self.poll_freq):
             self._pollAction(action_id)
             status, api_status = super().queryRecordedStatus(action_id)
         return status, api_status

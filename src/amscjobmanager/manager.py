@@ -74,8 +74,7 @@ class JobManager:
         while wait_until_done and self.isAlive():
             with self._lock:
                 remaining = self.job_data.countWorkflowsWithStatus([
-                    ActionStatus.PENDING, ActionStatus.SCHEDULING, ActionStatus.ACTIVE,
-                    ActionStatus.COMPLETED, ActionStatus.CANCELING,
+                    ActionStatus.PENDING, ActionStatus.ACTIVE, ActionStatus.CANCELING,
                 ])
             if remaining == 0:
                 break

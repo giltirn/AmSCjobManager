@@ -55,14 +55,50 @@ cancel them itself.
 Keep these identifiers distinct:
 
 - **Workflow `job_id`:** the integer returned by `JobData.enqueueJob()`.
-- **Action ID:** a separate integer allocated by JobData for each workflow step.
+- **Action ID:** the `actions` table's integer primary key, assigned by JobData
+  to every workflow step when the workflow is enqueued.
 - **Remote API key:** the provider's compute job ID or Globus task ID, stored in
   the action table's `api_key` column. Here “key” means an identifier, not a token.
 - **Remote action name:** `amscjm_<action_id>`, used to recover a submitted action
   if the process stops before saving its remote ID.
 
-The manager database contains `jobs`, `action_ids`, `computes`, and `transfers`.
-Workflow descriptions and action details are serialized with Python `pickle`.
+The manager database contains `jobs`, `actions`, `computes`, `transfers`, and
+`api_actions`. Each queued stage has an `actions` row with its workflow ID,
+zero-based stage index, concrete type, category, recorded status, and a pickled
+action definition. There is no workflow-level BLOB or separate ID allocator.
+`jobs` retains workflow metadata, the current stage, and a persisted
+`workflow_status`: PENDING, ACTIVE, COMPLETED, FAILED, CANCELING, or CANCELED.
+ACTIVE includes submission, provider-held work, and intermediate action
+completion; SCHEDULING and PROVIDER_HELD are only action statuses. CANCELING
+records workflow-wide cancellation intent. Globus INACTIVE and IRI compute held
+map to PROVIDER_HELD, preserving polling and cancellation of accepted work.
+A read-only `workflow_heads` view derives head metadata and action status.
+
+Action managers own their execution records. JobData copies their recorded
+statuses into `actions`, retaining completed stages after the head advances.
+The action projection and corresponding overall workflow status update commit
+together. Advancing past the final stage records workflow completion, while
+cancellation remains authoritative over late execution-status results.
+`jobStatus()` reads the persisted workflow status, and workflow listing filters
+that column directly. Head-action status remains independent: canceling a chain
+does not turn an already successful producer into a canceled action.
+`jobState` and `listWorkflows` return workflow/head metadata without loading or
+returning serialized action definitions.
+
+Action definitions also accept optional keyword-only `producer_key` and
+`depends_on` fields. The latter is a string key or a nested infix list, for
+example `["prepared", "AND", ["solver_a", "OR", "solver_b"]]`. Nonempty lists
+alternate operands with uppercase AND/OR operators. Nested lists act as
+parentheses; AND has its normal precedence over OR. These fields are stored as
+producer text and dependency JSON in the action rows, but **dependency enforcement
+is not implemented yet**: these fields currently have no effect on execution
+or cancellation.
+`evaluateDependencies(condition, completed)` evaluates an expression using a
+caller-supplied completion lookup. It validates the structure and translates
+only Boolean literals, operators, and parentheses to Python for evaluation;
+dependency-key text is never inserted into the generated expression.
+
+This schema requires a fresh database; older workflow schemas are not migrated.
 Use a persistent filename for restart recovery; `filename=None` uses memory.
 Only open databases from trusted sources, and retain compatible action classes
 and their import paths when reopening one.

@@ -169,13 +169,12 @@ class SchedulingReconciliationTests(unittest.TestCase):
         finally:
             jobs.conn.close()
 
-    def test_action_id_recovery_uses_manager_interface(self):
-        """Recover allocation from managers whose tables have custom names.
+    def test_queued_action_ids_do_not_depend_on_manager_table_names(self):
+        """Allocate IDs at enqueue and retain them with custom execution managers.
 
-        Substitute managers with no computes/transfers tables, seed IDs in
-        their records and the workflow head, then remove the allocator to
-        model an older database. Reopening must recover the highest ID from
-        all sources without knowing the action table names.
+        Queue several unstarted stages, reopen storage, then queue another one.
+        IDs must be distinct actions-table keys without inspecting or seeding
+        execution-manager tables, which remain empty until scheduling.
         """
         factories = {
             ActionClass.COMPUTE: lambda conn, **kwargs: AsyncActionManager(
@@ -186,22 +185,18 @@ class SchedulingReconciliationTests(unittest.TestCase):
             ),
         }
         jobs = JobData(self.db_path, _test_action_manager_factories=factories)
-        for manager in jobs.action_man.values():
-            self.assertIsNone(manager.getMaxActionId())
-        job_id = jobs.enqueueJob(HarnessGlobusTransfer())
+        jobs.enqueueJob([HarnessGlobusTransfer(), HarnessGlobusTransfer()])
         with jobs.conn as conn:
-            conn.execute("INSERT INTO custom_compute(action_id) VALUES (17)")
-            conn.execute("INSERT INTO custom_transfer(action_id) VALUES (29)")
-            conn.execute("UPDATE jobs SET head_action_id = 23 WHERE job_id = ?", (job_id,))
-            conn.execute("DROP TABLE action_ids")
+            ids = [row[0] for row in conn.execute('SELECT action_id FROM actions ORDER BY action_id')]
+        self.assertEqual(len(set(ids)), 2)
+        self.assertTrue(all(manager.getMaxActionId() is None for manager in jobs.action_man.values()))
         jobs.conn.close()
 
         recovered = JobData(self.db_path, _test_action_manager_factories=factories)
         try:
-            self.assertEqual(recovered.action_man[ActionClass.COMPUTE].getMaxActionId(), 17)
-            self.assertEqual(recovered.action_man[ActionClass.TRANSFER].getMaxActionId(), 29)
-            with recovered.conn as conn:
-                self.assertEqual(recovered._allocateActionId(conn), 30)
+            job_id = recovered.enqueueJob(HarnessGlobusTransfer())
+            self.assertGreater(recovered.jobState(job_id)['head_action_id'], max(ids))
+            self.assertTrue(all(manager.getMaxActionId() is None for manager in recovered.action_man.values()))
         finally:
             recovered.conn.close()
 

@@ -276,26 +276,31 @@ class APIActionTests(unittest.TestCase):
         finally:
             jobs.conn.close()
 
-    def test_allocator_recovers_ids_from_api_manager(self):
-        """Recover global allocation from an API record with no remaining job head.
+    def test_completed_api_ids_remain_reserved_after_reopening(self):
+        """Keep completed API rows so new queued stages cannot reuse their IDs.
 
-        Delete the allocator and workflow rows to model database initialization
-        from existing action records. The next allocated ID must exceed the API
-        manager's maximum, without JobData querying its table directly.
+        Finish an API workflow and reopen SQLite, then queue a two-stage chain.
+        Both future stages must already have distinct IDs above the completed
+        action, even though neither has an execution-manager record yet.
         """
         jobs = JobData(self.database)
         job_id = jobs.enqueueJob(APIAction())
-        jobs.startWorkflows([job_id])
         action_id = jobs.jobState(job_id)['head_action_id']
-        with jobs.conn as conn:
-            conn.execute('DELETE FROM jobs')
-            conn.execute('DROP TABLE action_ids')
+        jobs.startWorkflows([job_id])
+        jobs.progressActiveState()
+        self.assertEqual(jobs.jobStatus(job_id), ActionStatus.COMPLETED)
         jobs.conn.close()
         recovered = JobData(self.database)
         try:
-            self.assertEqual(recovered.action_man[ActionClass.API].getMaxActionId(), action_id)
+            next_job = recovered.enqueueJob([APIAction(), APIAction()])
             with recovered.conn as conn:
-                self.assertEqual(recovered._allocateActionId(conn), action_id + 1)
+                rows = conn.execute('SELECT action_id FROM actions WHERE job_id = ? ORDER BY workflow_stage',
+                                    (next_job,)).fetchall()
+                self.assertEqual(conn.execute('SELECT action_status FROM actions WHERE action_id = ?',
+                                              (action_id,)).fetchone()[0], 'COMPLETED')
+            self.assertEqual(len(rows), 2)
+            self.assertTrue(all(row['action_id'] > action_id for row in rows))
+            self.assertFalse(any(recovered.action_man[ActionClass.API].hasAction(row['action_id']) for row in rows))
         finally:
             recovered.conn.close()
 

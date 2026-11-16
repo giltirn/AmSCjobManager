@@ -164,7 +164,7 @@ class AsyncActionManager(ActionManager):
         status, _ = self.queryRecordedStatus(action_id)
         if status == ActionStatus.CANCELING:
             self._startCancellationWorker(action_id, complete_cancellation=self._completeCancellation)
-        elif status in (ActionStatus.SCHEDULING, ActionStatus.ACTIVE):
+        elif status in (ActionStatus.SCHEDULING, ActionStatus.ACTIVE, ActionStatus.PROVIDER_HELD):
             self._startExecutionWorker(
                 action_id, execute_action=self._executeAction,
                 complete_cancellation=self._completeCancellation,
@@ -181,8 +181,8 @@ class AsyncActionManager(ActionManager):
         """Return the highest action ID recorded by this manager.
 
         Takes no arguments. Returns a positive int, or None when this manager
-        has no action records. JobData uses this to initialize its shared ID
-        allocator without depending on the manager's database schema.
+        has no action records. This inspects execution history only; JobData
+        assigns IDs to every queued stage using its actions-table primary key.
         """
         with self.conn as conn:
             return conn.execute(
@@ -469,7 +469,7 @@ class AsyncActionManager(ActionManager):
         failures retain state and retry after interruptible poll_freq delays in
         seconds. WorkerInterrupted propagates to the shared worker entry point.
         """
-        executing = (ActionStatus.SCHEDULING, ActionStatus.ACTIVE)
+        executing = (ActionStatus.SCHEDULING, ActionStatus.ACTIVE, ActionStatus.PROVIDER_HELD)
         while True:
             # Follow durable execution state; cancellation hands control back
             # to the worker instead of sharing this submission/polling loop.
@@ -485,7 +485,7 @@ class AsyncActionManager(ActionManager):
                     failure_message=f'Status poll failed for action {action_id}; retaining cached state',
                 )
 
-            # queryRecordedStatus reads SQLite only, but each ACTIVE iteration above
+            # queryRecordedStatus reads SQLite only, but each ACTIVE/PROVIDER_HELD iteration above
             # calls _pollAction and contacts the provider. This delay therefore
             # controls API polling too; the 0.01s floor prevents a tight loop
             # when poll_freq is zero, rather than defining a separate cache poll.
@@ -525,14 +525,14 @@ class AsyncActionManager(ActionManager):
         with self.conn as conn:
             action = conn.execute(f'SELECT machine, api_key, action_status FROM {self.table_name} WHERE action_id = ?',
                                   (action_id,)).fetchone()
-        if action['action_status'] != ActionStatus.ACTIVE.name:
+        if action['action_status'] not in (ActionStatus.ACTIVE.name, ActionStatus.PROVIDER_HELD.name):
             return
         api_status = self._queryStatusInternal(action['machine'], action['api_key'])
         status = self.api_action_status_map[api_status]
         with self.conn as conn:
             conn.execute(f'UPDATE {self.table_name} SET api_status = ?, action_status = ?, last_update = ? '
                          'WHERE action_id = ? AND action_status = ?',
-                         (api_status, status.name, int(time.time()), action_id, ActionStatus.ACTIVE.name))
+                         (api_status, status.name, int(time.time()), action_id, action['action_status']))
 
     def _recordWorkerFailure(self, action_id: int, error: Exception) -> None:
         """Record error (Exception) for positive action_id; return None.
@@ -547,10 +547,10 @@ class AsyncActionManager(ActionManager):
                           action_id, ActionStatus.CANCELING.name))
 
     def updateStatuses(self):
-        """Take no arguments; signal active supervisors to refresh and return None."""
+        """Take no arguments; wake ACTIVE and PROVIDER_HELD supervisors to poll, returning None."""
         with self.conn as conn:
-            actions = conn.execute(f'SELECT action_id FROM {self.table_name} WHERE action_status = ?',
-                                   (ActionStatus.ACTIVE.name,)).fetchall()
+            actions = conn.execute(f'SELECT action_id FROM {self.table_name} WHERE action_status IN (?, ?)',
+                                   (ActionStatus.ACTIVE.name, ActionStatus.PROVIDER_HELD.name)).fetchall()
         for action in actions:
             self.queryRecordedStatus(action['action_id'], force_update=True)
 
@@ -585,12 +585,16 @@ class AsyncActionManager(ActionManager):
         return ActionStatus[action['action_status']], action['api_status']
 
     def getActiveActions(self):
-        """
-        Get all active actions and returning a list of dictionaries, each containing "api_key", "api_status" and other custom fields defined on a per-action basis
+        """List ACTIVE and PROVIDER_HELD actions without contacting providers.
+
+        Take no arguments. Return list[dict] with job_id (int workflow ID),
+        api_key (str | None provider ID), api_status (str | None raw state),
+        and the action definition's getInfo fields.
         """
         out = []
         with self.conn as conn:
-            entries = conn.execute(f"SELECT job_id, api_key, api_status, details FROM {self.table_name} WHERE action_status = ?", (ActionStatus.ACTIVE.name,) ).fetchall()
+            entries = conn.execute(f"SELECT job_id, api_key, api_status, details FROM {self.table_name} WHERE action_status IN (?, ?)",
+                                   (ActionStatus.ACTIVE.name, ActionStatus.PROVIDER_HELD.name)).fetchall()
             for entry in entries:
                 action = _unser(entry['details'])
                 dc = action.getInfo()

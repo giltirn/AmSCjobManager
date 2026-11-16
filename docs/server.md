@@ -341,7 +341,7 @@ status, and `[]` matches none. Filtering by `COMPLETED` selects finished workflo
 not workflows whose head completed an intermediate step. Refresh happens before
 filtering, so newly observed failures/completions can appear immediately.
 
-Enums are returned as their string names. Internal serialized workflows are
+Enums are returned as their string names. Serialized action definitions are
 excluded. The MCP structured result wraps the list in `result`, following the
 SDK's schema convention; the CLI unwraps this field into each operation's result.
 
@@ -351,7 +351,8 @@ when one workflow was selected. It propagates statuses to workflow records witho
 advancing steps. Failed polls log errors and retain cached values. Compute head
 status `ACTIVE` includes provider states `new`, `queued`, and `active`, so inspect
 `api_status` to distinguish queueing from execution. `workflow_status` remains
-`ACTIVE` between steps; `head_action_status` can be `SCHEDULING` or `COMPLETED`.
+`ACTIVE` between steps; `head_action_status` can be `SCHEDULING`, `PROVIDER_HELD`,
+or `COMPLETED`. A held head remains monitored and can be canceled normally.
 
 ## JSON sequences and results
 

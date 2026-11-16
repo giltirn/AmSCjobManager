@@ -14,7 +14,10 @@ class ComputeActions(AsyncActionManager):
         #3"completed"
         #4"failed"
         #5"canceled"
+        # TODO: Live-test Slurm dependency jobs through IRI to establish whether
+        # dependency waits are reported as held or queued by each implementation.
         smap = {"new": ActionStatus.ACTIVE, "queued" : ActionStatus.ACTIVE, "active" : ActionStatus.ACTIVE,
+                "held": ActionStatus.PROVIDER_HELD,
                 "completed" : ActionStatus.COMPLETED, "failed" : ActionStatus.FAILED, "canceled" : ActionStatus.CANCELED }
         super().__init__(connection, "computes", smap, **kwargs)
     def _queryStatusInternal(self, machine, api_key):

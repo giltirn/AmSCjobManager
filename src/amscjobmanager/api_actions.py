@@ -12,7 +12,7 @@ import subprocess
 import tempfile
 
 from . import api_general as api
-from .actions_base import replaceJobIdSubstring
+from .actions_base import ActionDefinition, replaceJobIdSubstring
 from .globals import checkSafePath
 from .local_api import localCopyFile
 
@@ -223,7 +223,7 @@ APIOperation = Annotated[
 
 
 @dataclass(config=ConfigDict(extra="forbid"))
-class APIAction:
+class APIAction(ActionDefinition):
     """An ordered sequence of synchronous, replay-safe workflow operations.
 
     operations (list) contains MakeDirectory, WriteFile, UploadFile, DownloadFile,

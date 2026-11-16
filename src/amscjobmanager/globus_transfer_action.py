@@ -54,7 +54,7 @@ class GlobusDataTransfers(AsyncActionManager):
         #"INACTIVE" The task has been suspended and will not continue without intervention. Currently, only credential expiration will cause this state.
         #"SUCCEEDED"  The task completed successfully.
         #"FAILED"  The task or one of its subtasks failed, expired, or was canceled.
-        smap = { "ACTIVE" : ActionStatus.ACTIVE, "INACTIVE" : ActionStatus.FAILED, "SUCCEEDED" : ActionStatus.COMPLETED, "FAILED" : ActionStatus.FAILED }    
+        smap = { "ACTIVE" : ActionStatus.ACTIVE, "INACTIVE" : ActionStatus.PROVIDER_HELD, "SUCCEEDED" : ActionStatus.COMPLETED, "FAILED" : ActionStatus.FAILED }
         super().__init__(connection, "transfers", smap, **kwargs)
     def _queryStatusInternal(self, machine, api_key):
         return globusTransferStatus(api_key)

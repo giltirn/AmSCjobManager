@@ -63,7 +63,7 @@ See [troubleshooting](troubleshooting.md).
 | Parameter | Meaning |
 | --- | --- |
 | `filename=None` | In-memory workflow DB. Use an on-disk filename for remote recovery. |
-| `max_workflows_active=10` | Limit used when automatically starting pending workflows. `SCHEDULING`, `ACTIVE`, and `CANCELING` heads occupy slots. `0` disables automatic starts. |
+| `max_workflows_active=10` | Limit used when automatically starting pending workflows. ACTIVE and CANCELING workflows occupy slots, including those with provider-held heads. `0` disables automatic starts. |
 | `poll_freq=30` | Worker delay in seconds between provider API status requests or recovery attempts. `0` uses a 0.01-second minimum delay. Set at manager construction; recorded-status reads do not change it. It is not an API request timeout. |
 
 The manager loop also sleeps between workflow passes. API requests and blocking
@@ -90,26 +90,28 @@ call `startWorkflows()` and `progressActiveState()` themselves.
 | `PENDING` | Workflow has been enqueued but not started. |
 | `SCHEDULING` | Scheduling intent is durable; submission, deferred resource checks, or submission reconciliation is in progress. |
 | `ACTIVE` | Remote action is live, including jobs queued by the remote scheduler. |
+| `PROVIDER_HELD` | Provider accepted the action but suspended execution. It remains live, polled, and cancellable. |
 | `COMPLETED` | Head action succeeded. There may be another workflow step to start. |
 | `FAILED` | Action failed or submission attempts were exhausted. The workflow will not advance automatically. |
 | `CANCELING` | Cancellation intent is durable and remote cancellation/reconciliation remains unresolved. |
 | `CANCELED` | Workflow has been canceled, or a remotely canceled compute action has stopped its progression. |
 
 `jobState(job_id)` returns a dictionary containing the head-action state and
-class, action ID/type, workflow stage, group, timestamps, and serialized workflow.
+class, action ID/type, workflow stage, group, timestamps, and overall workflow
+status. Serialized action definitions are not loaded or returned.
 The stage is `-1` before the first action and increases as steps are selected.
 
-`jobStatus(job_id)` returns a coarser workflow status. It exposes `PENDING`,
-`FAILED`, `CANCELING`, and `CANCELED` directly. It returns `COMPLETED` only when
-the workflow has finished all steps and its head class is `NONE`; otherwise it
-returns `ACTIVE`. In particular, a head in `SCHEDULING` is reported as an active
-workflow. Inspect `head_action_status` for that distinction.
+`jobStatus(job_id)` reads the persisted overall workflow status: PENDING,
+ACTIVE, COMPLETED, FAILED, CANCELING, or CANCELED. Workflows remain ACTIVE while
+their head is SCHEDULING, ACTIVE, PROVIDER_HELD, or an intermediate COMPLETED
+stage. COMPLETED is recorded after progression advances past the final stage.
+Inspect `head_action_status` for the separate execution state.
 
 Use `headActionStatus(job_id)` for the recorded head action status, including
 `SCHEDULING` and intermediate `COMPLETED`. With `return_api_status=True` it
 returns `(action_status, api_status)`, where the latter is the provider status
 string or `None` when unavailable. Set `force_poll=True` to wake supervisors
-for all active heads and copy their currently recorded status without advancing
+for all active or provider-held heads and copy their currently recorded status without advancing
 workflow steps. The requested polls may finish after this call returns; read
 again to observe their results. Failed polls retain the last known state and
 are logged.
@@ -119,9 +121,13 @@ only the provider status distinguishes waiting from execution.
 
 Remote compute status `canceled` maps to `CANCELED`. Globus status `FAILED`
 includes remotely canceled transfers, so an external Globus cancellation is
-seen as `FAILED`. Globus `INACTIVE` currently also maps to `FAILED`, even though
-the suspended remote task may still exist. A workflow canceled through
-`cancelJob()` retains a `CANCELED` workflow head.
+seen as `FAILED`. Globus `INACTIVE` and IRI compute `held` map to
+`PROVIDER_HELD`. Held actions continue polling and may return to ACTIVE or
+reach a terminal status without resubmission. Their workflows remain ACTIVE
+and cannot advance to later stages until the held action completes successfully.
+Normal cancellation stops held actions; terminal failed transfers require no
+remote cancellation. Canceling a workflow preserves previously completed action
+history while recording the overall workflow as CANCELING or CANCELED.
 
 ## Submission failures and maintenance
 

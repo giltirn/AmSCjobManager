@@ -21,7 +21,6 @@ import unittest
 from unittest.mock import Mock, patch
 
 from amscjobmanager import logging as manager_logging, local_api
-from amscjobmanager.action_manager import _unser
 from amscjobmanager.api_actions import APIAction, MakeDirectory, WriteFile, UploadFile, DownloadFile, CopyFile, RunLocal
 from amscjobmanager.compute_actions import ExecuteBatchScriptComputeAction, ExecuteJobComputeAction
 from amscjobmanager.globus_transfer_action import GlobusTransfer
@@ -85,8 +84,8 @@ class MCPWorkflowTests(unittest.IsolatedAsyncioTestCase):
     async def test_native_stage_submission_idempotency_and_cli_schema(self):
         """Enqueue every built-in stage through MCP without executing any remote work.
 
-        Retry a changed payload under the same key, inspect persisted native
-        objects through public state, and verify discovered schemas drive CLI
+        Retry a changed payload under the same key, inspect workflow metadata
+        through public state, and verify discovered schemas drive CLI
         parsing/help for nested API operations and all stage alternatives.
         """
         from amscjobmanager.server.cli import parse_tool_arguments
@@ -103,7 +102,7 @@ class MCPWorkflowTests(unittest.IsolatedAsyncioTestCase):
             workflow_id = result.structured_content['workflow_id']
             self.assertEqual(result.structured_content['workflow_status'], 'PENDING')
             original = server.runtime.manager(lambda jobs: jobs.jobState(workflow_id))
-            self.assertEqual(_unser(original['workflow']), native)
+            self.assertNotIn('workflow', original)
             retry = await call_mcp(client, 'submit_workflow', {'stages': stages[:1], 'job_group': 'changed', 'submission_key': 'request'})
             self.assertEqual(retry.structured_content['workflow_id'], workflow_id)
             self.assertEqual(server.runtime.manager(lambda jobs: jobs.jobState(workflow_id)), original)
@@ -232,8 +231,9 @@ class MCPWorkflowTests(unittest.IsolatedAsyncioTestCase):
         """Cancel a tool-submitted transfer through its real manager/reconciliation path.
 
         Model only the remote Globus service: submission returns an ID, polling
-        reports ACTIVE, and cancellation changes it to FAILED (Globus represents
-        canceled tasks as failed). Workflow state must eventually become CANCELED.
+        reports INACTIVE, and cancellation changes it to FAILED (Globus represents
+        canceled tasks as failed). Listing must expose a PROVIDER_HELD head in an
+        ACTIVE workflow, and cancellation must eventually produce CANCELED.
         """
         server = await self._startServer(10)
         submitted, canceled = Event(), Event()
@@ -245,7 +245,7 @@ class MCPWorkflowTests(unittest.IsolatedAsyncioTestCase):
 
         def status(task_id):
             """Return the fake provider state for task_id (str)."""
-            return 'FAILED' if canceled.is_set() else 'ACTIVE'
+            return 'FAILED' if canceled.is_set() else 'INACTIVE'
 
         with patch('amscjobmanager.globus_transfer_action.globusCopy', side_effect=transfer), \
              patch('amscjobmanager.globus_transfer_action.globusTransferStatus', side_effect=status), \
@@ -258,6 +258,17 @@ class MCPWorkflowTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(response.is_error)
                 workflow_id = response.structured_content['workflow_id']
                 self.assertTrue(await asyncio.to_thread(submitted.wait, 3))
+                # Wait for the head projection as well as provider acceptance;
+                # workflow ACTIVE also covers the preceding SCHEDULING interval.
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline:
+                    record = await self._waitWorkflow(client, workflow_id, 'ACTIVE')
+                    if record['head_action_status'] == 'PROVIDER_HELD':
+                        break
+                    await asyncio.sleep(.02)
+                else:
+                    self.fail('Held transfer was not exposed by workflow listing')
+                self.assertEqual(record['api_status'], 'INACTIVE')
                 receipt = await client.call_tool('cancel_workflow', {'workflow_id': workflow_id})
                 self.assertFalse(receipt.is_error)
                 await self._waitWorkflow(client, workflow_id, 'CANCELED')

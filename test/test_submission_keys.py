@@ -55,14 +55,19 @@ class SubmissionKeyTests(unittest.TestCase):
     def test_existing_key_preserves_original_workflow_and_group(self):
         """Return the original ID without replacing payload, metadata or progress.
 
-        Supply a different stage list and group on retry. Compare complete public
-        records so even timestamps and stored workflow bytes must stay unchanged.
+        Supply a different stage list and group on retry. Compare public metadata
+        and persisted action rows so payloads, IDs, and timestamps remain unchanged.
         """
         first = self.jobs.enqueueJob(self.action, job_group='original', submission_key='request')
         original = self.jobs.jobState(first)
+        with self.jobs.conn as conn:
+            actions = conn.execute('SELECT * FROM actions WHERE job_id = ? ORDER BY workflow_stage', (first,)).fetchall()
         retry = self.jobs.enqueueJob([self.action, self.action], job_group='changed', submission_key='request')
         self.assertEqual(retry, first)
         self.assertEqual(self.jobs.jobState(first), original)
+        with self.jobs.conn as conn:
+            self.assertEqual(conn.execute('SELECT * FROM actions WHERE job_id = ? ORDER BY workflow_stage',
+                                          (first,)).fetchall(), actions)
         self.assertEqual(len(self.jobs.listWorkflows()), 1)
 
     def test_keys_are_exact_optional_strings(self):

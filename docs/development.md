@@ -170,9 +170,9 @@ Implementations own their database schemas and transitions. Its public methods
 are `startOrResumeAction`, `cancelOrResumeCancelingAction`, `hasAction`, `getMaxActionId`, `queryRecordedStatus`,
 `updateStatuses`, `waitForAction`, `getActiveActions`, `getActionInfo`, and
 `stopWorkers`.
-`JobData` uses `getMaxActionId` to recover its shared ID allocator without reading
-implementation tables. Internal reconciliation hooks are not part of the interface.
-JobData always allocates the action ID before initial execution and supplies the
+`getMaxActionId` reports execution history, not IDs of stages that are still queued.
+Internal reconciliation hooks are not part of the interface.
+JobData allocates all action IDs as primary keys when the workflow is enqueued and supplies the
 same ID during recovery. "Resume" in `startOrResumeAction` specifically means
 recovering supervision from persisted state after a worker stopped, for example
 when constructing a new manager after shutdown or process failure. Normal execution needs no
@@ -209,8 +209,8 @@ transactions through JobData's shared `LockedConnection` context manager.
 Use `with self.conn as conn:` for every SQL operation and fetch results before
 leaving the block. It yields a normal SQLite connection; neither connections
 nor cursors require SQL-method wrappers. Never hold its lock across API I/O or
-user input. JobData construction calls `resumeActions` after its tables and ID
-allocator are initialized, restoring workers for current unfinished heads,
+user input. JobData construction calls `resumeActions` after its tables and head
+view are initialized, restoring workers for current unfinished heads,
 including ACTIVE actions. Workflow starting/progression does not trigger this
 recovery pass. JobManager is single-use; neither shutdown nor failure can be
 cleared by calling start() on the same instance.

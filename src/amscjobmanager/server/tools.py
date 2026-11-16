@@ -23,13 +23,13 @@ class WorkflowSummary(BaseModel):
             scheduling and completed intermediate steps; COMPLETED means done.
         workflow_stage (int): Zero-based action position, -1 before starting,
             or the action count after full completion.
-        head_action_id (int | None): Positive action ID, independent of the
-            workflow ID; None if no action is currently assigned.
+        head_action_id (int | None): Positive action ID, assigned at enqueue
+            independently of the workflow ID; None after full completion.
         head_action_type (str | None): Action class name, or 'NoneType' after
             normal completion. Nullable to represent unset stored fields.
         head_action_class (str): ActionClass name: COMPUTE, TRANSFER, API, or NONE.
         head_action_status (str): Exact head ActionStatus name, including
-            SCHEDULING and intermediate COMPLETED states.
+            SCHEDULING, PROVIDER_HELD, and intermediate COMPLETED states.
         api_status (str | None): Provider status such as 'queued' or 'ACTIVE',
             preserving provider casing; None if no head status is recorded.
             This is not the complete API response body.
@@ -41,10 +41,10 @@ class WorkflowSummary(BaseModel):
     job_group: str | None = Field(description='Optional group supplied when the workflow was enqueued.')
     workflow_status: str = Field(description='Overall status. COMPLETED means every step finished; ACTIVE includes queued work and intermediate completion.')
     workflow_stage: int = Field(description='Zero-based action position; -1 before starting, or the action count after full completion.')
-    head_action_id: int | None = Field(description='Current positive action ID, independent of workflow ID; null when none is assigned.')
+    head_action_id: int | None = Field(description='Current positive action ID, assigned at enqueue and independent of workflow ID; null after full workflow completion.')
     head_action_type: str | None = Field(description='Head action class name; NoneType after normal workflow completion.')
     head_action_class: str = Field(description='Action category: COMPUTE, TRANSFER, API, or NONE.')
-    head_action_status: str = Field(description='Exact head status, including SCHEDULING and intermediate COMPLETED.')
+    head_action_status: str = Field(description='Exact head status, including SCHEDULING, PROVIDER_HELD, and intermediate COMPLETED.')
     api_status: str | None = Field(description='Recorded provider status with original casing, such as queued or ACTIVE; null if unknown. Not the full API response.')
     last_status_change: int | None = Field(description='Recorded Unix timestamp in whole seconds; not necessarily the last API poll time.')
 

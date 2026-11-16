@@ -63,9 +63,11 @@ require a configured local sandbox or `/tmp`, unless the caller explicitly
 sets `allow_unsafe=True`. The staging root itself is authorized by configuration.
 
 Inspect the transfer's raw status and service event log using its task ID.
-Manager `FAILED` can represent a transfer's `INACTIVE` state, which may still
-need intervention or explicit cancellation. A remotely canceled transfer also
-appears as Globus `FAILED`.
+Globus `INACTIVE` maps to action status `PROVIDER_HELD`, which may need
+intervention or explicit cancellation. IRI compute `held` has the same action
+status. Their workflows remain ACTIVE and keep polling, so they can observe
+resumption without resubmitting. A remotely canceled transfer appears as Globus
+`FAILED` and maps to action status FAILED.
 
 The native `downloadFile()` implementation distinguishes plaintext from base64
 using a heuristic; some text can look like base64. Use a binary-preserving

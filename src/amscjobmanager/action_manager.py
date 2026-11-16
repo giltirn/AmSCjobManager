@@ -27,11 +27,12 @@ def _unser(ser):
 class ActionStatus(Enum):
     PENDING = 0 #not yet started
     SCHEDULING = 1 #submission is in progress and must be reconciled after a crash
-    ACTIVE = 2 #a live action (any status not failed or completed, e.g. queued, new, etc)
+    ACTIVE = 2 #provider-owned work progressing normally, including queued/new jobs
     COMPLETED = 3 #action completed successfully
     FAILED = 4 #action failed
     CANCELED = 5 #cancellation was requested or the action was removed before submission
     CANCELING = 6 #cancellation intent is persisted but not yet reconciled
+    PROVIDER_HELD = 7 #accepted work suspended by its provider; still live and cancellable
 
 
 class SimulatedCrash(RuntimeError):
@@ -252,11 +253,12 @@ class ActionManager(ABC):
 
     @abstractmethod
     def getMaxActionId(self) -> int | None:
-        """Find the highest stored action ID for recovery of the shared ID allocator.
+        """Find the highest action ID in this execution manager's records.
 
         Take no arguments. Return int for the highest global action ID in this
         manager's records, including terminal actions, or None if there are no
-        records. This avoids JobData inspecting the manager's tables directly.
+        records. Queued stages may have higher IDs in JobData's actions table;
+        execution-manager records are only created when a stage is started.
         Do not allocate a new ID or change any record."""
         raise NotImplementedError
 
@@ -293,11 +295,11 @@ class ActionManager(ABC):
         action_id (int) is the positive global action ID; check_freq (float,
         default 30) is the delay in seconds between reading its recorded state.
         Return ActionStatus, normally COMPLETED, FAILED or CANCELED, once it is
-        no longer SCHEDULING, ACTIVE or CANCELING. This convenience method does
+        no longer SCHEDULING, ACTIVE, PROVIDER_HELD or CANCELING. This convenience method does
         not start workers, perform provider polls or advance workflow stages.
         Exceptions retained by a worker, including simulated crashes, propagate
         to the caller. Call outside locks needed by the worker."""
-        unfinished = (ActionStatus.SCHEDULING, ActionStatus.ACTIVE, ActionStatus.CANCELING)
+        unfinished = (ActionStatus.SCHEDULING, ActionStatus.ACTIVE, ActionStatus.PROVIDER_HELD, ActionStatus.CANCELING)
         while True:
             status, _ = self.queryRecordedStatus(action_id)
             with self._worker_lock:
@@ -312,10 +314,10 @@ class ActionManager(ABC):
 
     @abstractmethod
     def getActiveActions(self) -> list[dict]:
-        """List recorded ACTIVE actions and their monitoring information.
+        """List provider-owned ACTIVE or PROVIDER_HELD actions and their monitoring information.
 
         Take no arguments. Return list[dict], one entry per recorded action
-        whose status is ACTIVE, without contacting providers. Each entry has
+        whose status is ACTIVE or PROVIDER_HELD, without contacting providers. Each entry has
         job_id (positive workflow ID, int), api_key (provider identifier, str or
         None), api_status (latest provider state, str or None), plus action-type
         details described by the implementation. List positions are not action

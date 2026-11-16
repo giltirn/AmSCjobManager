@@ -1,6 +1,6 @@
 from pathlib import Path
 import sqlite3
-from .actions_base import ActionClass, actionClass
+from .actions_base import ActionClass, actionClass, evaluateDependencies
 from .globus_transfer_action import GlobusDataTransfers
 from .compute_action_manager import ComputeActions
 from .api_action_manager import APIActions
@@ -128,8 +128,10 @@ class JobData:
         its original positive workflow ID without changing any records; None
         always creates a workflow. Return int, the workflow ID, not a stage index.
         Each action receives a distinct positive actions-table primary key.
-        Dependency metadata is stored but is not yet evaluated or checked against
-        producers. Use JobManager's lock while its background thread is running.
+        Dependency keys must already exist in earlier submissions or earlier
+        stages of this workflow. Required canceled producers are rejected, while
+        successful producers and noncanceled OR alternatives remain valid. A failed
+        validation rolls back the whole chain. Use JobManager's lock while running.
         """
         if submission_key is not None and not isinstance(submission_key, str):
             raise TypeError('submission_key must be a string or None')
@@ -151,8 +153,24 @@ class JobData:
                 'VALUES (?, ?, -1, ?, ?)',
                 (job_group, submission_key, ActionStatus.PENDING.name, now),
             ).lastrowid
+            def knownProducerNotCanceled(key: str) -> bool:
+                """Validate key (str) and return the inverse cancellation-specific flag.
+
+                Return bool: True if this key does not require canceled work.
+                Failed producers alone return True. Raise ValueError for an
+                unknown key, including self/forward references whose producer
+                has not been inserted yet.
+                """
+                state = self._dependencyKeyState(conn, key)
+                if not state['producer_is_known']:
+                    raise ValueError(f'Unknown dependency key {key!r}; submit producers before dependent actions')
+                return not state['depends_on_canceled_action']
+
             for stage, action in enumerate(workflow):
                 condition = getattr(action, 'depends_on', None)
+                depends_on_canceled_action = not evaluateDependencies(condition, knownProducerNotCanceled)
+                if depends_on_canceled_action:
+                    raise ValueError(f'Workflow stage {stage} requires canceled dependency producers')
                 conn.execute(
                     'INSERT INTO actions(job_id, workflow_stage, action_class, action_type, action_status, '
                     'depends_on, producer_key, details, last_status_change) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
@@ -162,55 +180,149 @@ class JobData:
                 )
             return job_id
 
-    def cancelJob(self, job_id: int, cancel_running: bool = True) -> None:
-        """Cancel a workflow while retaining its action definitions and completed history.
+    def _dependencyKeyState(self, conn: sqlite3.Connection, key: str) -> dict[str, bool]:
+        """Read producer existence, successful completion, and cancellation-specific blockage.
 
-        job_id (positive int) is a workflow database ID. cancel_running (bool,
-        default True) also requests cancellation of a scheduling, active, or
-        provider-held head. False abandons that execution without stopping it.
-        Return None. Persist intent before external operations; recovery retries
-        unfinished cancellation. Unknown IDs raise ValueError. Access under the
-        JobManager lock when running. Dependency cascades are not implemented.
+        conn (sqlite3.Connection) must be used inside this JobData's connection
+        context. key (str) is a nonunique producer label in this database.
+        Return dict[str, bool]: producer_is_known means at least one registered
+        action publishes this key; producer_has_completed means at least one
+        matching producer completed successfully. depends_on_canceled_action
+        means the key is known but all producers have action/workflow cancellation
+        recorded and none succeeded. Unknown keys return False for every field;
+        callers check producer_is_known separately. Failed producers alone do
+        not set either completion or cancellation. No remote calls or writes occur.
+        """
+        row = conn.execute("""
+            SELECT COUNT(*) > 0 AS producer_is_known,
+                   COALESCE(MAX(a.action_status = 'COMPLETED'), 0) AS producer_has_completed,
+                   COUNT(*) > 0 AND NOT COALESCE(MAX(a.action_status = 'COMPLETED' OR (
+                       a.action_status NOT IN ('CANCELING', 'CANCELED') AND
+                       j.workflow_status NOT IN ('CANCELING', 'CANCELED'))), 0) AS depends_on_canceled_action
+            FROM actions a JOIN jobs j ON j.job_id = a.job_id
+            WHERE a.producer_key = ?
+        """, (key,)).fetchone()
+        return {field: bool(row[field]) for field in
+                ('producer_is_known', 'producer_has_completed', 'depends_on_canceled_action')}
+
+    def _recordCancellationIntents(self, conn: sqlite3.Connection, job_ids: list[int]) -> list[int]:
+        """Persist requested cancellations and their dependency closure without provider calls.
+
+        conn (sqlite3.Connection) is inside this JobData's transaction. job_ids
+        (list[int]) supplies positive workflow IDs to cancel. Return sorted list[int] of affected
+        CANCELING workflow IDs, not stage positions. All heads enter pending
+        cancellation processing, including pending and completed ones. Action
+        rows remain unchanged until that processing. All new intents commit with
+        the caller's transaction; failed producers alone do not cascade.
+        """
+        pending = set(job_ids)
+        canceling = set()
+        while True:
+            # Persist one wave of workflow intents before evaluating consumers.
+            # Their unfinished producers can no longer satisfy dependencies.
+            for job_id in sorted(pending):
+                job = conn.execute('SELECT workflow_status FROM jobs WHERE job_id = ?', (job_id,)).fetchone()
+                if job is None:
+                    raise ValueError(f'Unknown job_id: {job_id}')
+                if job['workflow_status'] != ActionStatus.CANCELED.name:
+                    # Keep retries idempotent. Action status and submission
+                    # history are left for pending cancellation processing.
+                    conn.execute('UPDATE jobs SET workflow_status = ?, last_status_change = ? '
+                                 'WHERE job_id = ? AND workflow_status != ?',
+                                 (ActionStatus.CANCELING.name, int(time.time()),
+                                  job_id, ActionStatus.CANCELING.name))
+                    canceling.add(job_id)
+
+            # Ordinary passes without canceled producers need no graph scan.
+            conditions = conn.execute("""
+                SELECT a.job_id, a.depends_on FROM actions a JOIN jobs j ON j.job_id = a.job_id
+                WHERE j.workflow_status IN ('PENDING', 'ACTIVE')
+                  AND a.action_status != 'COMPLETED' AND a.depends_on IS NOT NULL
+            """).fetchall()
+            if not conditions:
+                return sorted(canceling)
+            canceled_producer = conn.execute("""
+                SELECT 1 FROM actions a JOIN jobs j ON j.job_id = a.job_id
+                WHERE a.producer_key IS NOT NULL AND a.action_status != 'COMPLETED'
+                  AND (a.action_status IN ('CANCELING', 'CANCELED') OR
+                       j.workflow_status IN ('CANCELING', 'CANCELED')) LIMIT 1
+            """).fetchone()
+            if canceled_producer is None:
+                return sorted(canceling)
+
+            # Determine which producer chains remain possible, ignoring failure
+            # but respecting cancellation and sequential stage ordering. Start
+            # from successful history and grow forward. Mere noncanceled key
+            # matches are insufficient: repeated keys can otherwise make a
+            # consumer count itself, or a circular pair, as its own alternative.
+            actions = conn.execute("""
+                SELECT a.job_id, a.workflow_stage, a.action_status, a.depends_on, a.producer_key
+                FROM actions a JOIN jobs j ON j.job_id = a.job_id
+                WHERE a.action_status = 'COMPLETED' OR (
+                    a.action_status NOT IN ('CANCELING', 'CANCELED') AND
+                    j.workflow_status NOT IN ('CANCELING', 'CANCELED'))
+                ORDER BY a.action_id
+            """).fetchall()
+            noncanceled_keys = {action['producer_key'] for action in actions
+                         if action['action_status'] == ActionStatus.COMPLETED.name and action['producer_key'] is not None}
+            reachable = {(action['job_id'], action['workflow_stage']) for action in actions
+                         if action['action_status'] == ActionStatus.COMPLETED.name}
+            unresolved = [action for action in actions if action['action_status'] != ActionStatus.COMPLETED.name]
+            while unresolved:
+                remaining = []
+                for action in unresolved:
+                    predecessor = (action['job_id'], action['workflow_stage'] - 1)
+                    condition = None if action['depends_on'] is None else json.loads(action['depends_on'])
+                    if (action['workflow_stage'] == 0 or predecessor in reachable) and evaluateDependencies(
+                            condition, noncanceled_keys.__contains__):
+                        reachable.add((action['job_id'], action['workflow_stage']))
+                        if action['producer_key'] is not None:
+                            noncanceled_keys.add(action['producer_key'])
+                    else:
+                        remaining.append(action)
+                if len(remaining) == len(unresolved):
+                    break
+                unresolved = remaining
+
+            # A lost dependency in any future stage cancels the whole consumer
+            # workflow, even when an earlier stage is currently executing.
+            pending = set()
+            for action in conditions:
+                depends_on_canceled_action = not evaluateDependencies(
+                    json.loads(action['depends_on']), noncanceled_keys.__contains__)
+                if depends_on_canceled_action:
+                    pending.add(action['job_id'])
+            if not pending:
+                return sorted(canceling)
+
+    def cancelJob(self, job_id: int) -> None:
+        """Cancel a workflow and consumers requiring its unfinished producers.
+
+        job_id (positive int) is a workflow database ID. Stop executing heads
+        throughout the cancellation cascade. Return None. Preserve successful
+        action history and OR alternatives with another noncanceled producer. Persist
+        the entire cascade before external calls; failures retain retryable intent
+        across retries and recovery.
+        Unknown IDs raise ValueError. Use JobManager's lock while running.
         """
         if type(job_id) is not int or job_id < 1:
             raise ValueError('job_id must be a positive integer')
-        if type(cancel_running) is not bool:
-            raise TypeError('cancel_running must be a boolean')
-
         with self.conn as conn:
-            job = conn.execute('SELECT * FROM workflow_heads WHERE job_id = ?', (job_id,)).fetchone()
-            if job is None:
-                raise ValueError(f'Unknown job_id: {job_id}')
-            if job['workflow_status'] == ActionStatus.CANCELED.name:
-                return
-            already_canceling = job['workflow_status'] == ActionStatus.CANCELING.name
-            needs_cancellation = ActionStatus[job['head_action_status']] in ActionStatusGroup.EXECUTING.value
-            remote_cancel = already_canceling or (cancel_running and needs_cancellation)
-
-            # Record chain-wide intent and close queued stages before releasing
-            # the lock. Preserve genuinely completed stages, including the head.
-            status = ActionStatus.CANCELING if remote_cancel else ActionStatus.CANCELED
-            now = int(time.time())
-            conn.execute('UPDATE jobs SET workflow_status = ?, last_status_change = ? WHERE job_id = ?',
-                         (status.name, now, job_id))
-            conn.execute('UPDATE actions SET action_status = ?, last_status_change = ? '
-                         'WHERE job_id = ? AND action_status = ?',
-                         (ActionStatus.CANCELED.name, now, job_id, ActionStatus.PENDING.name))
-            if job['head_action_id'] is not None and (needs_cancellation or already_canceling):
-                conn.execute('UPDATE actions SET action_status = ?, last_status_change = ? WHERE action_id = ?',
-                             (status.name, now, job['head_action_id']))
-
-        if remote_cancel:
+            canceling = self._recordCancellationIntents(conn, [job_id])
+        self._maybeSimulateCrash('workflow_cancellation_cascade_persisted')
+        if canceling:
             self._maybeSimulateCrash('job_head_canceling_persisted')
-            self.reconcileCancelingActions([job_id], raise_errors=True)
+            self.performPendingCancellations(canceling, raise_errors=True)
 
-    def reconcileCancelingActions(self, job_ids=None, *, raise_errors=False):
-        """Finish durable workflow cancellation through the head's action manager.
+    def performPendingCancellations(self, job_ids=None, *, raise_errors=False):
+        """Perform pending workflow cancellations locally or through their action managers.
 
         job_ids (list[int] | None) restricts positive workflow IDs; None selects
         every CANCELING workflow. raise_errors (bool, default False) propagates
         API errors instead of logging and retrying later. Return None. Completed
-        historical actions remain unchanged; dependency propagation is disabled.
+        historical actions remain unchanged; pending stages are canceled locally.
+        Executing heads are canceled through their action managers. Dependency
+        cascades are already persisted when cancellation intent is recorded.
         """
         with self.conn as conn:
             query = 'SELECT * FROM workflow_heads WHERE workflow_status = ?'
@@ -222,22 +334,38 @@ class JobData:
 
         for job in jobs:
             try:
-                # The definition and preallocated ID suffice even if a crash
-                # occurred before the action manager created its own record.
+                # Only executing heads need an action-manager request. PENDING
+                # means no scheduling intent was issued, while completed/failed
+                # history must retain its actual outcome.
                 action_id = job['head_action_id']
-                if action_id is not None:
+                head_status = ActionStatus[job['head_action_status']]
+                executing = head_status in ActionStatusGroup.EXECUTING.value or head_status == ActionStatus.CANCELING
+                resolved_status = head_status
+                if executing:
                     manager = self.action_man[ActionClass[job['head_action_class']]]
                     manager.cancelOrResumeCancelingAction(
                         action_id, recovery=(_unser(job['action_details']), job['job_id']))
-                    status, _ = manager.queryRecordedStatus(action_id)
-                    if status in ActionStatusGroup.EXECUTING.value or status == ActionStatus.CANCELING:
+                    resolved_status, _ = manager.queryRecordedStatus(action_id)
+                    if resolved_status in ActionStatusGroup.EXECUTING.value or resolved_status == ActionStatus.CANCELING:
+                        # Copy observed progress only after the action manager
+                        # has recorded it. Workflow intent already makes a crash
+                        # before this copy safe to recover.
+                        if resolved_status != head_status:
+                            with self.conn as conn:
+                                conn.execute('UPDATE actions SET action_status = ?, last_status_change = ? WHERE action_id = ?',
+                                             (resolved_status.name, int(time.time()), action_id))
                         continue
 
                 self._maybeSimulateCrash('action_canceled_before_job_head_update')
                 with self.conn as conn:
+                    # Finish local bookkeeping atomically after the remote request
+                    # resolves (or immediately when no provider work is required).
+                    if resolved_status != head_status:
+                        conn.execute('UPDATE actions SET action_status = ?, last_status_change = ? WHERE action_id = ?',
+                                     (resolved_status.name, int(time.time()), action_id))
                     conn.execute('UPDATE actions SET action_status = ?, last_status_change = ? '
-                                 'WHERE action_id = ? AND action_status = ?',
-                                 (ActionStatus.CANCELED.name, int(time.time()), action_id, ActionStatus.CANCELING.name))
+                                 'WHERE job_id = ? AND action_status = ?',
+                                 (ActionStatus.CANCELED.name, int(time.time()), job['job_id'], ActionStatus.PENDING.name))
                     conn.execute('UPDATE jobs SET workflow_status = ?, last_status_change = ? WHERE job_id = ?',
                                  (ActionStatus.CANCELED.name, int(time.time()), job['job_id']))
             except SimulatedCrash:
@@ -245,7 +373,7 @@ class JobData:
             except Exception as exc:
                 if raise_errors:
                     raise
-                wfmanLog(f"Could not reconcile cancellation for job {job['job_id']}: {exc}")
+                wfmanLog(f"Could not perform pending cancellation for job {job['job_id']}: {exc}")
 
     def jobState(self, job_id):
         """Read a workflow and derive its head fields from the ordered action rows.
@@ -400,6 +528,7 @@ class JobData:
         """
         expected = (expected_status,) if isinstance(expected_status, ActionStatus) else expected_status
         with self.conn as conn:
+            observed_cancellation = set()
             for status, timestamp, action_id in updates:
                 changed = conn.execute('UPDATE actions SET action_status = ?, last_status_change = ? '
                                        'WHERE action_id = ? AND action_status IN (' + ','.join('?' for _ in expected) + ')',
@@ -407,30 +536,45 @@ class JobData:
                 if changed.rowcount == 0:
                     continue
 
+                if status in (ActionStatus.CANCELING.name, ActionStatus.CANCELED.name):
+                    observed_cancellation.add(conn.execute('SELECT job_id FROM actions WHERE action_id = ?',
+                                                           (action_id,)).fetchone()[0])
+
                 # Keep the execution projection and overall outcome in one
                 # transaction. A late poll must never clear cancellation intent.
-                conn.execute('UPDATE jobs SET workflow_status = '
-                             '(SELECT workflow_status FROM action_status_mapping WHERE action_status = ?), '
+                # A canceled head still needs workflow reconciliation to close
+                # queued stages, so its workflow first records CANCELING.
+                conn.execute("UPDATE jobs SET workflow_status = CASE WHEN ? = 'CANCELED' THEN 'CANCELING' ELSE "
+                             '(SELECT workflow_status FROM action_status_mapping WHERE action_status = ?) END, '
                              'last_status_change = ? '
                              'WHERE (job_id, workflow_stage) = '
                              '(SELECT job_id, workflow_stage FROM actions WHERE action_id = ?) '
                              'AND workflow_status IN (?, ?)',
-                             (status, timestamp, action_id, ActionStatus.PENDING.name, ActionStatus.ACTIVE.name))
+                             (status, status, timestamp, action_id, ActionStatus.PENDING.name, ActionStatus.ACTIVE.name))
 
-    def progressWorkflows(self, condition: Tuple[str, list | None]):
+            if observed_cancellation:
+                self._recordCancellationIntents(conn, list(observed_cancellation))
+
+    def progressWorkflows(self, condition: Tuple[str, list | None], *, max_starts: int | None = None):
         """Start or advance selected sequential workflows using their stored actions.
 
         condition is ('COMPLETE', None) to advance completed heads, or
-        ('VALID_IN', list[int]) to start/advance specified workflow database IDs.
-        Return None. Persist SCHEDULING on the selected action before dispatch;
-        retain prior statuses and preallocated IDs. Dependency fields are ignored.
+        ('VALID_IN', list[int]) to start/advance specified workflow database IDs,
+        or ('PENDING', None) for all pending workflows in ID order. max_starts
+        (int | None) caps eligible starts in this pass; None is unlimited. Return
+        None. Unsatisfied conditions remain PENDING without workers or capacity
+        use. Persist SCHEDULING before dispatch; retain prior statuses and IDs.
         """
         pending_actions = []
         with self.conn as conn:
             # Select current heads without consulting any action-manager tables.
-            query = 'SELECT * FROM workflow_heads WHERE head_action_class != ? AND workflow_status IN (?, ?)'
+            query = ('SELECT job_id, workflow_stage, head_action_status FROM workflow_heads '
+                     'WHERE head_action_class != ? AND workflow_status IN (?, ?)')
             params = [ActionClass.NONE.name, ActionStatus.PENDING.name, ActionStatus.ACTIVE.name]
-            if condition == ('COMPLETE', None):
+            if condition == ('PENDING', None):
+                query += ' AND workflow_status = ? AND head_action_status = ?'
+                params.extend([ActionStatus.PENDING.name, ActionStatus.PENDING.name])
+            elif condition == ('COMPLETE', None):
                 query += ' AND head_action_status = ?'
                 params.append(ActionStatus.COMPLETED.name)
             elif condition[0] == 'VALID_IN' and isinstance(condition[1], list):
@@ -439,25 +583,42 @@ class JobData:
                 params.extend([*condition[1], ActionStatus.PENDING.name, ActionStatus.COMPLETED.name])
             else:
                 raise ValueError(f'Unknown condition {condition}')
-            jobs = conn.execute(query, params).fetchall()
+            jobs = conn.execute(query + ' ORDER BY job_id', params).fetchall()
+            completed = {}
+
+            def completedProducer(key: str) -> bool:
+                """Return whether key (str) has a successful producer, cached for this pass."""
+                if key not in completed:
+                    completed[key] = self._dependencyKeyState(conn, key)['producer_has_completed']
+                return completed[key]
 
             for job in jobs:
+                if max_starts is not None and len(pending_actions) >= max_starts:
+                    break
                 # PENDING selects its current action; COMPLETED advances once.
                 # The -1 pre-start convention becomes stage zero on first start.
                 stage = max(job['workflow_stage'], 0)
                 if job['head_action_status'] == ActionStatus.COMPLETED.name:
                     stage += 1
-                action = conn.execute('SELECT * FROM actions WHERE job_id = ? AND workflow_stage = ?',
+                action = conn.execute('SELECT action_id, action_class, depends_on FROM actions WHERE job_id = ? AND workflow_stage = ?',
                                       (job['job_id'], stage)).fetchone()
                 now = int(time.time())
-                workflow_status = ActionStatus.COMPLETED if action is None else ActionStatus.ACTIVE
-                conn.execute('UPDATE jobs SET workflow_stage = ?, workflow_status = ?, last_status_change = ? WHERE job_id = ?',
-                             (stage, workflow_status.name, now, job['job_id']))
-                if action is None:
+                ready = action is None or evaluateDependencies(
+                    None if action['depends_on'] is None else json.loads(action['depends_on']), completedProducer)
+                workflow_status = (ActionStatus.COMPLETED if action is None else
+                                   ActionStatus.ACTIVE if ready else ActionStatus.PENDING)
+                head_stage = -1 if not ready and job['workflow_stage'] == -1 else stage
+                conn.execute('UPDATE jobs SET workflow_stage = ?, workflow_status = ?, last_status_change = ? '
+                             'WHERE job_id = ? AND (workflow_stage != ? OR workflow_status != ?)',
+                             (head_stage, workflow_status.name, now, job['job_id'], head_stage, workflow_status.name))
+                if action is None or not ready:
                     continue
                 conn.execute('UPDATE actions SET action_status = ?, last_status_change = ? WHERE action_id = ?',
                              (ActionStatus.SCHEDULING.name, now, action['action_id']))
-                pending_actions.append((ActionClass[action['action_class']], _unser(action['details']),
+                # Blocked candidates require metadata only; load executable
+                # definitions after eligibility and capacity have been checked.
+                details = conn.execute('SELECT details FROM actions WHERE action_id = ?', (action['action_id'],)).fetchone()[0]
+                pending_actions.append((ActionClass[action['action_class']], _unser(details),
                                         job['job_id'], action['action_id']))
 
         self._maybeSimulateCrash('job_head_scheduling_persisted')
@@ -480,23 +641,21 @@ class JobData:
         self._recordActionStatuses(updates, ActionStatus.SCHEDULING)
 
     def startWorkflows(self, job_ids: list | None = None):
-        """Start selected pending workflows or automatically fill available capacity.
+        """Start dependency-ready pending workflows or automatically fill capacity.
 
-        job_ids (list[int] | None) contains workflow database IDs. None starts
-        pending workflows in ID order up to max_workflows_active; an explicit
-        list bypasses that cap. Return None. Recover scheduling heads first.
-        Dependency conditions are not yet checked.
+        job_ids (list[int] | None) contains workflow database IDs. None considers
+        all pending workflows in ID order, counting only eligible starts toward
+        max_workflows_active. An explicit list bypasses that cap but still checks
+        dependencies. Return None. Recover scheduling heads first; blocked work
+        cannot hide ready workflows behind the automatic scheduling limit.
         """
-        self.reconcileSchedulingActions()
+        self.submitSchedulingActions()
         if job_ids is None:
             with self.conn as conn:
                 count = conn.execute('SELECT COUNT(*) FROM jobs WHERE workflow_status IN (?, ?)',
                                      (ActionStatus.ACTIVE.name, ActionStatus.CANCELING.name)).fetchone()[0]
-                remaining = max(0, self.max_workflows_active - count)
-                rows = conn.execute('SELECT job_id FROM jobs WHERE workflow_status = ? '
-                                    'ORDER BY job_id LIMIT ?', (ActionStatus.PENDING.name, remaining)).fetchall()
-                job_ids = [row['job_id'] for row in rows]
-        if job_ids:
+            self.progressWorkflows(('PENDING', None), max_starts=max(0, self.max_workflows_active - count))
+        elif job_ids:
             self.progressWorkflows(('VALID_IN', job_ids))
 
     def progressActiveWorkflows(self):
@@ -507,11 +666,13 @@ class JobData:
         """
         self.progressWorkflows(('COMPLETE', None))
 
-    def reconcileSchedulingActions(self):
-        """Recover SCHEDULING heads and copy their managers' recorded execution status.
+    def submitSchedulingActions(self):
+        """Start or recover workers for SCHEDULING heads and copy their recorded status.
 
-        Take no arguments; return None. Reuse existing workers or restore them
-        after a crash using the action row's original ID and definition.
+        Take no arguments; return None without waiting for API work. Workers
+        submit compute/transfer actions or execute API sequences. Reuse existing
+        workers or restore them after a crash using the action row's original ID
+        and definition; action managers recover previously accepted submissions.
         """
         with self.conn as conn:
             jobs = conn.execute('SELECT * FROM workflow_heads WHERE head_action_status = ? AND workflow_status = ?',
@@ -566,9 +727,9 @@ class JobData:
         force_poll (bool, default False) requests earlier polls without waiting.
         Return None. Existing workers progress independently of these calls.
         """
-        self.reconcileCancelingActions()
-        self.reconcileSchedulingActions()
+        self.submitSchedulingActions()
         self.progressActiveActions(force_poll=force_poll)
+        self.performPendingCancellations()
         self.progressActiveWorkflows()
 
     def countWorkflowsWithStatus(self, statuses: ActionStatus | list[ActionStatus]):
@@ -607,23 +768,24 @@ class JobData:
             manager.stopWorkers()
 
     def resumeActions(self) -> None:
-        """Restore execution supervision for current unfinished heads after reopening.
+        """Recover workflow cancellations before restoring ordinary execution supervision.
 
-        Take no arguments; return None. Restore SCHEDULING, ACTIVE, PROVIDER_HELD,
-        and CANCELING heads using their existing IDs. Do not start pending stages
-        or restart historical actions abandoned with cancel_running=False.
+        Take no arguments; return None. CANCELING workflows use the same JobData
+        cancellation processing as initial cancellation, including heads that
+        never started or have completed. Restore workers only for unfinished ACTIVE
+        workflows. Do not submit pending stages or restart terminal workflows.
         """
+        self.performPendingCancellations()
         with self.conn as conn:
-            jobs = conn.execute('SELECT * FROM workflow_heads WHERE workflow_status = ? OR '
-                                '(workflow_status = ? AND (head_action_status IN '
+            jobs = conn.execute('SELECT * FROM workflow_heads WHERE workflow_status = ? AND '
+                                '(head_action_status IN '
                                 "(SELECT action_status FROM action_status_groups WHERE group_name = 'EXECUTING') "
-                                'OR head_action_status = ?))',
-                                (ActionStatus.CANCELING.name, ActionStatus.ACTIVE.name,
-                                 ActionStatus.CANCELING.name)).fetchall()
+                                'OR head_action_status = ?)',
+                                (ActionStatus.ACTIVE.name, ActionStatus.CANCELING.name)).fetchall()
         for job in jobs:
             action = _unser(job['action_details'])
             manager = self.action_man[ActionClass[job['head_action_class']]]
-            if job['workflow_status'] == ActionStatus.CANCELING.name or job['head_action_status'] == ActionStatus.CANCELING.name:
+            if job['head_action_status'] == ActionStatus.CANCELING.name:
                 manager.cancelOrResumeCancelingAction(job['head_action_id'], recovery=(action, job['job_id']))
             else:
                 manager.startOrResumeAction(action, job['job_id'], job['head_action_id'])

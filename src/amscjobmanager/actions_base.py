@@ -86,8 +86,9 @@ class ActionDefinition:
     AND/OR, with nested lists acting as parentheses and normal AND precedence.
     None means no explicit prerequisites. producer_key (str | None) labels
     successful completion, with repeated labels permitted.
-    Both fields are keyword-only. Currently these fields are persisted only:
-    dependency existence, readiness, and cancellation propagation are not checked.
+    Both fields are keyword-only. JobData checks producer existence at submission,
+    waits for successful completion before scheduling, and propagates cancellation
+    when required unfinished producers are canceled. Keys are database-scoped.
     """
 
     depends_on: DependencyCondition | None = field(default=None, kw_only=True)

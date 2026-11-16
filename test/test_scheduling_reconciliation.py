@@ -315,7 +315,7 @@ class SchedulingReconciliationTests(unittest.TestCase):
         # the remote action service before normal workflow progression can
         # continue.
         job_data = self._new_job_data(scheduling_retry_delay=scheduling_retry_delay)
-        job_data.reconcileSchedulingActions()
+        job_data.submitSchedulingActions()
         return job_data
 
     def _assert_persisted_states(self, job_data, job_id, job_status, action_status):
@@ -378,14 +378,14 @@ class SchedulingReconciliationTests(unittest.TestCase):
         # Construction performs the first attempt; the helper's observation
         # and this additional pass complete the three failed submissions.
         job_data = self._reopen_and_reconcile()
-        job_data.reconcileSchedulingActions()
+        job_data.submitSchedulingActions()
 
         self.assertEqual(self.harness.submission_count, 0)
         self._assert_persisted_states(
             job_data, job_id, ActionStatus.SCHEDULING, ActionStatus.SCHEDULING
         )
 
-        job_data.reconcileSchedulingActions()
+        job_data.submitSchedulingActions()
         self.assertEqual(job_data.jobStatus(job_id), ActionStatus.FAILED)
         self._assert_persisted_states(
             job_data, job_id, ActionStatus.FAILED, ActionStatus.FAILED
@@ -401,7 +401,7 @@ class SchedulingReconciliationTests(unittest.TestCase):
             job_data, job_id, ActionStatus.SCHEDULING, ActionStatus.SCHEDULING
         )
 
-        job_data.reconcileSchedulingActions()
+        job_data.submitSchedulingActions()
         self.assertEqual(self.harness.submission_count, 1)
         self._assert_reconciled_active(job_data, job_id)
 
@@ -419,7 +419,7 @@ class SchedulingReconciliationTests(unittest.TestCase):
             job_data, job_id, ActionStatus.SCHEDULING, ActionStatus.SCHEDULING
         )
 
-        job_data.reconcileSchedulingActions()
+        job_data.submitSchedulingActions()
         self.assertEqual(self.harness.submission_count, 1)
         self._assert_reconciled_active(job_data, job_id)
 
@@ -478,7 +478,7 @@ class SchedulingReconciliationTests(unittest.TestCase):
         self.assertIn("transfer-1", poll_log)
         self.assertIn("simulated remote status lookup failure", poll_log)
 
-        job_data.reconcileSchedulingActions()
+        job_data.submitSchedulingActions()
         self.assertEqual(self.harness.submission_count, 1)
         self._assert_reconciled_active(job_data, job_id)
 
@@ -490,7 +490,7 @@ class SchedulingReconciliationTests(unittest.TestCase):
         self.harness.failed_remote_lookup_count = 2
         job_data = self._new_job_data()
 
-        job_data.reconcileSchedulingActions()
+        job_data.submitSchedulingActions()
 
         self._assert_persisted_states(
             job_data, job_id, ActionStatus.SCHEDULING, ActionStatus.SCHEDULING
@@ -500,7 +500,7 @@ class SchedulingReconciliationTests(unittest.TestCase):
         self.assertIn(str(job_id), lookup_log)
         self.assertIn("simulated remote action lookup failure", lookup_log)
 
-        job_data.reconcileSchedulingActions() #this one should succeed
+        job_data.submitSchedulingActions() #this one should succeed
         self.assertEqual(self.harness.submission_count, 1)
         self._assert_reconciled_active(job_data, job_id)
 
@@ -571,11 +571,11 @@ class SchedulingReconciliationTests(unittest.TestCase):
         manager = job_data.action_man[ActionClass.TRANSFER]
         with patch.object(manager, "queryRecordedStatus", side_effect=RuntimeError("status outage")):
             job_data.startWorkflows([job_id])
-            job_data.reconcileSchedulingActions()
+            job_data.submitSchedulingActions()
         self.assertEqual(job_data.jobState(job_id)["head_action_status"], ActionStatus.SCHEDULING)
         self.assertEqual(self.harness.submission_count, 1)
 
-        job_data.reconcileSchedulingActions()
+        job_data.submitSchedulingActions()
         self._assert_reconciled_active(job_data, job_id)
         self.assertEqual(self.harness.submission_count, 1)
 
@@ -652,7 +652,7 @@ class SchedulingReconciliationTests(unittest.TestCase):
         # The next reconciliation pass must now perform the deferred retry.
         with job_data.conn as conn:
             conn.execute("UPDATE transfers SET last_submission_attempt = 0")
-        job_data.reconcileSchedulingActions()
+        job_data.submitSchedulingActions()
 
         self.assertEqual(self.harness.submission_count, 1)
         self._assert_reconciled_active(job_data, job_id)
@@ -721,8 +721,9 @@ class SchedulingReconciliationTests(unittest.TestCase):
         self.assertEqual(self.harness.cancellation_count, 1)
 
     def test_cancellation_recovers_after_action_intent_crash(self):
-        # Both database rows reach CANCELING before the remote call. Recovery
-        # must cancel the task once and finalize both rows.
+        # The workflow and action manager record their intents before the
+        # remote call. JobData's action copy must retain ACTIVE until it can
+        # observe the manager's status. Recovery must cancel the task only once.
         job_data = self._new_job_data()
         job_id = job_data.enqueueJob(HarnessGlobusTransfer())
         job_data.startWorkflows([job_id])
@@ -732,9 +733,11 @@ class SchedulingReconciliationTests(unittest.TestCase):
 
         with self.assertRaises(SimulatedCrash):
             job_data.cancelJob(job_id)
+        self.assertEqual(job_data.jobStatus(job_id), ActionStatus.CANCELING)
         self._assert_persisted_states(
-            job_data, job_id, ActionStatus.CANCELING, ActionStatus.CANCELING
+            job_data, job_id, ActionStatus.ACTIVE, ActionStatus.CANCELING
         )
+        self.assertEqual(job_data.jobState(job_id)['head_action_status'], ActionStatus.ACTIVE)
         self.assertEqual(self.harness.cancellation_count, 0)
         job_data.conn.close()
 
@@ -782,8 +785,9 @@ class SchedulingReconciliationTests(unittest.TestCase):
 
         with self.assertRaises(SimulatedCrash):
             job_data.cancelJob(job_id)
+        self.assertEqual(job_data.jobStatus(job_id), ActionStatus.CANCELING)
         self._assert_persisted_states(
-            job_data, job_id, ActionStatus.CANCELING, ActionStatus.CANCELING
+            job_data, job_id, ActionStatus.ACTIVE, ActionStatus.CANCELING
         )
         self.assertEqual(self.harness.cancellation_count, 1)
         job_data.conn.close()
@@ -794,7 +798,8 @@ class SchedulingReconciliationTests(unittest.TestCase):
         self.assertEqual(self.harness.cancellation_count, 1)
 
     def test_cancellation_recovers_after_action_state_crash(self):
-        # The action is CANCELED, but the workflow head still says CANCELING.
+        # The action manager is CANCELED, but JobData still records an ACTIVE head
+        # and a CANCELING workflow because its status copy has not committed.
         # Recovery should finish the workflow without canceling again.
         job_data = self._new_job_data()
         job_id = job_data.enqueueJob(HarnessGlobusTransfer())
@@ -803,8 +808,9 @@ class SchedulingReconciliationTests(unittest.TestCase):
 
         with self.assertRaises(SimulatedCrash):
             job_data.cancelJob(job_id)
+        self.assertEqual(job_data.jobStatus(job_id), ActionStatus.CANCELING)
         self._assert_persisted_states(
-            job_data, job_id, ActionStatus.CANCELING, ActionStatus.CANCELED
+            job_data, job_id, ActionStatus.ACTIVE, ActionStatus.CANCELED
         )
         self.assertEqual(self.harness.cancellation_count, 1)
         job_data.conn.close()
@@ -824,8 +830,9 @@ class SchedulingReconciliationTests(unittest.TestCase):
 
         with self.assertRaisesRegex(RuntimeError, "remote cancellation failure"):
             job_data.cancelJob(job_id)
+        self.assertEqual(job_data.jobStatus(job_id), ActionStatus.CANCELING)
         self._assert_persisted_states(
-            job_data, job_id, ActionStatus.CANCELING, ActionStatus.CANCELING
+            job_data, job_id, ActionStatus.ACTIVE, ActionStatus.CANCELING
         )
         self.assertEqual(self.harness.cancellation_count, 0)
 
@@ -843,8 +850,9 @@ class SchedulingReconciliationTests(unittest.TestCase):
 
         with self.assertRaisesRegex(RuntimeError, "status lookup failure"):
             job_data.cancelJob(job_id)
+        self.assertEqual(job_data.jobStatus(job_id), ActionStatus.CANCELING)
         self._assert_persisted_states(
-            job_data, job_id, ActionStatus.CANCELING, ActionStatus.CANCELING
+            job_data, job_id, ActionStatus.ACTIVE, ActionStatus.CANCELING
         )
         job_data.conn.close()
 
@@ -894,6 +902,9 @@ class SchedulingReconciliationTests(unittest.TestCase):
         self._assert_persisted_states(
             job_data, job_id, ActionStatus.CANCELING, ActionStatus.CANCELING
         )
+        # A normally returned pending request copies the manager's actual
+        # CANCELING status, even though remote discovery has not finished.
+        self.assertEqual(job_data.jobState(job_id)['head_action_status'], ActionStatus.CANCELING)
         self.assertEqual(self.harness.cancellation_count, 0)
         job_data.conn.close()
 

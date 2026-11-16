@@ -32,12 +32,12 @@ the library does not expand paths using the manager host's username.
 | `with manager as jobs:` | Locks access and yields JobData. Does not manage thread lifetime. |
 | `manager(operation)` | Calls `operation(job_data)` under lock and returns its result. |
 | `manager.stop(wait_until_done=True, *, close_database=False)` | Waits according to its arguments, permanently shuts down the instance, and joins the thread. Repeated shutdown is safe; recovery requires a new manager. |
-| `JobData.enqueueJob(workflow, job_group=None, *, submission_key=None)` | Accepts one action or a nonempty list; returns the integer workflow ID. Reusing an optional string key returns the original ID without changing that workflow. |
+| `JobData.enqueueJob(workflow, job_group=None, *, submission_key=None)` | Accepts one action or a nonempty list; returns the integer workflow ID. Validates dependency keys against earlier producers and rejects conditions requiring canceled producers atomically. Reusing an optional submission key returns the original ID without changing or revalidating its replacement payload. |
 | `JobData.jobStatus(job_id)` | Returns a coarse `ActionStatus`; scheduling/intermediate completion appear as `ACTIVE`. |
 | `JobData.headActionStatus(job_id, force_poll=False, return_api_status=False)` | Returns the head `ActionStatus`, optionally paired with its provider status string; forced polling refreshes all active heads. Options are keyword-only. |
 | `JobData.jobState(job_id)` | Returns workflow/head metadata with enum-valued workflow status, head status, and head class. Action definitions and serialized blobs are excluded. |
 | `JobData.listWorkflows(job_id=None, statuses=None)` | Lists state dictionaries in ID order, optionally filtering by ID and overall `ActionStatus` value(s). Includes terminal workflows; an explicit unknown ID raises `ValueError`. Does not poll. |
-| `JobData.cancelJob(job_id, cancel_running=True)` | Marks cancellation while retaining records; optionally cancels current remote work. Returns `None`; may raise while leaving `CANCELING`. |
+| `JobData.cancelJob(job_id)` | Marks cancellation while retaining records and cancels executing work. Returns `None`; may raise while leaving `CANCELING`. |
 | `JobData.getLiveActions(action_class)` | Returns info dictionaries for ACTIVE or PROVIDER_HELD actions of the selected `ActionClass`. Entries include workflow ID, remote `api_key`, and raw `api_status`. `ActionClass.API` returns an empty list because unfinished API sequences retain `SCHEDULING`. |
 | `JobData.countWorkflowsWithStatus(statuses)` | Accepts one `ActionStatus` or a list; counts matching persisted overall workflow statuses, including terminal workflows. Submission and intermediate action completion belong to ACTIVE workflows. |
 | `JobData.startWorkflows(job_ids=None)` | Reconciles submissions, then starts selected eligible workflows or fills automatic slots. |

@@ -79,7 +79,8 @@ class MCPWorkflowTests(unittest.IsolatedAsyncioTestCase):
                 return record
             self.assertNotEqual(record['workflow_status'], 'FAILED', record)
             await asyncio.sleep(.02)
-        self.fail(f'Workflow {workflow_id} did not reach {status}')
+        listing = await client.call_tool('list_workflows', {})
+        self.fail(f'Workflow {workflow_id} did not reach {status}; recorded workflows: {listing.structured_content}')
 
     async def test_native_stage_submission_idempotency_and_cli_schema(self):
         """Enqueue every built-in stage through MCP without executing any remote work.
@@ -118,6 +119,85 @@ class MCPWorkflowTests(unittest.IsolatedAsyncioTestCase):
             help_text = parse_tool_arguments(tool, ['--help'])
             for field in ('batch_script', 'execute_job', 'globus_transfer', 'run_local', 'base64', 'post_launch', 'operations'):
                 self.assertIn(field, help_text)
+
+    async def test_dependency_split_and_join_runs_local_branches_concurrently(self):
+        """Submit a dependency graph through real MCP using two real local processes.
+
+        Each branch creates a start marker and waits for the other's marker,
+        so sequential execution would fail. A joined API stage may write its
+        result only after both compute producers have completed successfully.
+        """
+        server = await self._startServer(10)
+        root = self.root
+        stages = [[APIAction([MakeDirectory('local', str(root / name)) for name in ('a', 'b')] +
+                            [WriteFile('local', str(root / 'prepared'), 'prepared')], producer_key='ready')]]
+        for name, other in (('a', 'b'), ('b', 'a')):
+            script = (f'printf started > ../{name}.started\n'
+                      'count=0\n'
+                      f'while [ ! -f ../{other}.started ]; do\n'
+                      '  count=$((count + 1))\n'
+                      '  [ "$count" -lt 100 ] || exit 1\n'
+                      '  sleep .05\n'
+                      'done\n'
+                      f'printf done > ../{name}.result\n')
+            stages.append([ExecuteJobComputeAction(
+                'local', '', '', '60', '/bin/sh', ['-c', script], str(root / name), 1, 1, 0,
+                depends_on='ready', producer_key=name)])
+        stages.append([APIAction([WriteFile('local', str(root / 'joined'), 'joined')],
+                                 depends_on=['a', 'AND', 'b'])])
+        async with Client(server.mcp_server, cache=None) as client:
+            workflows = []
+            for workflow in stages:
+                response = await client.call_tool('submit_workflow', {
+                    'stages': json.loads(workflow_adapter.dump_json(workflow))})
+                self.assertFalse(response.is_error, response)
+                workflows.append(response.structured_content['workflow_id'])
+            await self._waitWorkflow(client, workflows[-1], 'COMPLETED')
+            for workflow_id in workflows:
+                await self._waitWorkflow(client, workflow_id, 'COMPLETED')
+        self.assertEqual((root / 'prepared').read_text(), 'prepared')
+        self.assertEqual((root / 'joined').read_text(), 'joined')
+        self.assertTrue(all((root / f'{name}.result').read_text() == 'done' for name in ('a', 'b')))
+
+    async def test_dependency_validation_cancellation_and_submission_retries(self):
+        """Reject unknown/canceled references and cascade cancellation through tool submissions.
+
+        Automatic execution is disabled so all workflows remain queued. Invalid
+        submissions must leave no records, and retries must retain the original
+        canceled workflow even when the replacement payload has unknown keys.
+        """
+        server = await self._startServer()
+        async with Client(server.mcp_server, cache=None) as client:
+            invalid = await client.call_tool('submit_workflow', {
+                'stages': [{'type': 'api', 'depends_on': 'unknown'}]})
+            self.assertTrue(invalid.is_error)
+            self.assertEqual(invalid.structured_content['error']['code'], 'invalid_input')
+            self.assertIn('Unknown dependency key', str(invalid.content))
+            self.assertEqual(server.runtime.manager(lambda jobs: jobs.listWorkflows()), [])
+            root = await client.call_tool('submit_workflow', {
+                'stages': [{'type': 'api', 'producer_key': 'root'}]})
+            dependent = await client.call_tool('submit_workflow', {
+                'stages': [{'type': 'api', 'depends_on': 'root', 'producer_key': 'tail'}],
+                'submission_key': 'dependent'})
+            last = await client.call_tool('submit_workflow', {
+                'stages': [{'type': 'api', 'depends_on': 'tail'}]})
+            self.assertFalse(root.is_error or dependent.is_error or last.is_error)
+            canceled = await client.call_tool('cancel_workflow', {
+                'workflow_id': root.structured_content['workflow_id']})
+            self.assertFalse(canceled.is_error)
+            listing = await client.call_tool('list_workflows', {'statuses': ['CANCELED']})
+            self.assertEqual(len(listing.structured_content['result']), 3)
+            rejected = await client.call_tool('submit_workflow', {
+                'stages': [{'type': 'api', 'depends_on': 'tail'}]})
+            self.assertTrue(rejected.is_error)
+            self.assertEqual(rejected.structured_content['error']['code'], 'invalid_input')
+            retry = await client.call_tool('submit_workflow', {
+                'stages': [{'type': 'api', 'depends_on': 'replacement-unknown'}],
+                'submission_key': 'dependent'})
+            self.assertFalse(retry.is_error)
+            self.assertEqual(retry.structured_content, {
+                'workflow_id': dependent.structured_content['workflow_id'], 'workflow_status': 'CANCELED'})
+            self.assertEqual(len(server.runtime.manager(lambda jobs: jobs.listWorkflows())), 3)
 
     async def test_invalid_requests_enqueue_nothing(self):
         """Reject invalid later stages and API operations before persisting a workflow."""

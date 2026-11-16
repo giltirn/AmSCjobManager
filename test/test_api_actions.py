@@ -150,7 +150,7 @@ class APIActionTests(unittest.TestCase):
                 jobs.conn.close()
                 recovered = JobData(database)
                 try:
-                    recovered.reconcileSchedulingActions()
+                    recovered.submitSchedulingActions()
                     self.assertEqual(first.read_text(), 'sentinel' if cursor >= 1 else 'first')
                     self.assertEqual(second.read_text(), 'sentinel' if cursor >= 2 else 'second')
                     self.assertEqual(recovered.headActionStatus(job_id), ActionStatus.COMPLETED)
@@ -247,7 +247,7 @@ class APIActionTests(unittest.TestCase):
         jobs.conn.close()
         recovered = JobData(self.database)
         try:
-            recovered.reconcileSchedulingActions()
+            recovered.submitSchedulingActions()
             self.assertEqual(recovered.jobStatus(job_id), ActionStatus.FAILED)
             self.assertFalse((self.root / 'bad-cursor').exists())
         finally:

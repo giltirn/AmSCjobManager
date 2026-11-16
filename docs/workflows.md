@@ -32,6 +32,60 @@ configuration, supply valid accounts/queues and endpoints, use persistent local
 state paths, and stage the actual inputs. SPOOF output does not confirm that
 real launch commands or remote paths will work.
 
+## Connect workflows with dependencies
+
+Each workflow remains sequential. To split into parallel branches, submit
+separate workflows whose actions depend on a key published by an earlier action.
+Join the branches with an AND/OR expression:
+
+```python
+from amscjobmanager.api_actions import APIAction, WriteFile
+
+with manager as jobs:
+    setup = jobs.enqueueJob(APIAction(
+        [WriteFile("local", "/tmp/campaign-input", "prepared")],
+        producer_key="campaign/prepared",
+    ))
+    first = jobs.enqueueJob(APIAction(
+        [WriteFile("local", "/tmp/campaign-first", "first")],
+        depends_on="campaign/prepared", producer_key="campaign/first",
+    ))
+    second = jobs.enqueueJob(APIAction(
+        [WriteFile("local", "/tmp/campaign-second", "second")],
+        depends_on="campaign/prepared", producer_key="campaign/second",
+    ))
+    joined = jobs.enqueueJob(APIAction(
+        [WriteFile("local", "/tmp/campaign-joined", "both branches completed")],
+        depends_on=["campaign/first", "AND", "campaign/second"],
+    ))
+```
+
+The manager runs ready workflows up to its configured capacity. Dependencies
+can also be attached to later stages within a chain. Use compute actions on
+`local` for long-running local work; these API writes demonstrate staging only.
+An empty `APIAction` with `depends_on` and `producer_key` can serve as a barrier
+that publishes a new key when its prerequisite branches have succeeded.
+
+`depends_on` accepts a key string, a nested list, or `None`. For example,
+`["prepared", "AND", ["solver_a", "OR", "solver_b"]]` means prepared and either
+solver. AND takes precedence over OR; nesting acts as parentheses. There is no
+NOT operator. The same representation is accepted through MCP/CLI stage JSON.
+
+Submit producers before consumers: every key must already be registered by a
+previously submitted workflow or an earlier stage in the current submission.
+Repeated keys are allowed, and any successful producer satisfies the key. Keys
+and completed history persist across restarts in the same database, so use a
+campaign-specific prefix when runs must remain independent. Workflow submission
+keys remain separate idempotency identifiers.
+
+Unsatisfied workflows remain PENDING and consume no execution slots. Failed
+producers leave consumers pending. Canceling a workflow also cancels consumers
+that require its unfinished producers, transitively, including chains already
+executing earlier stages. Successful producer history remains valid; OR branches
+and repeated keys survive while another producer is not ruled out by cancellation. New
+submissions requiring canceled producers are rejected. Later replacement
+producers do not restart workflows already canceled by a cascade.
+
 ## Construct actions
 
 Short filesystem preparation and local processing can be distinct `APIAction`

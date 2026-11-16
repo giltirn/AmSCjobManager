@@ -4,7 +4,7 @@
 
 ## What the library manages
 
-A workflow is a nonempty, ordered list of compute and transfer actions. Only one
+A workflow is a nonempty, ordered list of API, compute, and transfer actions. Only one
 action in a workflow runs at a time. Successful completion permits the next
 action to start; failure or cancellation stops progression. Separate workflows
 can run concurrently up to the manager's workflow limit.
@@ -13,7 +13,8 @@ Actions are Python dataclasses describing operations such as executing a program
 or copying a file between collections. Constructing an action performs no API
 request. Enqueuing persists it; the manager submits it later.
 
-There is no dependency graph, branching, or automatic rollback of previous
+Producer keys and dependency conditions connect separate sequential workflows
+into parallel branches and joins. There is no automatic rollback of previous
 actions. Files created by a successful action remain if a later action fails.
 
 ## Layers
@@ -70,7 +71,8 @@ action definition. There is no workflow-level BLOB or separate ID allocator.
 `workflow_status`: PENDING, ACTIVE, COMPLETED, FAILED, CANCELING, or CANCELED.
 ACTIVE includes submission, provider-held work, and intermediate action
 completion; SCHEDULING and PROVIDER_HELD are only action statuses. CANCELING
-records workflow-wide cancellation intent. Globus INACTIVE and IRI compute held
+records workflow-wide cancellation intent; executing heads are always canceled.
+Globus INACTIVE and IRI compute held
 map to PROVIDER_HELD, preserving polling and cancellation of accepted work.
 A read-only `workflow_heads` view derives head metadata and action status.
 
@@ -92,6 +94,8 @@ statuses into `actions`, retaining completed stages after the head advances.
 The action projection and corresponding overall workflow status update commit
 together. Advancing past the final stage records workflow completion, while
 cancellation remains authoritative over late execution-status results.
+An externally canceled head first places its workflow in CANCELING so that
+reconciliation can finish cancellation of its remaining queued stages.
 `jobStatus()` reads the persisted workflow status, and workflow listing filters
 that column directly. Head-action status remains independent: canceling a chain
 does not turn an already successful producer into a canceled action.
@@ -103,9 +107,35 @@ Action definitions also accept optional keyword-only `producer_key` and
 example `["prepared", "AND", ["solver_a", "OR", "solver_b"]]`. Nonempty lists
 alternate operands with uppercase AND/OR operators. Nested lists act as
 parentheses; AND has its normal precedence over OR. These fields are stored as
-producer text and dependency JSON in the action rows, but **dependency enforcement
-is not implemented yet**: these fields currently have no effect on execution
-or cancellation.
+producer text and dependency JSON in the action rows. JobData checks keys against
+earlier submissions and earlier stages of the same workflow before inserting each
+action. Unknown references reject the entire submission; no partial chain or
+submission key is retained. Dependency checks require no action-manager records.
+
+An action starts only when its expression is satisfied by successful producers
+in the database. Any successful producer satisfies a repeated key. Unready heads
+and workflows remain PENDING without workers or capacity use. Automatic scheduling
+considers eligibility before applying the available-slot limit. Waiting between
+stages retains completed history and resumes the same pending stage.
+
+Cancellation computes `depends_on_canceled_action`: whether a condition requires
+unfinished work ruled out by cancellation. Each key is checked for successful or
+noncanceled producers, the AND/OR expression is evaluated, and the whole result
+is negated. Merely referencing a canceled producer is insufficient when another
+producer or OR branch remains. Failed producers alone leave this flag false and
+consumers pending; they do not trigger a cancellation cascade. Canceling the last
+noncanceled producer cancels workflows requiring its key, including those with a
+dependency in a later stage. The complete cascade is recorded atomically
+before remote cancellation. Intent recording changes only workflow records;
+reconciliation handles pending heads locally, preserves terminal action history,
+and delegates executing heads to their action managers. Constructor recovery calls
+the same `JobData.performPendingCancellations()` method before restoring ordinary
+ACTIVE execution workers.
+The cancellation check follows prerequisite chains, so a waiting action cannot count its
+own future output or a circular fallback as an alternative after a producer is
+canceled. Ordinary passes with no canceled producers skip this graph scan.
+No dependency registry, reverse-reference table, or waiting threads are needed.
+
 `evaluateDependencies(condition, completed)` evaluates an expression using a
 caller-supplied completion lookup. It validates the structure and translates
 only Boolean literals, operators, and parentheses to Python for evaluation;

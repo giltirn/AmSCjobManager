@@ -129,7 +129,18 @@ For example, save the following as `submission.json` and submit it with
 }
 ```
 
-Every stage requires a `type` tag:
+Every stage requires a `type` tag.
+
+All stage types also accept `producer_key` and `depends_on`. Submit producers
+before consumers; keys must exist in earlier submissions or earlier stages of
+the current workflow. A condition is a key string or a nested infix array such
+as `["prepared", "AND", ["solver_a", "OR", "solver_b"]]`. Unknown keys and
+conditions requiring canceled producers return an `invalid_input` error without
+enqueuing partial work. These checks are owned by JobData and also apply to
+direct Python submissions. See [workflow dependencies](workflows.md#connect-workflows-with-dependencies)
+for readiness, repeated keys, cancellation cascades, and key lifetime.
+
+The supported stage types are:
 
 | Stage type | Fields in addition to `type` |
 | --- | --- |

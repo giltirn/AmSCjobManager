@@ -86,7 +86,7 @@ class ComputeResourceSchedulingTests(unittest.TestCase):
         self._assert_scheduling_without_attempt(job_data, job_id)
 
         self.resource_status.return_value = True
-        job_data.reconcileSchedulingActions()
+        job_data.submitSchedulingActions()
         self.assertEqual(self.submit.call_count, 1)
         self.assertEqual(job_data.jobState(job_id)["head_action_status"], ActionStatus.ACTIVE)
         with job_data.conn as conn:
@@ -105,7 +105,7 @@ class ComputeResourceSchedulingTests(unittest.TestCase):
 
         self.resource_status.side_effect = None
         recovered = self._new_job_data()
-        recovered.reconcileSchedulingActions()
+        recovered.submitSchedulingActions()
         self.assertEqual(self.submit.call_count, 1)
         self.assertEqual(recovered.jobState(job_id)["head_action_status"], ActionStatus.ACTIVE)
 
@@ -125,7 +125,7 @@ class ComputeResourceSchedulingTests(unittest.TestCase):
                 job_data.conn.close()
 
                 recovered = self._new_job_data()
-                recovered.reconcileSchedulingActions()
+                recovered.submitSchedulingActions()
                 self.assertEqual(self.submit.call_count, 1)
                 self.assertEqual(
                     recovered.jobState(job_id)["head_action_status"], ActionStatus.ACTIVE
@@ -143,7 +143,7 @@ class ComputeResourceSchedulingTests(unittest.TestCase):
         self.resource_status.reset_mock(side_effect=True)
         self.resource_status.side_effect = AssertionError("availability check must be skipped")
         recovered = self._new_job_data()
-        recovered.reconcileSchedulingActions()
+        recovered.submitSchedulingActions()
         self.resource_status.assert_not_called()
         self.assertEqual(self.submit.call_count, 1)
         self.assertEqual(recovered.jobState(job_id)["head_action_status"], ActionStatus.ACTIVE)
@@ -157,12 +157,12 @@ class ComputeResourceSchedulingTests(unittest.TestCase):
         self.assertEqual(job_data.jobState(job_id)["head_action_status"], ActionStatus.SCHEDULING)
 
         self.resource_status.return_value = False
-        job_data.reconcileSchedulingActions()
+        job_data.submitSchedulingActions()
         self.assertEqual(job_data.jobState(job_id)["head_action_status"], ActionStatus.SCHEDULING)
         self.assertEqual(self.submit.call_count, 1)
 
         self.resource_status.return_value = True
-        job_data.reconcileSchedulingActions()
+        job_data.submitSchedulingActions()
         self.assertEqual(job_data.jobState(job_id)["head_action_status"], ActionStatus.FAILED)
         self.assertEqual(self.submit.call_count, 1)
 
@@ -181,7 +181,7 @@ class ComputeResourceSchedulingTests(unittest.TestCase):
 
         self.resource_status.return_value = False
         recovered = self._new_job_data()
-        recovered.reconcileSchedulingActions()
+        recovered.submitSchedulingActions()
         self.assertEqual(recovered.jobState(job_id)["head_action_status"], ActionStatus.SCHEDULING)
         with recovered.conn as conn:
             self.assertEqual(
@@ -190,7 +190,7 @@ class ComputeResourceSchedulingTests(unittest.TestCase):
             )
 
         self.resource_status.return_value = True
-        recovered.reconcileSchedulingActions()
+        recovered.submitSchedulingActions()
         self.assertEqual(self.submit.call_count, 1)
         self.assertEqual(recovered.jobState(job_id)["head_action_status"], ActionStatus.ACTIVE)
 

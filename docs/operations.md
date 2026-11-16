@@ -87,7 +87,7 @@ call `startWorkflows()` and `progressActiveState()` themselves.
 
 | Head-action state | Meaning |
 | --- | --- |
-| `PENDING` | Workflow has been enqueued but not started. |
+| `PENDING` | Action is queued, including dependency waits before the first stage or between stages. Its workflow consumes no active slot. |
 | `SCHEDULING` | Scheduling intent is durable; submission, deferred resource checks, or submission reconciliation is in progress. |
 | `ACTIVE` | Remote action is live, including jobs queued by the remote scheduler. |
 | `PROVIDER_HELD` | Provider accepted the action but suspended execution. It remains live, polled, and cancellable. |
@@ -159,12 +159,15 @@ workflow; it is not automatically resubmitted.
 
 ```python
 with manager as jobs:
-    jobs.cancelJob(job_id)  # cancel_running=True by default
+    jobs.cancelJob(job_id)
 ```
 
-The workflow record remains in the database. For a live compute/transfer action,
-the workflow and action first enter `CANCELING` before remote cancellation.
-Subsequent passes reconcile unfinished requests. A direct cancellation error is
+The workflow record remains in the database. Every affected workflow first enters
+`CANCELING`, with its action rows unchanged. `JobData.performPendingCancellations()` cancels pending stages
+locally, preserves completed/failed history, and delegates executing heads to their
+action managers. Those heads enter `CANCELING` before remote cancellation. Once
+resolved, the workflow becomes `CANCELED`. Subsequent passes retry unfinished
+requests. A direct cancellation error is
 raised to the caller while leaving its persisted intent available for retry.
 Cancellation has no fixed attempt limit.
 
@@ -173,11 +176,12 @@ work. If indexing may lag, reconciliation waits for the submission backoff
 interval before accepting that no task was found. If a remote task is already
 terminal, reconciliation avoids another cancel request.
 
-`cancelJob(job_id, cancel_running=False)` stops workflow progression by marking
-its head `CANCELED` without canceling running remote work. Use that option only
-when another owner will manage the remote task. Canceling a workflow does not
+Cancellation always stops executing work in the affected workflows. It does not
 delete prior action records, remove files, or undo completed operations.
-Local process cancellation is currently unsupported.
+On reopening the database, workflow cancellation is
+processed by `performPendingCancellations()` before ordinary execution workers are
+restored. An externally canceled head follows the same path to cancel its remaining
+queued stages.
 
 ## Shutdown and restart
 

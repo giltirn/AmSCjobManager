@@ -240,31 +240,41 @@ class ActionWorkerTests(unittest.TestCase):
             if manager is not None:
                 manager.stop(wait_until_done=False, close_database=True)
 
-    def test_recovery_does_not_restart_abandoned_workflows(self):
-        """Reopen a canceled workflow with an unfinished historical action record.
+    def test_recovery_does_not_restart_canceled_workflows(self):
+        """Cancel an interrupted submission, then reopen without restarting it.
 
-        Model a crash after intent persistence, followed by cancel_running=False.
-        Recovery must leave that abandoned work alone instead of submitting it.
+        Model a crash before submission starts, then let the real cancellation
+        worker confirm no remote job exists. Recovery must retain its terminal
+        outcome without issuing another submission or cancellation lookup.
         """
-        database = self.root / 'abandoned.sqlite'
+        database = self.root / 'canceled.sqlite'
         jobs = JobData(database, _test_crash_at='action_intent_persisted')
         action = ExecuteJobComputeAction('local', '', '', '60', '/bin/true', [], str(self.root), 1, 1, 0)
         job_id = jobs.enqueueJob(action)
         with self.assertRaises(SimulatedCrash):
             jobs.startWorkflows([job_id])
-        jobs.cancelJob(job_id, cancel_running=False)
+        # Complete cancellation before reopening; no submission worker may run.
+        with patch('amscjobmanager.compute_action_manager.findJobByName', return_value=None), \
+             patch.object(ExecuteJobComputeAction, 'initiateAction') as submit:
+            jobs.cancelJob(job_id)
+            self._progress_until(jobs, lambda: jobs.jobStatus(job_id) == ActionStatus.CANCELED)
+            submit.assert_not_called()
+        jobs.stopWorkers()
         jobs.conn.close()
         recovered = None
         try:
-            with patch.object(ExecuteJobComputeAction, 'initiateAction') as submit:
+            with patch.object(ExecuteJobComputeAction, 'initiateAction') as submit, \
+                 patch('amscjobmanager.compute_action_manager.findJobByName') as find:
                 recovered = JobData(database, poll_freq=.01)
                 recovered.progressActiveState()
                 self.assertEqual(recovered.jobStatus(job_id), ActionStatus.CANCELED)
                 self.assertEqual(recovered.action_man[ActionClass.COMPUTE]._action_workers, {})
                 submit.assert_not_called()
+                find.assert_not_called()
         finally:
-            recovered.stopWorkers()
-            recovered.conn.close()
+            if recovered is not None:
+                recovered.stopWorkers()
+                recovered.conn.close()
 
     def test_shutdown_interrupts_waiting_query_without_canceling_remote_work(self):
         """Stop a queried supervisor, retaining SCHEDULING for restart recovery.

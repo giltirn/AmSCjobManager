@@ -44,7 +44,7 @@ class WorkflowStorageTests(unittest.TestCase):
         Definitions, dependency expressions, categories, and stable unique IDs
         must exist for future stages. Job heads are derived rather than stored.
         """
-        expression = ['prepared', 'AND', ['a', 'OR', 'b']]
+        expression = ['prepared', 'AND', ['prepared', 'OR', 'prepared']]
         stages = [APIAction(producer_key='prepared'),
                   ExecuteJobComputeAction('local', '', '', '60', '/bin/true', [], '/tmp', 1, 1, 0,
                                           depends_on=expression, producer_key='computed'),
@@ -78,16 +78,16 @@ class WorkflowStorageTests(unittest.TestCase):
         self.assertEqual(summary['head_action_id'], rows[0]['action_id'])
         self.assertTrue(all(manager.getMaxActionId() is None for manager in self.jobs.action_man.values()))
 
-    def test_history_and_unenforced_dependencies_survive_reopening(self):
-        """Execute a chain despite unknown keys, retaining per-stage success and IDs.
+    def test_history_and_earlier_stage_dependencies_survive_reopening(self):
+        """Execute a dependent chain, retaining per-stage success and IDs.
 
-        Dependency enforcement is intentionally absent in this schema change.
+        The second action depends on the earlier stage publishing the same key.
         Reopen between stages and verify the completed stage is not replayed.
         """
         first, second = self.root / 'first', self.root / 'second'
         job_id = self.jobs.enqueueJob([
             APIAction([WriteFile('local', str(first), 'first')], producer_key='same'),
-            APIAction([WriteFile('local', str(second), 'second')], depends_on='unknown', producer_key='same'),
+            APIAction([WriteFile('local', str(second), 'second')], depends_on='same', producer_key='same'),
         ])
         with self.jobs.conn as conn:
             ids = [row[0] for row in conn.execute('SELECT action_id FROM actions ORDER BY workflow_stage')]
@@ -230,7 +230,7 @@ class WorkflowStorageTests(unittest.TestCase):
         self.assertFalse(any(path.exists() for path in outputs))
 
     def test_dependency_metadata_roundtrips_json_and_rejects_invalid_shapes(self):
-        """Round-trip nested Boolean lists without implementing readiness checks.
+        """Round-trip nested Boolean lists through schema validation alone.
 
         Python positional constructors remain usable; JSON restores typed nested
         lists and string keys. Reject missing operands and unsupported operators.
@@ -319,11 +319,12 @@ class WorkflowStorageTests(unittest.TestCase):
         def cancel_before_returning(action_id, *, force_update=False):
             """Read action_id (int), cancel its chain, and return the prior status tuple.
 
-            force_update (bool) is forwarded unchanged. Cancellation abandons
-            execution to avoid initiating another query while this hook runs.
+            force_update (bool) is forwarded unchanged. Cancellation uses the
+            original query method to avoid recursively entering this hook.
             """
             result = query(action_id, force_update=force_update)
-            self.jobs.cancelJob(job_id, cancel_running=False)
+            with patch.object(manager, 'queryRecordedStatus', query):
+                self.jobs.cancelJob(job_id)
             return result
 
         with patch.object(manager, 'queryRecordedStatus', side_effect=cancel_before_returning):

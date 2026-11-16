@@ -123,10 +123,15 @@ class JobManager:
         self._lock.acquire()
         return self.job_data
         
-    def __exit__(self,exc_type, exc_val, exc_tb):
-        self._lock.release() #unlock before exception!
-        if exc_type:
-            raise Exception("Caught exception",exc_type,exc_val,exc_tb)
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        """Release the manager lock and propagate any original context-block exception.
+
+        exc_type (type[BaseException] | None), exc_val (BaseException | None),
+        and exc_tb (traceback | None) describe the block's error; all are None
+        on success. Return None so Python preserves the original exception and
+        traceback without suppressing or wrapping it.
+        """
+        self._lock.release()
             
 
     

@@ -39,7 +39,7 @@ class WorkflowSummary(BaseModel):
 
     workflow_id: int = Field(description='Positive workflow database ID, not a response-list index.')
     job_group: str | None = Field(description='Optional group supplied when the workflow was enqueued.')
-    workflow_status: str = Field(description='Overall status. COMPLETED means every step finished; ACTIVE includes queued work and intermediate completion.')
+    workflow_status: str = Field(description='Overall status. COMPLETED means every step finished; ACTIVE includes provider-queued work and intermediate completion; dependency waits are PENDING.')
     workflow_stage: int = Field(description='Zero-based action position; -1 before starting, or the action count after full completion.')
     head_action_id: int | None = Field(description='Current positive action ID, assigned at enqueue and independent of workflow ID; null after full workflow completion.')
     head_action_type: str | None = Field(description='Head action class name; NoneType after normal workflow completion.')
@@ -120,6 +120,9 @@ def registerTools(mcp_server: MCPServer, runtime: ServerRuntime) -> None:
         code manager_unavailable and a message string. Invalid stage schemas are
         rejected by MCP before any workflow is enqueued. There is no automatic
         client retry: retain submission_key to retry an uncertain outcome safely.
+        Unknown dependency keys or required canceled producers return an error
+        with code invalid_input and JobData's validation message; no partial
+        workflow is retained.
         """
         # Enqueue only while the manager is healthy, checking again after the
         # lock is acquired. JobData owns persistence and key deduplication.
@@ -129,10 +132,16 @@ def registerTools(mcp_server: MCPServer, runtime: ServerRuntime) -> None:
         if manager is not None and manager.isAlive():
             with manager as jobs:
                 if manager.isAlive():
-                    workflow_id = jobs.enqueueJob(stages, job_group, submission_key=submission_key)
-                    receipt = WorkflowReceipt(workflow_id=workflow_id,
-                                              workflow_status=jobs.jobStatus(workflow_id).name).model_dump(mode='json')
-                    error = None
+                    try:
+                        workflow_id = jobs.enqueueJob(stages, job_group, submission_key=submission_key)
+                    except ValueError as exc:
+                        # JobData owns reference validation. Preserve its useful
+                        # input error instead of MCP's generic internal-error text.
+                        error = {'code': 'invalid_input', 'message': str(exc)}
+                    else:
+                        receipt = WorkflowReceipt(workflow_id=workflow_id,
+                                                  workflow_status=jobs.jobStatus(workflow_id).name).model_dump(mode='json')
+                        error = None
         if error is not None:
             return CallToolResult(is_error=True, structured_content={'error': error},
                                   content=[TextContent(type='text', text=error['message'])])

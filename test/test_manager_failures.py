@@ -10,6 +10,30 @@ from amscjobmanager.manager import JobManager
 
 
 class ManagerFailureTests(unittest.TestCase):
+    def test_context_errors_preserve_original_exception_and_release_lock(self):
+        """Catch original block errors without stopping the real background manager.
+
+        Raise both a validation-style error and a BaseException inside the
+        context. Verify object identity, lock release, and successful reentry;
+        the caller catches the errors while the manager continues running.
+        """
+        manager = JobManager(max_workflows_active=0)
+        try:
+            manager.start()
+            for error in (ValueError('invalid workflow'), KeyboardInterrupt()):
+                with self.subTest(error=type(error).__name__):
+                    with self.assertRaises(type(error)) as caught:
+                        with manager:
+                            raise error
+                    self.assertIs(caught.exception, error)
+                    self.assertTrue(manager._lock.acquire(timeout=1), 'Context error retained its lock')
+                    manager._lock.release()
+                    with manager as jobs:
+                        self.assertEqual(jobs.listWorkflows(), [])
+                    self.assertTrue(manager.isAlive())
+        finally:
+            manager.stop(wait_until_done=False, close_database=True)
+
     def test_background_failure_releases_lock_and_logs_reason(self):
         """Crash submission/progression while the real worker holds the manager lock.
 

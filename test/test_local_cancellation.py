@@ -278,12 +278,15 @@ class LocalCancellationTests(unittest.TestCase):
             with patch.object(local_api.os, "killpg", side_effect=PermissionError("denied")):
                 with self.assertRaises(PermissionError):
                     jobs.cancelJob(workflow_id)
-            self.assertEqual(jobs.jobState(workflow_id)["head_action_status"], ActionStatus.CANCELING)
+            # The request raised before JobData could copy the manager's status.
+            # Its workflow intent is durable while the head copy remains ACTIVE.
+            self.assertEqual(jobs.jobStatus(workflow_id), ActionStatus.CANCELING)
+            self.assertEqual(jobs.jobState(workflow_id)["head_action_status"], ActionStatus.ACTIVE)
             with jobs.conn as conn:
                 self.assertEqual(conn.execute("SELECT action_status FROM computes").fetchone()[0], "CANCELING")
             self.assertEqual(local_api.getJobState(jobid), "active")
             # The normal reconciliation path then finishes the same cancellation.
-            jobs.reconcileCancelingActions()
+            jobs.performPendingCancellations()
             self.assertEqual(jobs.jobState(workflow_id)["head_action_status"], ActionStatus.CANCELED)
             self.assertEqual(local_api.getJobState(jobid), "canceled")
             with jobs.conn as conn:

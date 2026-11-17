@@ -566,7 +566,9 @@ def checkSafeGlobusPath(endpoint: str, destination_globus_path: str, *, machine=
         ``True`` if the destination lies within an applicable sandbox, or if
         no configured sandbox applies and no machine was specified. ``False``
         if a machine was specified or a sandbox matches the collection, but
-        the path lies outside the allowed roots. No permission prompt occurs.
+        the path lies outside the allowed roots. Before authorizing a registered
+        root, validate outstanding directories on its machine. This can require
+        authentication or a missing-directory creation query on first use.
     """
     endpoint_uuid = _resolve_globus_endpoint(endpoint, destination_globus_path)
     destination = _absolute_remote_path(destination_globus_path)
@@ -574,7 +576,14 @@ def checkSafeGlobusPath(endpoint: str, destination_globus_path: str, *, machine=
     for sandbox_machine, directories in (manager_globals.remote_workdir or {}).items():
         if sandbox_machine not in MACHINE_IMPLEMENTATIONS or (machine is not None and sandbox_machine != machine.lower()):
             continue
-        for sandbox_filesystem_path in directories:
+        # An empty registration still identifies a known, restricted collection.
+        # Removing its last sandbox must not turn it into an unrestricted UUID.
+        if any(replaceSpecialGlobusEndpoint(route['endpoint']) == endpoint_uuid
+               for filesystem in getMountedFilesystems(sandbox_machine).values()
+               for route in filesystem.get('globus_filesystems', [])):
+            known_endpoint = True
+        for registration in directories:
+            sandbox_filesystem_path = registration.path
             try:
                 sandbox_endpoint, sandbox_globus_path = getRemoteGlobusLocation(sandbox_machine, sandbox_filesystem_path)
             except ValueError:
@@ -584,7 +593,11 @@ def checkSafeGlobusPath(endpoint: str, destination_globus_path: str, *, machine=
                 continue
             known_endpoint = True
             if destination.is_relative_to(_absolute_remote_path(sandbox_globus_path)):
-                return True
+                manager_globals.validateSandboxDirs(sandbox_machine)
+                # Directory checks can block; honor removal while they waited.
+                if any(root.path == sandbox_filesystem_path and root.validated
+                       for root in (manager_globals.remote_workdir or {}).get(sandbox_machine, [])):
+                    return True
     if known_endpoint:
         return False
     return True

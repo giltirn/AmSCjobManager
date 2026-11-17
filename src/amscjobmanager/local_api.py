@@ -255,7 +255,7 @@ class LocalJobStatusWrapper:
             raise Exception("Caught exception",exc_type,exc_val,exc_tb)
 
 status_man = None
-status_man_db_path = "localjobs.db"
+status_man_db_path = "localjobs.sqlite"
 
 # Runtime handles are deliberately not persisted: local execution is for testing.
 _local_jobs = {}

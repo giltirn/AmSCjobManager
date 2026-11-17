@@ -12,13 +12,15 @@ from mcp.server import MCPServer
 from ..logging import wfmanLog
 from ..manager import JobManager
 from .runtime import ServerRuntime
+from .admin import AdminServer
 from .tools import registerTools
 
 
 class ManagerHTTPServer(uvicorn.Server):
     """Serve MCP on loopback and announce readiness only after socket startup."""
 
-    def __init__(self, initialize_manager: Callable[[], JobManager], *, port: int = 8765, log_path: str | Path):
+    def __init__(self, initialize_manager: Callable[[], JobManager], *, port: int = 8765, log_path: str | Path,
+                 admin_socket: str | Path | None = None, admin_password: str | None = None):
         """Construct the listener without starting it or the manager.
 
         Args:
@@ -30,6 +32,10 @@ class ManagerHTTPServer(uvicorn.Server):
                 a port for embedded callers. Defaults to 8765.
             log_path (str | Path): Manager/API log filename shown to the admin.
                 Logging hooks must already be configured by the caller.
+            admin_socket (str | Path | None): Optional private Unix socket path.
+                None disables administration; no admin tools are exposed by MCP.
+            admin_password (str | None): In-memory admin password required with
+                admin_socket. Neither value is read from manager configuration.
 
         Returns:
             None: Initializes the server. endpoint (str) is its MCP URL and is
@@ -39,6 +45,9 @@ class ManagerHTTPServer(uvicorn.Server):
             Call inherited run() to serve. Routine access logs stay suppressed.
         """
         self.runtime = ServerRuntime(initialize_manager)
+        if (admin_socket is None) != (admin_password is None):
+            raise ValueError('Admin socket and password must be supplied together')
+        self.admin_server = None if admin_socket is None else AdminServer(admin_socket, admin_password, self.runtime)
         self.endpoint = f'http://127.0.0.1:{port}/mcp'
         self.log_path = Path(log_path).resolve()
         # Keep routine HTTP/access logs out of machine-readable client output.
@@ -56,17 +65,30 @@ class ManagerHTTPServer(uvicorn.Server):
 
         Returns:
             None when awaited: If Uvicorn reports started=True, start runtime
-            initialization, update endpoint from the bound socket and emit its
+            initialization after any requested admin listener binds, update endpoint and emit its
             URL, PID, and log path through
             wfmanLog to both its configured sink and stdout. Binding/lifespan
             failures propagate without printing a successful-start message.
         """
         await super().startup(sockets=sockets)
         if self.started:
+            try:
+                if self.admin_server is not None:
+                    await self.admin_server.start()
+            except BaseException:
+                # Do not leave a partially started HTTP service running when
+                # its requested administration listener could not be created.
+                if self.admin_server is not None:
+                    await self.admin_server.stop()
+                self.runtime.stop()
+                await super().shutdown(sockets=sockets)
+                raise
             self.runtime.start()
             port = self.servers[0].sockets[0].getsockname()[1]
             self.endpoint = f'http://127.0.0.1:{port}/mcp'
             message = f'Server started: {self.endpoint} (PID {os.getpid()}, log: {self.log_path})'
+            if self.admin_server is not None:
+                message += f' (admin socket: {self.admin_server.socket_path})'
             wfmanLog(message)
             wfmanLog(message, file=sys.stdout, flush=True)
 
@@ -79,10 +101,13 @@ class ManagerHTTPServer(uvicorn.Server):
 
         Returns:
             None when awaited: Stop the runtime without canceling remote jobs.
+            First close the optional admin listener and its active connections.
             Emit the endpoint through wfmanLog to its sink
             and stdout if startup succeeded, then await normal HTTP shutdown.
             This handles Ctrl-C and SIGTERM; SIGKILL cannot run Python cleanup.
         """
+        if self.admin_server is not None:
+            await self.admin_server.stop()
         self.runtime.stop()
         if self.started:
             message = f'Server terminating: {self.endpoint}'

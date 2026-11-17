@@ -27,10 +27,10 @@ class GlobusPathNamespaceTests(unittest.TestCase):
         }))
         self.stack.enter_context(patch.dict(state.special_globus_endpoints, {"personal": "personal-uuid"}))
         self.stack.enter_context(patch.object(manager_globals, "remote_workdir", {
-            "local": [str(self.directory)],
-            "polaris": ["/home/alice/safe", "/eagle/project/safe"],
-            "aurora": ["/flare/project/safe"],
-            "perlmutter": ["/global/safe"], "perlmutter_login": ["/global/login-safe"],
+            "local": [manager_globals.SandboxDirectory(str(self.directory), validated=True)],
+            "polaris": [manager_globals.SandboxDirectory("/home/alice/safe", validated=True), manager_globals.SandboxDirectory("/eagle/project/safe", validated=True)],
+            "aurora": [manager_globals.SandboxDirectory("/flare/project/safe", validated=True)],
+            "perlmutter": [manager_globals.SandboxDirectory("/global/safe", validated=True)], "perlmutter_login": [manager_globals.SandboxDirectory("/global/login-safe", validated=True)],
         }))
         self.stack.enter_context(patch.object(state, "setupIRIapiCompute", side_effect=AssertionError("Must not authenticate with IRI")))
         self.submit = self.stack.enter_context(patch.object(globus, "_transfer_post", return_value=({"transfer_uuid": "transfer-id"}, 200)))
@@ -60,6 +60,62 @@ class GlobusPathNamespaceTests(unittest.TestCase):
             globus.globusCopy("perlmutter", "/global/login-safe/", "external-uuid", "/input.txt")
         with self.assertRaisesRegex(ValueError, "collection UUID"):
             globus.globusCopy("polaris", "/alice/safe/", "external-uuid", "/input.txt")
+
+    def test_removing_last_sandbox_does_not_make_collection_unrestricted(self):
+        """Revoke a machine's last root and reject writes using its raw collection UUID.
+
+        Empty roots must continue identifying a known collection.
+        """
+        manager_globals.removeSandboxDirs({'polaris': ['/home/alice/safe', '/eagle/project/safe']})
+        self.assertEqual(manager_globals.remote_workdir['polaris'], [])
+        with self.assertRaisesRegex(Exception, 'disallowed Globus'):
+            globus.globusCopy(HOME_ENDPOINT, '/alice/safe/', 'external-uuid', '/input.txt')
+        self.submit.assert_not_called()
+
+    def test_globus_authorization_validates_only_a_matching_machine_on_first_use(self):
+        """Validate the filesystem root behind an allowed Globus path, once.
+
+        Unknown collections and rejected destinations must not trigger directory
+        probes or authenticate unrelated implementations.
+        """
+        with patch.object(manager_globals, 'remote_workdir', {
+                'polaris': [manager_globals.SandboxDirectory('/home/alice/safe')],
+                'aurora': [manager_globals.SandboxDirectory('/flare/project/safe')]}), \
+             patch('amscjobmanager.api_general.isDirectory', return_value=True) as probe:
+            self.assertTrue(globus.checkSafeGlobusPath('external-uuid', '/anything'))
+            self.assertFalse(globus.checkSafeGlobusPath(HOME_ENDPOINT, '/alice/outside'))
+            probe.assert_not_called()
+            self.assertTrue(globus.checkSafeGlobusPath(HOME_ENDPOINT, '/alice/safe/output'))
+            self.assertTrue(globus.checkSafeGlobusPath(HOME_ENDPOINT, '/alice/safe/another'))
+            probe.assert_called_once_with('polaris', '/home/alice/safe')
+            self.assertFalse(manager_globals.remote_workdir['aurora'][0].validated)
+
+    def test_globus_validation_failure_blocks_transfer_and_is_retryable(self):
+        """A failed directory probe cannot authorize a transfer; retry the outstanding root."""
+        with patch.object(manager_globals, 'remote_workdir', {
+                'polaris': [manager_globals.SandboxDirectory('/home/alice/safe')]}), \
+             patch('amscjobmanager.api_general.isDirectory', return_value=False) as probe, \
+             patch('amscjobmanager.utils.queryYesNo', return_value=False):
+            with self.assertRaisesRegex(Exception, 'does not exist'):
+                globus.globusCopy(HOME_ENDPOINT, '/alice/safe/', 'external-uuid', '/input')
+            self.submit.assert_not_called()
+            self.assertFalse(manager_globals.remote_workdir['polaris'][0].validated)
+            probe.return_value = True
+            globus.globusCopy(HOME_ENDPOINT, '/alice/safe/', 'external-uuid', '/input')
+            self.assertEqual(probe.call_count, 2)
+            self.submit.assert_called_once()
+
+    def test_globus_root_removed_during_validation_cannot_authorize(self):
+        """Revoke a root during its directory probe and refuse the now-stale Globus grant."""
+        def probe(machine, directory):
+            """Remove the captured machine/directory root (str arguments), then return True."""
+            manager_globals.removeSandboxDirs({machine: directory})
+            return True
+
+        with patch.object(manager_globals, 'remote_workdir', {
+                'polaris': [manager_globals.SandboxDirectory('/home/alice/safe')]}), \
+             patch('amscjobmanager.api_general.isDirectory', side_effect=probe):
+            self.assertFalse(globus.checkSafeGlobusPath(HOME_ENDPOINT, '/alice/safe/output'))
 
     def test_copy_translates_filesystem_paths_for_machine_and_collection(self):
         self.assertEqual(globus.globusCopy(

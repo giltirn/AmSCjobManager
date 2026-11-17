@@ -37,18 +37,24 @@ def setupWorkflowAgent(iri_implementations: dict, iriapi_transfer_key_path: str,
                        work_dir: dict, globus_personal_endpoint_config=None,
                        iri_config_cache_directory: str | None = None,
                        local_mpi_launcher: str | None = None):
+    """Configure simulated API state and register sandbox roots without directory probes.
+
+    iri_implementations (dict), iriapi_transfer_key_path (str | None), and
+    iri_config_cache_directory (str | None) are accepted for backend parity but
+    unused. work_dir maps machine names to a path string or list of strings.
+    globus_personal_endpoint_config (object | None) configures personal staging;
+    local_mpi_launcher (str | None) selects the local launcher or single-rank mode.
+    Return the lowercase-machine path mapping, without internal validation records.
+    """
     from .local_api import configureMPILauncher
 
     configureMPILauncher(local_mpi_launcher)
-    for directories in work_dir.values():
-        for directory in ([directories] if isinstance(directories, str) else directories):
-            if "~" in str(directory):
-                raise ValueError("Sandbox paths containing '~' are not supported")
+    globals.addSandboxDirs(work_dir, replace=True)
     from .iri_api.state import _configure_personal_globus_endpoint
     _configure_personal_globus_endpoint(globus_personal_endpoint_config)
-    globals.remote_workdir={ machine.lower() : directory for machine, directory in work_dir.items() }
-    wfapiLog("Using SPOOF api with workdir", globals.remote_workdir)
-    return globals.remote_workdir
+    paths = {machine.lower(): directory for machine, directory in work_dir.items()}
+    wfapiLog("Using SPOOF api with workdir", paths)
+    return paths
 
 tid = 0
 transfers = { }

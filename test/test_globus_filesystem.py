@@ -76,16 +76,16 @@ class GlobusFilesystemTests(unittest.TestCase):
                 self.assertFalse(api_general.isDirectory("frontier", "/missing", check_exists=True))
 
     def test_pending_olcf_sandbox_validation_uses_globus_without_native_filesystem(self):
-        """Client setup can validate OLCF sandboxes without any native filesystem call."""
+        """First sandbox authorization probes OLCF through Globus, not native IRI filesystem."""
         self.client.operation_stat.return_value = {**self.metadata, "type": "dir"}
         compute_client = object()
         with patch.dict(state.iri_compute_clients, {"olcf": compute_client}, clear=True), \
-             patch.object(state, "_validating_clients", set()), \
-             patch.dict(manager_globals._pending_sandbox_checks, {"frontier": ["/safe"]}, clear=True), \
-             patch.object(manager_globals, "_validating_sandboxes", set()), \
+             patch.object(manager_globals, 'remote_workdir', {'frontier': [manager_globals.SandboxDirectory('/safe')]}), \
              patch.object(filesystem, "getResourceID", side_effect=AssertionError("Native lookup attempted")):
             self.assertIs(state.getImplementationClient("olcf"), compute_client)
-            self.assertNotIn("frontier", manager_globals._pending_sandbox_checks)
+            self.client.operation_stat.assert_not_called()
+            self.assertTrue(manager_globals.checkSafePath("frontier", "/safe/output"))
+            self.assertTrue(manager_globals.remote_workdir["frontier"][0].validated)
         self.token.assert_called_once_with("globus_transfer")
 
     def test_invalid_paths_are_rejected_before_globus_authentication(self):

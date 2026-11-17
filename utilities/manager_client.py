@@ -47,12 +47,16 @@ def main(argv=None) -> int:
         epilog='Example: manager_client.py --url http://127.0.0.1:8765/mcp list_workflows --statuses FAILED COMPLETED',
     )
     source = parser.add_mutually_exclusive_group()
-    parser.add_argument('-h', '--help', action='store_true', help='Discover server commands, or show help for a command')
+    parser.add_argument('-h', '--help', action='store_true',
+                        help='Show the main help page; -h COMMAND or --help COMMAND shows help for that command')
     source.add_argument('--request', help='JSON tool request object or array')
     source.add_argument('--file', help='JSON request file, or - for stdin')
     source.add_argument('--list-tools', action='store_true', help='Return tool descriptions and schemas')
-    parser.add_argument('--url', default='http://127.0.0.1:8765/mcp')
-    parser.add_argument('--continue-on-error', action='store_true')
+    parser.add_argument('--url', default='http://127.0.0.1:8765/mcp',
+                        help='MCP server endpoint URL, including /mcp (default: %(default)s); place before the command name')
+    parser.add_argument('--continue-on-error', action='store_true',
+                        help='Continue a JSON batch after a tool error (default: stop); connection/protocol failures still stop. '
+                             'Earlier operations remain effective; any failure gives a nonzero exit status')
     parser.add_argument('--timeout', type=float, default=30, help='Connection/call timeout in seconds')
     parser.add_argument('command', nargs='?', help='MCP tool name; use --list-tools to discover commands')
     parser.add_argument('arguments', nargs=argparse.REMAINDER, help='Tool options; TOOL --help shows schema-derived help')

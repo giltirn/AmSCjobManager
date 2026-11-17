@@ -157,9 +157,15 @@ usable secrets.
 
 For built-in or cached providers, setup registers credentials and paths without
 immediately authenticating every remote client. The first operation using a
-provider authenticates and validates its pending sandbox directories. Local
-sandboxes are checked during setup. A missing sandbox can prompt for permission
-to create it; a failed validation remains pending.
+provider authenticates its client; client retrieval and ordinary reads do not
+validate sandbox directories. Filesystem sandbox checks synchronously validate
+outstanding directories on that machine before checking path membership,
+including paths then rejected. Globus checks validate before authorizing a
+matching root. Other machines sharing the client are not probed. Both local and
+remote registration defer directory probes, including during setup and admin
+addition. A missing sandbox can prompt for permission to create it; a failed
+validation remains outstanding for retry. Concurrent checks for the same machine
+wait for validation, while other machines can proceed.
 
 Fresh discovery must authenticate to query a provider and may ask for machine
 names and mount roots. Complete that setup interactively before starting an

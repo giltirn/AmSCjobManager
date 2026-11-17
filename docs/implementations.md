@@ -113,7 +113,7 @@ Repeated cancellation leaves terminal jobs unchanged. Normal child processes
 are included; processes that deliberately detach into a new session are not.
 Do not use local execution to test facility scheduler or launcher behavior.
 
-Local job status uses a separate SQLite database, `localjobs.db` by default in
+Local job status uses a separate SQLite database, `localjobs.sqlite` by default in
 the working directory. Set its path before the first local job/status operation:
 
 ```python

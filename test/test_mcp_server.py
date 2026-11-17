@@ -296,6 +296,9 @@ class MCPToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('[0..]', help_text)
         self.assertIn('value: integer', help_text)
         self.assertIn('Returned example value.', help_text)
+        self.assertNotIn('show this help message and exit', help_text)
+        self.assertIn('manager_client.py -h example', help_text)
+        self.assertIn('manager_client.py --help example', help_text)
         for tokens in (['--count', '-1'], ['--count'], ['--statuses', 'INVALID'],
                        ['--unknown'], ['--offset', 'nan'], ['--metadata', '{broken']):
             with self.subTest(invalid_tokens=tokens), self.assertRaises(ValueError):
@@ -362,16 +365,19 @@ class MCPToolTests(unittest.IsolatedAsyncioTestCase):
         main = runpy.run_path(str(Path(__file__).resolve().parents[1] / 'utilities' / 'manager_client.py'))['main']
         with patch('amscjobmanager.server.client.execute_command', new_callable=AsyncMock) as execute:
             execute.return_value = {'success': True, 'results': [], 'help': 'Commands (from server):\n  example  Example command.\n'}
-            output = io.StringIO()
-            with redirect_stdout(output):
-                self.assertEqual(await asyncio.to_thread(main, ['-h']), 0)
-            self.assertIn('Commands (from server)', output.getvalue())
-            self.assertIn('Example command.', output.getvalue())
-            execute.assert_awaited_once_with('http://127.0.0.1:8765/mcp', None, ['--help'], timeout=30)
-            execute.reset_mock()
-            with redirect_stdout(io.StringIO()):
-                self.assertEqual(await asyncio.to_thread(main, ['-h', 'example']), 0)
-            execute.assert_awaited_once_with('http://127.0.0.1:8765/mcp', 'example', ['--help'], timeout=30)
+            for option in ('-h', '--help'):
+                execute.reset_mock()
+                output = io.StringIO()
+                with redirect_stdout(output):
+                    self.assertEqual(await asyncio.to_thread(main, [option]), 0)
+                self.assertIn('Commands (from server)', output.getvalue())
+                self.assertIn('Example command.', output.getvalue())
+                self.assertIn('Show the main help page', output.getvalue())
+                execute.assert_awaited_once_with('http://127.0.0.1:8765/mcp', None, ['--help'], timeout=30)
+                execute.reset_mock()
+                with redirect_stdout(io.StringIO()):
+                    self.assertEqual(await asyncio.to_thread(main, [option, 'example']), 0)
+                execute.assert_awaited_once_with('http://127.0.0.1:8765/mcp', 'example', ['--help'], timeout=30)
             execute.reset_mock()
             with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as invalid:
                 main(['--request', '{"tool":"list_workflows"}', 'list_workflows'])
@@ -509,12 +515,18 @@ class MCPToolTests(unittest.IsolatedAsyncioTestCase):
                      patch('amscjobmanager.manager_config.setupManager', side_effect=lambda config: manager_logging.wfapiLog('setup API message')), \
                      patch('amscjobmanager.manager.JobManager') as manager, \
                      patch.object(ManagerHTTPServer, 'run', listener), redirect_stdout(output):
-                    arguments = ['unused.json', '--database', str(Path(directory) / 'jobs.sqlite'), '--log-file', str(log_path)]
+                    # Exercise the default without creating state in the working
+                    # directory: the manager is mocked. Also retain override coverage.
+                    database = str(Path(directory) / 'jobs.sqlite') if fail else 'workflows.sqlite'
+                    arguments = ['unused.json', '--log-file', str(log_path)]
+                    if fail:
+                        arguments += ['--database', database]
                     if fail:
                         with self.assertRaisesRegex(RuntimeError, 'listener failure'):
                             main(arguments)
                     else:
                         self.assertEqual(main(arguments), 0)
+                    manager.assert_called_once_with(database, poll_freq=20)
                     manager.return_value.stop.assert_called_once_with(wait_until_done=False, close_database=True)
                 log = log_path.read_text()
                 self.assertTrue(log.startswith('existing log\n'))

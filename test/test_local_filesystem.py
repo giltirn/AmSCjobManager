@@ -56,7 +56,8 @@ class LocalFilesystemTests(unittest.TestCase):
         link = sandbox / "link"
         link.symlink_to(target)
         # Disable /tmp's built-in exemption to exercise a real sandbox escape.
-        with patch.object(manager_globals, "remote_workdir", {"local": [str(sandbox)]}), \
+        with patch.object(manager_globals, "remote_workdir", {
+                "local": [manager_globals.SandboxDirectory(str(sandbox), validated=True)]}), \
              patch.object(local_api, "checkSafePath", side_effect=lambda machine, path:
                           manager_globals.checkSafePath(machine, path, allow_tmp=False)):
             with self.assertRaisesRegex(ValueError, "sandbox"):

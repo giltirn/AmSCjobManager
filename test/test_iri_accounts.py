@@ -21,7 +21,7 @@ class IRIAccountTests(unittest.TestCase):
         self.stack = ExitStack()
         self.addCleanup(self.stack.close)
         for registry in (state._implementation_accounts, state._implementation_credentials,
-                         state.iri_compute_clients, manager_globals._pending_sandbox_checks,
+                         state.iri_compute_clients,
                          state.special_globus_endpoints):
             self.stack.enter_context(patch.dict(registry, {}, clear=True))
         for name in ("_configuration_cache_directory", "_transfer_token_path", "globus_personal_endpoint"):

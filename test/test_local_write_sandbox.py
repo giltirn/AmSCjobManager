@@ -16,7 +16,7 @@ class LocalWriteSandboxTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.directory = Path(temporary.name)
         config = patch.object(manager_globals, "remote_workdir", {
-            "local": ["/configured-local-sandbox"],
+            "local": [manager_globals.SandboxDirectory("/configured-local-sandbox", validated=True)],
         })
         config.start()
         self.addCleanup(config.stop)

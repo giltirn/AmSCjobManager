@@ -27,7 +27,8 @@ class LocalComputeTests(unittest.TestCase):
             patch.object(local_api, "_mpi_launcher", None),
             patch.object(local_api, "_local_jobs", {}),
             patch.object(local_api, "_LOCAL_CANCEL_GRACE_SECONDS", 0.1),
-            patch.object(manager_globals, "remote_workdir", {"local": [str(self.directory)]}),
+            patch.object(manager_globals, "remote_workdir", {
+                "local": [manager_globals.SandboxDirectory(str(self.directory), validated=True)]}),
             patch.object(compute, "getResourceID", side_effect=AssertionError("Remote lookup")),
         ):
             active_patch.start()

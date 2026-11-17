@@ -22,7 +22,7 @@ class ExplicitPathTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.directory = Path(temporary.name)
         roots = patch.object(manager_globals, "remote_workdir", {
-            "local": ["/"], "perlmutter": ["/"],
+            "local": [manager_globals.SandboxDirectory("/", validated=True)], "perlmutter": [manager_globals.SandboxDirectory("/", validated=True)],
         })
         roots.start()
         self.addCleanup(roots.stop)
@@ -122,6 +122,7 @@ class ExplicitPathTests(unittest.TestCase):
         self.assertFalse((self.directory / "staging").exists())
 
     def test_configuration_rejects_ambiguous_path_fields_and_roots(self):
+        """Reject ambiguous paths before configuration or registration can change sandbox state."""
         base = {
             "iri_implementations": {"nersc": {"token_path": "/tokens/nersc.json"}},
             "sandbox_directories": {"local": ["/safe"]},
@@ -146,8 +147,16 @@ class ExplicitPathTests(unittest.TestCase):
         base["sandbox_directories"]["local"] = ["/tmp/root~"]
         with self.assertRaises(ValidationError):
             ManagerConfig.model_validate(base)
-        with self.assertRaisesRegex(ValueError, "~"):
-            manager_globals.addSandboxDirs({"local": ["~/sandbox"]})
+        # Validate the whole batch before even replacing old registrations or
+        # registering the valid first machine. No directory probes may run.
+        before = deepcopy(manager_globals.remote_workdir)
+        with patch('amscjobmanager.api_general.isDirectory') as probe:
+            for replace in (False, True):
+                with self.subTest(replace=replace), self.assertRaisesRegex(ValueError, "~"):
+                    manager_globals.addSandboxDirs({'local': ['/safe/new'], 'perlmutter': ['~/sandbox']},
+                                                   replace=replace)
+                self.assertEqual(manager_globals.remote_workdir, before)
+            probe.assert_not_called()
 
     def test_state_and_credential_paths_do_not_expand_home_directories(self):
         # Use a literal tilde inside a temporary filename so a regression cannot

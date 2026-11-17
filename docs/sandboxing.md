@@ -29,6 +29,23 @@ callers do not need to normalize paths just for validation. The boolean result
 does not change the caller's path, so filesystem operations still resolve it
 where needed for their own use.
 
+Filesystem sandbox checks synchronously validate outstanding directory
+registrations for that machine before comparing the requested path with its
+roots, even when the path is subsequently rejected. Globus sandbox checks
+validate before authorizing a matching registered root.
+Client initialization and ordinary reads do not perform this validation.
+Successful probes are reused; failed probes remain retryable. Concurrent checks
+for the same machine wait for validation rather than bypassing it. Built-in
+`/tmp` access requires no directory probe.
+
+Internally, `globals.remote_workdir` maps each machine to a list of immutable
+`SandboxDirectory(path, validated=False)` records. `path` is the registered root;
+`validated` caches a successful directory check or approved creation. Each
+success is retained even if another root fails. Removing a root discards its
+record; re-adding the same path requires fresh validation. The flag does not
+guarantee future existence and does not replace path-membership checks.
+Configuration JSON and setup return values still contain plain paths.
+
 Path arguments and configured path fields must not contain `~`, including in
 local paths or literal filenames such as `result~`. The manager host's username
 and home directory may differ from the user or remote resource's account. Use
@@ -45,6 +62,17 @@ submission accept `allow_unsafe=True`. That explicitly bypasses their supported
 path check. Managed compute/transfer actions use the checked form. A caller with
 access to the unrestricted Python API can choose the bypass themselves.
 
+For direct Python use, `globals.addSandboxDirs({machine: path_or_paths})` adds
+roots without directory probes; the first subsequent sandbox check validates
+outstanding local or remote roots. `globals.removeSandboxDirs({machine:
+path_or_paths})` removes exact registered root strings and matching pending
+checks without deleting files. Removal preserves overlapping grants and `/tmp`
+access. Registration changes affect later checks; they cannot retract an
+operation that already passed its check or stop a running batch script.
+For a running MCP server, use the separate password-protected
+[admin utility](server.md#local-administration). Changes are session-local and
+do not rewrite the configuration file.
+
 ## Globus paths
 
 `globusCopy()` checks its destination through `checkSafeGlobusPath()`. The check
@@ -59,6 +87,8 @@ for transfer permission. This implements the policy of enforcing sandboxes on
 known configured destinations; it does not assert that an external collection
 is safe or writable. Filesystem path translation still requires a known route,
 even when Globus-path writes to an external UUID are permitted.
+Machines retaining an empty sandbox list still identify their configured
+collections as restricted: removing the last root does not grant arbitrary writes.
 
 The general Globus destination check does not restrict the source to a sandbox.
 The personal collection has additional rules for both sides, described below.

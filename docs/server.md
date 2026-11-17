@@ -5,8 +5,9 @@ status through MCP Streamable HTTP. The command-line client supports traditional
 calling the same tools as an MCP agent. Pending user questions, including
 configuration and authentication requests, can be listed and answered through
 the same listener. Workflows can combine both compute action forms, Globus
-transfers and API-operation stages. Privileged sandbox changes and unsafe
-API overrides remain unavailable.
+transfers and API-operation stages. Sandbox changes use a separate optional,
+password-protected local admin socket. They are not MCP tools. Unsafe API
+overrides remain unavailable through the server.
 
 ## Start the server
 
@@ -17,6 +18,12 @@ python -m pip install -e '.[server]'
 python utilities/manager_server.py manager-config.json \
     --database workflows.sqlite --port 8765 --log-file manager.log
 ```
+
+`--database` is optional and defaults to `workflows.sqlite` in the current
+working directory. Without `--log-file`, the default log is
+`workflows.sqlite.log` alongside it. The library does not automatically create
+a home directory such as `~/.amscjobmanager`; token and discovery-cache paths
+are explicitly configured. Use distinct database paths for separate servers.
 
 The listener binds to `127.0.0.1` and serves `/mcp`. Its `ServerRuntime` owns
 asynchronous initialization, a user-query queue, and the eventual background
@@ -84,6 +91,79 @@ checked before acquiring the lock and again after acquiring it, to cover a
 failure while the request was waiting. Tool discovery remains available.
 The server does not automatically restart a failed manager. Manager instances
 are single-use; recovery requires a new manager/server using the same database.
+
+## Local administration
+
+Enable the independent Unix-domain admin listener when starting the server:
+
+```bash
+python utilities/manager_server.py manager-config.json --database workflows.sqlite \
+    --admin-socket "$HOME/.local/run/amsc-manager/admin.sock"
+Set admin password:
+```
+
+The startup prompt hides password input. `--admin-password VALUE` is also
+supported, but places the literal value in the process arguments and potentially
+shell history; prefer the prompt. Neither the password nor its salted verifier
+is written to the configuration, database, or logs. Without `--admin-socket`,
+administration is disabled. Password entry refuses an exposed stdin fallback.
+
+Run the admin utility on the server host, in another terminal:
+
+```bash
+python utilities/manager_admin.py "$HOME/.local/run/amsc-manager/admin.sock" \
+    add_sandbox frontier /absolute/filesystem/directory
+
+python utilities/manager_admin.py "$HOME/.local/run/amsc-manager/admin.sock" \
+    remove_sandbox frontier /absolute/filesystem/directory
+```
+
+Required arguments are positional: socket, command, machine, then path.
+Each invocation asks `Admin password:` without echo, sends one command, prints
+the result, and disconnects. It accepts no password argument, environment
+variable, or password file. Each command authenticates independently: there is
+no global unlock or stored client login. Successful commands exit zero; failures
+exit nonzero. `--timeout SECONDS` bounds socket operations (default 120).
+A timeout can leave an uncertain outcome; repeating an add/remove is idempotent.
+
+Relative socket paths such as `./db_socket` use the current working directory,
+independently for server and admin client. Paths must contain no `~`, and their
+absolute form must fit within 103 encoded bytes. Normalization does not follow
+symlinks. The listener creates missing parent directories with mode `0700` and
+requires its immediate parent to be a nonsymlinked directory. Shared or
+other-owned parent directories are allowed: the server logs and displays a
+warning, and the admin client also warns on stderr. The advice is to use a
+separate directory you own with mode `0700` to reduce socket replacement risk;
+it is not a startup requirement. The socket itself remains mode `0600` and the
+client checks its ownership and permissions. Choose a shorter path if necessary.
+The server refuses existing socket paths,
+including stale sockets, ordinary files and symlinks. After an unclean shutdown,
+first ensure the old server is stopped, then remove its stale socket manually.
+Graceful shutdown removes only the socket created by that server instance.
+
+`add_sandbox` registers a root without directory probes or creation queries.
+The first subsequent sandbox check validates outstanding roots, which can
+require an ordinary API authentication or directory-creation query. Such
+questions use the usual query tools; the admin password never does. API calls
+and user waits run on workers without holding the manager lock or blocking MCP.
+The manager must be initialized and healthy to change registrations.
+
+Removal matches the exact registered path text, including trailing slashes.
+It unregisters that root and its pending checks; it does not delete files,
+remove overlapping grants, revoke `/tmp` access, or cancel running work. Already
+authorized operations may finish. Later checks use the updated registrations.
+Removing the last root of a known Globus collection does not make that UUID an
+unrestricted destination.
+
+Changes last for the running server session. Restarting restores sandbox roots
+from the configuration; admin commands never rewrite it. These commands are
+absent from MCP discovery and cannot be called using `tools/call`. The protocol
+supports only the named operations, not arbitrary Python or method execution.
+
+This route separates human credential entry from agent-facing MCP traffic. It
+does not prevent an agent given the password from reproducing the protocol, nor
+is it isolation against unrestricted code executing as the server's OS user.
+For remote administration, SSH into the server host and run this utility there.
 
 ## Submit and cancel workflows
 
@@ -253,8 +333,8 @@ worker; shared authentication questions can remain needed by other callers.
 Query tools remain available during initialization and after manager failure.
 Workflow tools return `manager_unavailable` until the manager is ready and healthy.
 Shutdown closes the queue, wakes waiters and rejects late questions/replies.
-Answering questions does not unlock privileged sandbox operations; those controls
-remain future work.
+Answering questions does not unlock privileged sandbox operations; those require
+the separate local admin utility and its per-command password.
 
 ## Query workflows
 
@@ -286,12 +366,15 @@ python utilities/manager_client.py --url http://127.0.0.1:9000/mcp --timeout 10 
     list_workflows --statuses FAILED
 ```
 
-`-h`/`--help` discovers the server's commands and prints their names with brief
-human-readable descriptions, along with the frontend's connection/input options.
+`-h` or `--help` alone shows the main help page: the frontend's connection/input
+options plus discovered command names and brief human-readable descriptions.
 `-h TOOL`, `--help TOOL`, and `TOOL --help` print that command's description,
 input options/types/defaults/choices, and an output field/type tree. The output
 tree resolves local schema references and marks array positions as `[0..]`;
 field descriptions explain database IDs, status meanings, and indexing.
+Command-specific help states these invocation forms explicitly and omits
+argparse's generic help-option description; help is handled by the client
+frontend and is not an input to the server tool.
 Both general and command-specific help require the optional server dependencies
 and a reachable server, because tool names, descriptions, and schemas come from
 its live response. Help discovers metadata without executing tools. Connection
@@ -473,3 +556,13 @@ HTTP CLI, including both compute forms, API operations, a simulated asynchronous
 Globus provider, pending/active cancellation, generated nested-schema help and
 submission-key reuse after server restart. `test_workflow_schema.py` verifies
 native JSON/pickle round trips and rejects invalid schemas before execution.
+
+`test_server_admin.py` tests the private Unix protocol, password checks, framing,
+permissions, connection limits, shutdown and sandbox revocation. Its integration
+test starts the real server/admin utilities with pseudo-terminal password entry,
+then checks real local writes through MCP before addition and after removal.
+It requires local Unix/loopback socket access and the server extra for that test:
+
+```bash
+PYTHONPATH=test python -m unittest test_server_admin -v
+```

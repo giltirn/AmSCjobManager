@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Union
 import httpx
 from .config import MACHINE_IMPLEMENTATIONS,IRI_IMPLEMENTATIONS
 from .discovery import configureImplementation, loadCachedImplementations
-from ..globals import addSandboxDirs, validateSandboxDirs
+from ..globals import addSandboxDirs
 
 if TYPE_CHECKING:
     from ..manager_config_models import ManagerConfig
@@ -61,7 +61,6 @@ _transfer_lock = RLock()
 iri_compute_clients: dict[str, IRIComputeClient] = {}
 _implementation_credentials: dict[str, dict] = {}
 _implementation_accounts: dict[str, list[str]] = {}
-_validating_clients: set[str] = set()
 _transfer_token_path: str | None = None
 _configuration_cache_directory: str | None = None
 # The data-transfer API remains a separate, single service.
@@ -108,12 +107,12 @@ def resolveImplementation(*, machine: str | None = None, implementation: str | N
 def getImplementationClient(implementation: str) -> IRIComputeClient:
     """Return an authenticated client by implementation tag.
 
+    implementation (str) is a case-insensitive provider name. Return its cached
+    IRIComputeClient, authenticating and registering one if needed.
     Authenticate on first use and reuse the client thereafter. A known API
     definition alone is insufficient: credentials must have been configured.
-    Validate pending sandboxes for this implementation before returning the
-    client. Failed validation is retried on the next access without repeating
-    authentication. Reentrant lookups from the checks reuse the registered
-    client without restarting validation.
+    Directory validation belongs to sandbox checks, not client retrieval:
+    ordinary reads and authentication do not probe registered sandbox roots.
     """
     with _implementation_locks[implementation.lower()]:
         implementation = implementation.lower()
@@ -122,13 +121,6 @@ def getImplementationClient(implementation: str) -> IRIComputeClient:
             if settings is None:
                 raise RuntimeError(f"IRI implementation {implementation!r} is not configured")
             setupImplementationClient(implementation, **settings)
-        if implementation not in _validating_clients:
-            _validating_clients.add(implementation)
-            try:
-                for machine in IRI_IMPLEMENTATIONS[implementation]["machines"]:
-                    validateSandboxDirs(machine)
-            finally:
-                _validating_clients.remove(implementation)
         return iri_compute_clients[implementation]
 
 
@@ -190,12 +182,15 @@ def getTransferToken(service: str, *, authorization_parameters: dict | None = No
 def setupImplementationClient(
     implementation: str, token_path: str, token_type: str = "globus"
 ) -> IRIComputeClient:
-    """Immediately authenticate, register a client, and validate pending sandboxes.
+    """Immediately authenticate and register a client without validating directories.
 
+    implementation (str) identifies a provider; token_path (str) locates its
+    credential file; token_type (str) selects 'globus' (default) or 'amsc_pat'.
+    Return IRIComputeClient, the newly authenticated and registered client.
     The implementation must already have an API definition. Replaces and closes
     any previous client only after authentication succeeds. This supports
-    discovery before machine and filesystem mappings are known. Registering
-    before validation allows sandbox probes to reuse the same client.
+    discovery before machine and filesystem mappings are known. Subsequent API
+    calls and sandbox probes reuse the registered client.
     """
     with _implementation_locks[implementation.lower()]:
         implementation = implementation.lower()
@@ -212,7 +207,6 @@ def _close_compute_clients():
     for client in iri_compute_clients.values():
         client.close()
     iri_compute_clients.clear()
-    _validating_clients.clear()
 
 globus_personal_endpoint: dict[str, str] | None = None
 
@@ -260,12 +254,12 @@ def setupWorkflowAgent(iri_implementations: dict, iriapi_transfer_key_path: str 
                        iri_config_cache_directory: str | None = None,
                        local_mpi_launcher: str | None = None):
     """
-    Configure the workflow agent without eager authentication or remote sandbox probes.
+    Configure the workflow agent without eager authentication or directory probes.
 
-    Clients authenticate when first requested, then validate all registered
-    sandboxes belonging to that implementation. Fresh discovery authenticates when it must
+    Clients authenticate when first requested. Sandbox checks validate outstanding
+    directories on their target machine. Fresh discovery authenticates when it must
     query a provider; the explicit authorization test also remains eager.
-    Local sandbox paths are checked during setup, without an IRI client.
+    Both local and remote sandbox directory probes wait until a sandbox check.
     Args:
        iri_implementations: Mapping of implementation names to configuration
            objects containing a token_path and an optional token_type
@@ -294,9 +288,8 @@ def setupWorkflowAgent(iri_implementations: dict, iriapi_transfer_key_path: str 
     }
     _configure_personal_globus_endpoint(globus_personal_endpoint_config)
     _close_compute_clients()
-    # Discovery may create a client before new machine mappings are available;
-    # discard previous sandbox checks before it can make any client requests.
-    addSandboxDirs({}, warn_unavailable=False, defer_checks=True, replace=True)
+    # Discard old registrations before installing new machine configuration.
+    addSandboxDirs({}, warn_unavailable=False, replace=True)
     _implementation_credentials.clear()
     _implementation_accounts.clear()
     for implementation, settings in normalized_implementations.items():
@@ -321,7 +314,7 @@ def setupWorkflowAgent(iri_implementations: dict, iriapi_transfer_key_path: str 
     }
     tokens.update(iriapi_transfer_base=None, globus_transfer=None)
     _transfer_token_path = iriapi_transfer_key_path
-    addSandboxDirs(normalized_work_dir, warn_unavailable=False, defer_checks=True,
+    addSandboxDirs(normalized_work_dir, warn_unavailable=False,
                    replace=True)
     return normalized_work_dir
 

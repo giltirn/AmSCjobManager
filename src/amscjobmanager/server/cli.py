@@ -101,7 +101,11 @@ def parse_tool_arguments(tool: Tool, arguments: list[str]) -> ToolRequest | str:
     """
     parser = argparse.ArgumentParser(
         prog=f'manager_client.py {tool.name}', description=(tool.description or '').split('\n\n', 1)[0],
-        exit_on_error=False, allow_abbrev=False, formatter_class=argparse.RawDescriptionHelpFormatter,
+        exit_on_error=False, allow_abbrev=False, add_help=False,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(f"Show this command's help: manager_client.py -h {tool.name} "
+                f'or manager_client.py --help {tool.name}\n'
+                'Show the main help page: manager_client.py -h or manager_client.py --help'),
     )
     schema = tool.input_schema
     try:

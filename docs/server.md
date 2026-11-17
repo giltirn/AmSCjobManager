@@ -92,6 +92,29 @@ failure while the request was waiting. Tool discovery remains available.
 The server does not automatically restart a failed manager. Manager instances
 are single-use; recovery requires a new manager/server using the same database.
 
+## List sandbox directories
+
+The read-only MCP tool `list_sandbox_directories(machine=None)` lists registered
+filesystem roots grouped by machine. The CLI discovers it automatically:
+
+```bash
+python utilities/manager_client.py list_sandbox_directories
+python utilities/manager_client.py list_sandbox_directories --machine frontier
+```
+
+Omit `machine`, or pass JSON null, for all registered machines. A supplied name
+is case-insensitive. The MCP structured result is `{"result": {"frontier":
+["/registered/root"], "local": []}}`; the CLI puts that mapping in its usual
+operation result envelope. An empty list means no registered roots for that
+entry, while an empty object means no matching machine entries. Unmatched
+machine names return an empty object.
+
+Listing requires a running manager but no admin password. It reflects additions
+and removals made during the session, including roots awaiting validation,
+without directory probes, authentication requests, or validation-state changes.
+Only registered filesystem roots are listed; implicit `/tmp` and configured
+staging allowances are not added. To change registrations, use local administration.
+
 ## Local administration
 
 Enable the independent Unix-domain admin listener when starting the server:

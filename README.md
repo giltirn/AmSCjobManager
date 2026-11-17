@@ -31,6 +31,11 @@ recovery when the application restarts.
   actions let the manager coordinate independent workflows without waiting for
   each remote task to finish before managing others. A configurable concurrency
   limit controls how many workflows are active.
+- **Connect agents through a private MCP server.** Run the manager as a persistent
+  server listening on localhost and connect MCP-compatible agents to submit,
+  monitor, and cancel workflows. A command-line client supports the same
+  operations. Sandbox changes use a separate password-protected admin utility.
+  See the [server and client guide](docs/server.md).
 - **Sandboxed API filesystem activity.** Configure permitted directories for
   each machine to constrain filesystem mutations and compute run directories.
   Operations with sandbox enforcement reject destinations outside those roots
@@ -60,8 +65,9 @@ importing the library. It demonstrates staging, a transfer → compute → trans
 workflow, monitoring, and shutdown without credentials or remote execution.
 Its remote filesystem responses and downloaded results are simulated.
 
-For read-only workflow monitoring from MCP or a traditional/JSON command-line client, see
-the optional [MCP server prototype](docs/server.md).
+For workflow submission, monitoring, and cancellation through agents or the
+traditional/JSON command-line client, see the optional
+[private MCP server](docs/server.md).
 
 For a real calculation, see the [MPI workflow example](examples/README.md).
 It uploads C++ source, compiles in pre-launch, runs MPI under `JobManager`,
@@ -97,6 +103,7 @@ facility. Creating a `JobManager` does not initialize API configuration.
 | [Building workflows](docs/workflows.md) | Action parameters and a walkthrough of the example |
 | [API action stages](docs/api_actions.md) | Deferred filesystem preparation, short local processing, and checkpoint recovery |
 | [Operating the manager](docs/operations.md) | Locks, status, cancellation, retries, and restart recovery |
+| [Private MCP server and clients](docs/server.md) | Agent connections, CLI commands, user queries, and protected local administration |
 | [API reference](docs/api.md) | Public entry points, arguments, and return values |
 | [Troubleshooting](docs/troubleshooting.md) | Common errors and current limitations |
 | [Development](docs/development.md) | Source layout, tests, and adding action types |

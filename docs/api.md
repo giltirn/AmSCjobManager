@@ -21,12 +21,14 @@ the library does not expand paths using the manager host's username.
 | `setupManager(config)` in `manager_config` | Initializes the selected implementation; returns `None`. |
 | `api.setupWorkflowAgentFromConfig(config)` | Initializes from `ManagerConfig`; returns a sandbox mapping. |
 | `api.setupWorkflowAgent(iri_implementations, iriapi_transfer_key_path, work_dir, globus_personal_endpoint_config=None, iri_config_cache_directory=None)` | Field-based setup; `work_dir` is the machine-to-sandbox mapping. |
+| `globals.getSandboxDirs(machine=None)` | Returns a copied machine-to-path-list mapping, optionally filtered by case-insensitive machine name. Includes unvalidated roots and empty lists; an unmatched name returns `{}`. Performs no directory probes. |
 | `globals.addSandboxDirs(dirs, warn_unavailable=True, *, replace=False)` | Adds machine-to-root string/list registrations without directory probes. Local and remote roots are validated on a subsequent sandbox check. Returns `None`. |
 | `globals.removeSandboxDirs(dirs)` | Removes exact registered root strings and matching pending checks. Missing roots are ignored; files, overlapping roots, and `/tmp` access remain. Returns `None`. |
 
 Import these sandbox operations from `amscjobmanager.globals`. Changes are
-session-local. Running servers expose them only through the password-protected
-[local admin utility](server.md#local-administration), not MCP.
+session-local. Running servers expose listing through MCP's
+`list_sandbox_directories(machine=None)`; changes require the password-protected
+[local admin utility](server.md#local-administration).
 
 ## Workflow management
 

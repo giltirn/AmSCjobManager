@@ -1,4 +1,4 @@
-"""MCP workflow submission, inspection, cancellation and user-interaction tools."""
+"""MCP workflow, sandbox-inspection, and user-interaction tools."""
 
 import json
 from typing import Annotated, Literal
@@ -8,6 +8,7 @@ from mcp.types import CallToolResult, TextContent, ToolAnnotations
 from pydantic import BaseModel, Field, StrictBool, StrictStr
 
 from ..action_manager import ActionStatus
+from ..globals import getSandboxDirs
 from ..workflow import Workflow
 from .queries import QueryResponseError
 from .runtime import ServerRuntime
@@ -83,14 +84,26 @@ class WorkflowReceipt(BaseModel):
     workflow_status: str = Field(description='Recorded overall workflow status; cancellation may remain CANCELING until confirmed.')
 
 
+class SandboxDirectoryListing(BaseModel):
+    """Registered root paths, without internal directory-validation metadata.
+
+    result (dict[str, list[str]]) maps lowercase machines to exact registered
+    filesystem root strings in registration order. Empty lists mean no roots
+    for that entry; {} means no matching entries. Implicit /tmp and staging
+    allowances are excluded. Listing performs no authentication or path probes.
+    """
+
+    result: dict[str, list[str]] = Field(description='Registered filesystem roots grouped by lowercase machine name. Lists contain path strings, including roots awaiting validation. Empty lists mean no registered roots; an empty object means no matching machines. Implicit /tmp and staging allowances are excluded.')
+
+
 def registerTools(mcp_server: MCPServer, runtime: ServerRuntime) -> None:
-    """Register workflow lifecycle and user-interaction tools on an MCP server.
+    """Register workflow, sandbox-listing, and user-interaction tools on an MCP server.
 
     mcp_server (MCPServer) receives the tool handlers and response schemas;
     runtime (ServerRuntime) supplies manager readiness, workflow state and its
     query queue. Return None. Registration starts no workers or listeners.
-    Workflow tools require a live manager; query tools remain available during
-    initialization or failure without acquiring the manager/database lock.
+    Workflow and sandbox-listing tools require a live manager; user-query tools
+    remain available during initialization or failure without the manager lock.
     """
     @mcp_server.tool(annotations=ToolAnnotations(read_only_hint=False, destructive_hint=True))
     def submit_workflow(
@@ -280,6 +293,35 @@ def registerTools(mcp_server: MCPServer, runtime: ServerRuntime) -> None:
             structured_content={"result": records},
             content=[TextContent(type="text", text=json.dumps(records))],
         )
+
+    @mcp_server.tool(annotations=ToolAnnotations(read_only_hint=True, destructive_hint=False))
+    def list_sandbox_directories(
+        machine: Annotated[StrictStr | None, Field(description='Optional case-insensitive machine name. Omit or use null to list all registered machines; an unmatched name returns an empty object.')] = None,
+    ) -> Annotated[CallToolResult, SandboxDirectoryListing]:
+        """List registered sandbox directories for all machines or one selected machine.
+
+        machine (str | None, default None) filters a case-insensitive machine;
+        None includes all entries. Return CallToolResult with {'result':
+        dict[str, list[str]]}, described by SandboxDirectoryListing. This includes
+        roots awaiting validation and excludes implicit /tmp/staging allowances.
+        No directory probes, authentication, mutations, or admin password are
+        required. An unavailable manager returns is_error=True and {'error':
+        {'code': 'manager_unavailable', 'message': str}} rather than stale state.
+        """
+        error = {'code': 'manager_unavailable',
+                 'message': f'The workflow manager is {runtime.state}; check pending user queries and the server log'}
+        manager = runtime.manager
+        if manager is not None and manager.isAlive():
+            with manager:
+                if manager.isAlive():
+                    records = getSandboxDirs(machine)
+                    error = None
+        if error is not None:
+            return CallToolResult(is_error=True, structured_content={'error': error},
+                                  content=[TextContent(type='text', text=error['message'])])
+        listing = SandboxDirectoryListing(result=records).model_dump(mode='json')
+        return CallToolResult(structured_content=listing,
+                              content=[TextContent(type='text', text=json.dumps(records))])
 
     @mcp_server.tool(annotations=ToolAnnotations(read_only_hint=True, destructive_hint=False))
     def list_user_queries() -> Annotated[CallToolResult, list[UserQuerySummary]]:

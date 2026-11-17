@@ -96,6 +96,23 @@ def checkSafePath(machine: str, path: str | pathlib.Path, *, allow_tmp: bool = T
     return any(root.validated and path_p.is_relative_to(pathlib.Path(root.path).resolve()) for root in roots)
 
 
+def getSandboxDirs(machine: str | None = None) -> dict[str, list[str]]:
+    """Return registered filesystem roots grouped by machine, without directory probes.
+
+    machine (str | None, default None) optionally filters a case-insensitive
+    machine name; None selects all registrations. Return dict[str, list[str]]
+    with lowercase keys and exact root strings, including unvalidated roots and
+    empty lists. An unmatched machine or uninitialized mapping returns {}.
+    Returned dictionaries/lists are copies. Implicit /tmp and staging allowances
+    are not registrations and are not added to this result.
+    """
+    selected = None if machine is None else machine.lower()
+    with _sandbox_lock:
+        return {name: [root.path for root in roots]
+                for name, roots in (remote_workdir or {}).items()
+                if selected is None or name == selected}
+
+
 def addSandboxDirs(dirs: Dict[str,str | List[str]], warn_unavailable=True, *,
                    replace=False):
     """Register sandbox roots for directory validation on a subsequent sandbox check.

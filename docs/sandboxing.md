@@ -45,6 +45,11 @@ success is retained even if another root fails. Removing a root discards its
 record; re-adding the same path requires fresh validation. The flag does not
 guarantee future existence and does not replace path-membership checks.
 Configuration JSON and setup return values still contain plain paths.
+`globals.getSandboxDirs(machine=None)` returns a copied mapping of plain paths,
+optionally filtered by case-insensitive machine name, without validating them.
+The MCP/CLI counterpart is
+[`list_sandbox_directories`](server.md#list-sandbox-directories); it requires no
+admin password and excludes implicit `/tmp` and staging allowances.
 
 Path arguments and configured path fields must not contain `~`, including in
 local paths or literal filenames such as `result~`. The manager host's username

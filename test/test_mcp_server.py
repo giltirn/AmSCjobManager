@@ -47,6 +47,7 @@ from unittest.mock import AsyncMock, patch
 
 from amscjobmanager.logging import wfmanLog
 from amscjobmanager import logging as manager_logging
+from amscjobmanager import globals as manager_globals
 
 try:
     from mcp import Client
@@ -423,7 +424,7 @@ class MCPToolTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(response.is_error)
             self.assertEqual(response.structured_content['error']['code'], 'manager_unavailable')
             self.assertEqual({tool.name for tool in (await call_mcp(client)).tools},
-                             {'list_workflows', 'list_user_queries', 'respond_to_user_query', 'submit_workflow', 'cancel_workflow'})
+                             {'list_workflows', 'list_sandbox_directories', 'list_user_queries', 'respond_to_user_query', 'submit_workflow', 'cancel_workflow'})
             with self.assertRaisesRegex(RuntimeError, 'cannot be restarted'):
                 manager.start()
             response = await asyncio.wait_for(call_mcp(client, 'list_workflows', {}), timeout=3)
@@ -537,6 +538,73 @@ class MCPToolTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(output.getvalue(), 'ordinary stdout\n')
                 self.assertEqual((manager_logging.wfman_log_func, manager_logging.api_log_func, manager_logging.api_query_user_func), previous_hooks)
 
+    async def test_sandbox_listing_groups_filters_and_never_validates_directories(self):
+        """Query the real MCP tool without probes, exposing paths rather than internal flags.
+
+        Cover readiness, all/filtered/empty results, case-insensitive names,
+        strict input types, generated CLI arguments, live registration changes,
+        and copied Python results that cannot mutate the owner's records.
+        """
+        from amscjobmanager.manager import JobManager
+        from amscjobmanager.server.cli import parse_tool_arguments
+        from amscjobmanager.server.runner import ManagerHTTPServer
+
+        self.enterContext(patch.object(manager_globals, 'remote_workdir', {
+            'frontier': [manager_globals.SandboxDirectory('/safe/one'),
+                         manager_globals.SandboxDirectory('/safe/two', True)],
+            'local': [],
+        }))
+        probe = self.enterContext(patch('amscjobmanager.api_general.isDirectory',
+                                       side_effect=AssertionError('Listing probed a directory')))
+        query = self.enterContext(patch.object(manager_logging, 'api_query_user_func',
+                                               side_effect=AssertionError('Listing asked a question')))
+        manager = JobManager(max_workflows_active=0)
+        server = ManagerHTTPServer(lambda: manager, port=0,
+                                   log_path=Path(tempfile.gettempdir()) / 'amsc-sandbox-list.log')
+        self.addCleanup(server.runtime.stop)
+        expected = {'frontier': ['/safe/one', '/safe/two'], 'local': []}
+
+        async with Client(server.mcp_server, cache=None) as client:
+            # Before readiness, do not expose potentially incomplete setup state.
+            unavailable = await call_mcp(client, 'list_sandbox_directories')
+            self.assertTrue(unavailable.is_error)
+            self.assertEqual(unavailable.structured_content['error']['code'], 'manager_unavailable')
+            server.runtime.start()
+            await asyncio.to_thread(server.runtime._startup_worker.future.result, 3)
+
+            tools = await client.list_tools()
+            tool = next(tool for tool in tools.tools if tool.name == 'list_sandbox_directories')
+            self.assertTrue(tool.annotations.read_only_hint)
+            self.assertIn('result', tool.output_schema['properties'])
+            request = parse_tool_arguments(tool, ['--machine', 'FRONTIER'])
+            self.assertEqual(request.arguments, {'machine': 'FRONTIER'})
+            for arguments, paths in (({}, expected), ({'machine': None}, expected),
+                                     ({'machine': 'FrOnTiEr'}, {'frontier': expected['frontier']}),
+                                     ({'machine': 'local'}, {'local': []}), ({'machine': 'unknown'}, {})):
+                result = await call_mcp(client, 'list_sandbox_directories', arguments)
+                self.assertFalse(result.is_error, result)
+                self.assertEqual(result.structured_content, {'result': paths})
+            invalid = await call_mcp(client, 'list_sandbox_directories', {'machine': 42})
+            self.assertTrue(invalid.is_error)
+
+            # Read current registrations, including additions not yet validated,
+            # and keep returned lists separate from the owner's records.
+            copied = manager_globals.getSandboxDirs()
+            copied['frontier'].clear()
+            self.assertEqual(manager_globals.getSandboxDirs(), expected)
+            manager_globals.addSandboxDirs({'local': '/new/local'})
+            added = await call_mcp(client, 'list_sandbox_directories', {'machine': 'LOCAL'})
+            self.assertEqual(added.structured_content, {'result': {'local': ['/new/local']}})
+            manager_globals.removeSandboxDirs({'local': '/new/local'})
+            removed = await call_mcp(client, 'list_sandbox_directories', {'machine': 'local'})
+            self.assertEqual(removed.structured_content, {'result': {'local': []}})
+            with patch.object(manager_globals, 'remote_workdir', None):
+                empty = await call_mcp(client, 'list_sandbox_directories')
+                self.assertEqual(empty.structured_content, {'result': {}})
+        self.assertFalse(manager_globals.remote_workdir['frontier'][0].validated)
+        probe.assert_not_called()
+        query.assert_not_called()
+
     async def test_listing_statuses_errors_and_public_fields(self):
         """Exercise tool discovery, listing, filters, and validation through real MCP.
 
@@ -570,7 +638,7 @@ class MCPToolTests(unittest.IsolatedAsyncioTestCase):
         async with Client(server.mcp_server, cache=None) as client:
             tools = await call_mcp(client)
             self.assertEqual({tool.name for tool in tools.tools},
-                             {'list_workflows', 'list_user_queries', 'respond_to_user_query', 'submit_workflow', 'cancel_workflow'})
+                             {'list_workflows', 'list_sandbox_directories', 'list_user_queries', 'respond_to_user_query', 'submit_workflow', 'cancel_workflow'})
             result = await call_mcp(client, 'list_workflows', {})
             self.assertEqual(result.structured_content, {'result': []})
             action = ExecuteJobComputeAction(
@@ -922,7 +990,7 @@ class MCPSubprocessTests(unittest.TestCase):
                 self.assertEqual(completed.returncode, 0, completed.stderr)
                 tools = json.loads(completed.stdout)['results'][0]['result']
                 self.assertEqual({tool['name'] for tool in tools},
-                                 {'list_workflows', 'list_user_queries', 'respond_to_user_query', 'submit_workflow', 'cancel_workflow'})
+                                 {'list_workflows', 'list_sandbox_directories', 'list_user_queries', 'respond_to_user_query', 'submit_workflow', 'cancel_workflow'})
 
                 # stdin accepts the same request format as an inline string
                 # or file. Broken JSON must instead return a JSON error envelope.

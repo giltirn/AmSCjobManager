@@ -215,7 +215,7 @@ class APIActionTests(unittest.TestCase):
         """Complete an empty stage; reads never execute work and the cursor is constrained."""
         jobs = JobData(self.database)
         try:
-            manager = jobs.action_man[ActionClass.API]
+            manager = jobs.getManager(ActionClass.API)
             self.assertIsInstance(manager, ActionManager)
             job_id = jobs.enqueueJob(APIAction())
             jobs.startWorkflows([job_id])

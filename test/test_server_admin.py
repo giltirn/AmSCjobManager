@@ -27,6 +27,7 @@ from unittest.mock import Mock, patch
 
 from amscjobmanager import globals as sandbox
 from amscjobmanager import logging as manager_logging
+from amscjobmanager.actions_base import ActionClass
 from amscjobmanager.server.admin import AdminRequest, AdminServer, execute_admin_command
 
 
@@ -90,24 +91,24 @@ class AdminSocketTests(unittest.IsolatedAsyncioTestCase):
             denied = await asyncio.to_thread(execute_admin_command, self.address, command,
                                             'local', None, 'wrong', node_hours=hours)
             self.assertEqual(denied.code, 'authentication_failed')
-            self.assertEqual(manager(lambda jobs: jobs.getWallets()), {})
+            self.assertEqual(manager(lambda jobs: jobs.getManager(ActionClass.COMPUTE).getWallets()), {})
         for command, hours in (('enable_wallet', None), ('recharge_wallet', 2.5),
                                ('disable_wallet', None)):
             result = await asyncio.to_thread(execute_admin_command, self.address, command,
                                             'local', None, self.password, node_hours=hours)
             self.assertTrue(result.success, result)
-        snapshot = manager(lambda jobs: jobs.getWallets())
+        snapshot = manager(lambda jobs: jobs.getManager(ActionClass.COMPUTE).getWallets())
         self.assertEqual(snapshot['local']['available_node_hours'], 2.5)
         self.assertFalse(snapshot['local']['enabled'])
         # Invalid command-specific fields must fail before changing any state.
         invalid = await self._send(json.dumps(dict(password=self.password,
             command='enable_wallet', machine='local', path='/unexpected')).encode() + b'\n')
         self.assertFalse(invalid['success'])
-        self.assertEqual(manager(lambda jobs: jobs.getWallets()), snapshot)
+        self.assertEqual(manager(lambda jobs: jobs.getManager(ActionClass.COMPUTE).getWallets()), snapshot)
         manager.stop(False, close_database=True)
         reopened = JobData(database)
         self.addCleanup(reopened.conn.close)
-        self.assertEqual(reopened.getWallets(), snapshot)
+        self.assertEqual(reopened.getManager(ActionClass.COMPUTE).getWallets(), snapshot)
         self.queries.assert_not_called()
 
     async def test_password_is_required_for_each_call_and_never_echoed(self):

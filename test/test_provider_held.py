@@ -87,7 +87,7 @@ class ProviderHeldTests(unittest.TestCase):
                 output = self.root / action_class.name
                 job_id = jobs.enqueueJob([action, APIAction([WriteFile('local', str(output), 'done')])])
                 jobs.startWorkflows([job_id])
-                manager = jobs.action_man[action_class]
+                manager = jobs.getManager(action_class)
                 self.assertEqual(jobs.headActionStatus(job_id), ActionStatus.PROVIDER_HELD)
                 self.assertEqual(jobs.jobStatus(job_id), ActionStatus.ACTIVE)
                 self.assertEqual(len(jobs.listWorkflows(statuses=ActionStatus.ACTIVE)), 1)

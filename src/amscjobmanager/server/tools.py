@@ -8,6 +8,7 @@ from mcp.types import CallToolResult, TextContent, ToolAnnotations
 from pydantic import BaseModel, Field, StrictBool, StrictStr
 
 from ..action_manager import ActionStatus
+from ..actions_base import ActionClass
 from ..globals import getSandboxDirs
 from ..workflow import Workflow
 from .queries import QueryResponseError
@@ -366,7 +367,7 @@ def registerTools(mcp_server: MCPServer, runtime: ServerRuntime) -> None:
             with manager as jobs:
                 if manager.isAlive():
                     try:
-                        records = jobs.getWallets(machine)
+                        records = jobs.getManager(ActionClass.COMPUTE).getWallets(machine)
                         error = None
                     except ValueError as exc:
                         error = {'code': 'invalid_input', 'message': str(exc)}

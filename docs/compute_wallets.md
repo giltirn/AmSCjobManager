@@ -47,13 +47,16 @@ compute provider, including stages of already submitted workflows and submission
 retries. Disabled wallets create no zero-cost accounting records or exemptions.
 Jobs already accepted without a reservation are not charged retroactively.
 
-Direct Python use exposes the same operations through `JobData`:
+For direct Python use, retrieve the compute manager through `JobData.getManager`:
 
 ```python
+from amscjobmanager.actions_base import ActionClass
+
 with manager as jobs:
-    jobs.setWalletEnabled("frontier", True)
-    jobs.rechargeWallet("frontier", 100)
-    wallets = jobs.getWallets("frontier")
+    computes = jobs.getManager(ActionClass.COMPUTE)
+    computes.setWalletEnabled("frontier", True)
+    computes.rechargeWallet("frontier", 100)
+    wallets = computes.getWallets("frontier")
 ```
 
 The direct Python interface trusts its caller. Password enforcement belongs to

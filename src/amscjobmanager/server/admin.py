@@ -16,6 +16,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, StrictStr, ValidationError, model_validator
 
 from .. import globals as sandbox
+from ..actions_base import ActionClass
 from ..logging import wfmanLog
 from ..workers import Workers, WorkerInterrupted, checkForThreadCurrentWorkerInterruption
 from .runtime import ServerRuntime
@@ -253,11 +254,12 @@ class AdminServer:
                                         with manager as jobs:
                                             if not manager.isAlive():
                                                 return AdminResponse(success=False, code='manager_unavailable', message='Workflow manager is not running.')
+                                            compute_manager = jobs.getManager(ActionClass.COMPUTE)
                                             if command == 'recharge_wallet':
-                                                jobs.rechargeWallet(machine, node_hours)
+                                                compute_manager.rechargeWallet(machine, node_hours)
                                                 message = 'Compute wallet recharged.'
                                             else:
-                                                jobs.setWalletEnabled(machine, command == 'enable_wallet')
+                                                compute_manager.setWalletEnabled(machine, command == 'enable_wallet')
                                                 message = 'Compute wallet enabled.' if command == 'enable_wallet' else 'Compute wallet disabled.'
                                 except WorkerInterrupted:
                                     raise

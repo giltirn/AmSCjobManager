@@ -47,6 +47,7 @@ from unittest.mock import AsyncMock, patch
 
 from amscjobmanager.logging import wfmanLog
 from amscjobmanager import logging as manager_logging
+from amscjobmanager.actions_base import ActionClass
 from amscjobmanager import globals as manager_globals
 
 try:
@@ -564,8 +565,8 @@ class MCPToolTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.to_thread(server.runtime._startup_worker.future.result, 3)
             empty = await call_mcp(client, 'list_compute_wallets')
             self.assertEqual(empty.structured_content, {'result': {}})
-            manager(lambda jobs: jobs.setWalletEnabled('local', True))
-            manager(lambda jobs: jobs.rechargeWallet('other', 2))
+            manager(lambda jobs: jobs.getManager(ActionClass.COMPUTE).setWalletEnabled('local', True))
+            manager(lambda jobs: jobs.getManager(ActionClass.COMPUTE).rechargeWallet('other', 2))
             tools = await client.list_tools()
             tool = next(tool for tool in tools.tools if tool.name == 'list_compute_wallets')
             self.assertTrue(tool.annotations.read_only_hint)

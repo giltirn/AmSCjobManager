@@ -119,35 +119,19 @@ class JobData:
         if point == self._test_crash_at:
             raise SimulatedCrash(point)
        
-    def setWalletEnabled(self, machine: str, enabled: bool) -> None:
-        """Enable/disable a compute wallet through its owning action manager.
+    def getManager(self, action_class: ActionClass) -> ActionManager:
+        """Retrieve the existing manager responsible for an action category.
 
-        machine (str) is case-insensitive; enabled (bool) controls new
-        reservations. Return None; new wallets have zero funds. Use JobManager's
-        lock while running. Server callers must use the privileged admin route.
+        action_class (ActionClass) selects COMPUTE, TRANSFER, or API. Return
+        that category's concrete ActionManager instance, without creating one,
+        polling providers, or changing state. An unregistered category is an
+        error. Call its public methods under JobManager's lock while running;
+        each manager owns its persistence and implementation-specific operations.
         """
-        self.action_man[ActionClass.COMPUTE].setWalletEnabled(machine, enabled)
-
-    def rechargeWallet(self, machine: str, node_hours: float) -> None:
-        """Add node-hours to a machine's persistent compute wallet.
-
-        machine (str) is case-insensitive; node_hours (positive int | float)
-        grants funds as floating-point node-hours. Return None. Missing
-        wallets are created disabled. This additive operation is not idempotent.
-        Use JobManager's lock and, on a server, the privileged admin route.
-        """
-        self.action_man[ActionClass.COMPUTE].rechargeWallet(machine, node_hours)
-
-    def getWallets(self, machine: str | None = None) -> dict:
-        """Read machine-specific balances without querying the compute provider.
-
-        machine (str | None) filters case-insensitively; None selects all recorded
-        wallets. Return dict keyed by machine, each containing enabled (bool),
-        available_node_hours/reserved_node_hours (float), and updated_at (int Unix
-        seconds). Unrecorded targets are absent and have no enforcement. Use
-        JobManager's lock while running. This query requires no admin password.
-        """
-        return self.action_man[ActionClass.COMPUTE].getWallets(machine)
+        try:
+            return self.action_man[action_class]
+        except KeyError:
+            raise ValueError(f'No action manager registered for {action_class!r}') from None
 
     def enqueueJob(self, workflow, job_group=None, *, submission_key: str | None = None) -> int:
         """Persist a sequential workflow and assign all its action IDs without starting it.
@@ -778,17 +762,6 @@ class JobData:
             return conn.execute('SELECT COUNT(*) FROM jobs WHERE workflow_status IN (' +
                                 ','.join('?' for _ in statuses) + ')',
                                 tuple(status.name for status in statuses)).fetchone()[0]
-
-    def getLiveActions(self, action_class: ActionClass) -> list[dict]:
-        """List provider-owned LIVE actions of the selected category without polling.
-
-        action_class (ActionClass) selects COMPUTE, TRANSFER, or API. Return
-        list[dict] for ACTIVE/PROVIDER_HELD actions, containing job_id (positive
-        workflow ID), api_key (str | None provider ID), api_status (str | None),
-        and action-specific getInfo fields. API returns [] because its unfinished
-        operations are SCHEDULING, outside LIVE. List positions are not action IDs.
-        """
-        return self.action_man[action_class].getLiveActions()
 
     def stopWorkers(self) -> None:
         """Take no arguments; signal all action managers' workers and return None.

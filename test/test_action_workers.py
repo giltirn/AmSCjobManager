@@ -133,7 +133,7 @@ class ActionWorkerTests(unittest.TestCase):
         propagates the terminal action state to the workflow record.
         """
         jobs = JobData(self.root / 'autonomous-compute.sqlite', poll_freq=.01)
-        action = ExecuteJobComputeAction('machine', 'queue', 'account', '30', 'sleep', ['1'], '/tmp', 1, 1, 0)
+        action = ExecuteJobComputeAction('machine', 'queue', 'account', '30', 'sleep', ['1'], '/tmp', 1, 0, nodes=1)
         checked, available = Event(), Event()
 
         def resource_status():
@@ -171,7 +171,7 @@ class ActionWorkerTests(unittest.TestCase):
         provider request, and it must retain the configured interval afterward.
         """
         jobs = JobData(self.root / 'recorded-polling.sqlite', poll_freq=3600)
-        action = ExecuteJobComputeAction('local', '', '', '60', '/bin/true', [], str(self.root), 1, 1, 0)
+        action = ExecuteJobComputeAction('local', '', '', '60', '/bin/true', [], str(self.root), 1, 0, nodes=1)
         try:
             with patch('amscjobmanager.compute_actions.executeJob', return_value='remote-1'), \
                  patch('amscjobmanager.compute_action_manager.getJobState', return_value='active') as poll:
@@ -208,7 +208,7 @@ class ActionWorkerTests(unittest.TestCase):
         """
         database = self.root / 'constructor-recovery.sqlite'
         jobs = JobData(database, poll_freq=.01)
-        action = ExecuteJobComputeAction('local', '', '', '60', '/bin/true', [], str(self.root), 1, 1, 0)
+        action = ExecuteJobComputeAction('local', '', '', '60', '/bin/true', [], str(self.root), 1, 0, nodes=1)
         try:
             with patch('amscjobmanager.compute_actions.executeJob', return_value='remote-1'), \
                  patch('amscjobmanager.compute_action_manager.getJobState', return_value='active'):
@@ -249,7 +249,7 @@ class ActionWorkerTests(unittest.TestCase):
         """
         database = self.root / 'canceled.sqlite'
         jobs = JobData(database, _test_crash_at='action_intent_persisted')
-        action = ExecuteJobComputeAction('local', '', '', '60', '/bin/true', [], str(self.root), 1, 1, 0)
+        action = ExecuteJobComputeAction('local', '', '', '60', '/bin/true', [], str(self.root), 1, 0, nodes=1)
         job_id = jobs.enqueueJob(action)
         with self.assertRaises(SimulatedCrash):
             jobs.startWorkflows([job_id])
@@ -283,7 +283,7 @@ class ActionWorkerTests(unittest.TestCase):
         worker without treating the stop signal as a request to cancel the job.
         """
         jobs = JobData(self.root / 'shutdown.sqlite', poll_freq=.01)
-        action = ExecuteJobComputeAction('machine', 'queue', 'account', '30', 'sleep', ['1'], '/tmp', 1, 1, 0)
+        action = ExecuteJobComputeAction('machine', 'queue', 'account', '30', 'sleep', ['1'], '/tmp', 1, 0, nodes=1)
         try:
             with patch.object(manager_logging, 'api_query_user_func', self._ask), \
                  patch.object(ExecuteJobComputeAction, 'queryResourceStatus', return_value=True), \
@@ -356,7 +356,7 @@ class ActionWorkerTests(unittest.TestCase):
             calls.append(kwargs['name'])
             return 'remote-1'
 
-        action = ExecuteJobComputeAction('local', '', '', '60', '/bin/true', [], str(self.root), 1, 1, 0)
+        action = ExecuteJobComputeAction('local', '', '', '60', '/bin/true', [], str(self.root), 1, 0, nodes=1)
         try:
             with patch('amscjobmanager.compute_actions.executeJob', side_effect=submit), \
                  patch('amscjobmanager.compute_action_manager.getJobState', return_value='active'), \
@@ -385,7 +385,7 @@ class ActionWorkerTests(unittest.TestCase):
         repeatedly interrupting its own query or issuing duplicate cancellations.
         """
         jobs = JobData(self.root / 'cancel-query.sqlite', poll_freq=.01)
-        action = ExecuteJobComputeAction('local', '', '', '60', '/bin/true', [], str(self.root), 1, 1, 0)
+        action = ExecuteJobComputeAction('local', '', '', '60', '/bin/true', [], str(self.root), 1, 0, nodes=1)
 
         def cancel(*args, **kwargs):
             """Ask for authentication, then return None as a successful provider cancel."""
@@ -446,7 +446,7 @@ class ActionWorkerTests(unittest.TestCase):
             accepted.append('remote-1')
             return 'remote-1'
 
-        action = ExecuteJobComputeAction('local', '', '', '60', '/bin/true', [], str(self.root), 1, 1, 0)
+        action = ExecuteJobComputeAction('local', '', '', '60', '/bin/true', [], str(self.root), 1, 0, nodes=1)
         try:
             with patch.object(manager, '_executeAction', side_effect=execute), \
                  patch('amscjobmanager.compute_actions.executeJob', side_effect=submit), \
@@ -488,7 +488,7 @@ class ActionWorkerTests(unittest.TestCase):
         try:
             with patch('amscjobmanager.compute_actions.executeJob', side_effect=submit), \
                  patch('amscjobmanager.compute_action_manager.cancelJob') as cancel:
-                action = ExecuteJobComputeAction('local', '', '', '60', '/bin/true', [], str(self.root), 1, 1, 0)
+                action = ExecuteJobComputeAction('local', '', '', '60', '/bin/true', [], str(self.root), 1, 0, nodes=1)
                 job_id = jobs.enqueueJob(action)
                 jobs.startWorkflows([job_id])
                 self.assertTrue(self.entered.wait(1))
@@ -514,7 +514,7 @@ class ActionWorkerTests(unittest.TestCase):
     def test_active_poll_query_keeps_cached_state_and_does_not_resubmit(self):
         """A query during active polling leaves the job ACTIVE and other work moving."""
         jobs = JobData(self.root / 'poll.sqlite', poll_freq=.01)
-        action = ExecuteJobComputeAction('local', '', '', '60', '/bin/true', [], str(self.root), 1, 1, 0)
+        action = ExecuteJobComputeAction('local', '', '', '60', '/bin/true', [], str(self.root), 1, 0, nodes=1)
         challenge = Event()
         poll_questions = []
 
@@ -558,7 +558,7 @@ class ActionWorkerTests(unittest.TestCase):
         raw_connection = sqlite3.connect(self.root / 'legacy.sqlite', check_same_thread=False)
         raw_connection.row_factory = sqlite3.Row
         connection = LockedConnection(raw_connection)
-        action = ExecuteJobComputeAction('local', '', '', '60', '/bin/true', [], str(self.root), 1, 1, 0)
+        action = ExecuteJobComputeAction('local', '', '', '60', '/bin/true', [], str(self.root), 1, 0, nodes=1)
         with connection as conn:
             conn.execute('CREATE TABLE computes (action_id INTEGER PRIMARY KEY, machine TEXT, details BLOB, '
                          'api_key TEXT, api_status TEXT, action_status TEXT, last_update INTEGER, job_id INTEGER, '
@@ -689,7 +689,7 @@ class ActionWorkerTests(unittest.TestCase):
         """
         ready, release = Event(), Event()
         jobs = JobData(self.root / 'cancel-before-entry.sqlite', poll_freq=.01)
-        action = ExecuteJobComputeAction('local', '', '', '60', '/bin/true', [], str(self.root), 1, 1, 0)
+        action = ExecuteJobComputeAction('local', '', '', '60', '/bin/true', [], str(self.root), 1, 0, nodes=1)
 
         def gated_thread(*, target, args=(), name, daemon):
             """Return a real Thread that delays target (callable) until released.
@@ -739,7 +739,7 @@ class ActionWorkerTests(unittest.TestCase):
             state['status'] = 'canceled'
 
         jobs = JobData(database, _test_crash_at='remote_cancellation_completed', poll_freq=.01)
-        action = ExecuteJobComputeAction('local', '', '', '60', '/bin/true', [], str(self.root), 1, 1, 0)
+        action = ExecuteJobComputeAction('local', '', '', '60', '/bin/true', [], str(self.root), 1, 0, nodes=1)
         try:
             with patch('amscjobmanager.compute_actions.executeJob', return_value='remote-1'), \
                  patch('amscjobmanager.compute_action_manager.getJobState', side_effect=lambda *args: state['status']), \
@@ -818,7 +818,7 @@ with patch.object(logging, 'api_query_user_func', ask), patch.object(WriteFile, 
      patch('amscjobmanager.compute_actions.executeJob', side_effect=submit), \
      patch('amscjobmanager.compute_action_manager.getJobState', side_effect=status):
     action = (APIAction([WriteFile('local', str(root / 'first'), 'first'), WriteFile('local', str(root / 'second'), 'second')])
-              if mode == 'api' else ExecuteJobComputeAction('local', '', '', '60', '/bin/true', [], str(root), 1, 1, 0))
+              if mode == 'api' else ExecuteJobComputeAction('local', '', '', '60', '/bin/true', [], str(root), 1, 0, nodes=1))
     jobs.enqueueJob(action)
     deadline = time.monotonic() + 5
     try:

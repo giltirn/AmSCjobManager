@@ -46,8 +46,8 @@ class WorkflowStorageTests(unittest.TestCase):
         """
         expression = ['prepared', 'AND', ['prepared', 'OR', 'prepared']]
         stages = [APIAction(producer_key='prepared'),
-                  ExecuteJobComputeAction('local', '', '', '60', '/bin/true', [], '/tmp', 1, 1, 0,
-                                          depends_on=expression, producer_key='computed'),
+                  ExecuteJobComputeAction('local', '', '', '60', '/bin/true', [], '/tmp', 1, 0,
+                                          depends_on=expression, producer_key='computed', nodes=1),
                   GlobusTransfer('dest', '/output', 'source', '/input', depends_on='computed')]
         job_id = self.jobs.enqueueJob(stages)
         with self.jobs.conn as conn:

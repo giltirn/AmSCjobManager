@@ -155,7 +155,7 @@ class MCPQueryTests(unittest.IsolatedAsyncioTestCase):
         async with Client(server.mcp_server, cache=None) as client:
             tools = await call_mcp(client)
             self.assertEqual({tool.name for tool in tools.tools},
-                             {'list_workflows', 'list_user_queries', 'respond_to_user_query', 'submit_workflow', 'cancel_workflow'})
+                             {'list_workflows', 'list_sandbox_directories', 'list_compute_wallets', 'list_user_queries', 'respond_to_user_query', 'submit_workflow', 'cancel_workflow'})
             response = await call_mcp(client, 'list_workflows')
             self.assertEqual(response.structured_content['error']['code'], 'manager_unavailable')
             question = await self._pending(client)
@@ -206,7 +206,7 @@ class MCPQueryTests(unittest.IsolatedAsyncioTestCase):
                     """Prepare a queried workflow and independent API work; return JobManager."""
                     manager = JobManager(self.root / f'{kind}.sqlite', poll_freq=.01)
                     action = (APIAction([WriteFile('local', str(blocked), 'done')]) if kind == 'api' else
-                              ExecuteJobComputeAction('local', '', '', '60', '/bin/true', [], str(self.root), 1, 1, 0))
+                              ExecuteJobComputeAction('local', '', '', '60', '/bin/true', [], str(self.root), 1, 0, nodes=1))
                     ids['waiting'] = manager.job_data.enqueueJob(action)
                     ids['other'] = manager.job_data.enqueueJob(APIAction([WriteFile('local', str(other), 'done')]))
                     return manager

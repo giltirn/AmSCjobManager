@@ -320,7 +320,7 @@ class APIActionTests(unittest.TestCase):
                 workflow = [APIAction([MakeDirectory('local', str(work)), WriteFile('local', str(work / 'input'), '42')]),
                             ExecuteJobComputeAction('local', 'local', 'local', '30', sys.executable,
                                 ['-c', 'from pathlib import Path; Path("output").write_text(Path("input").read_text())'],
-                                str(work), 1, 1, 0),
+                                str(work), 1, 0, nodes=1),
                             GlobusTransfer('destination', '/destination', 'source', '/source'),
                             APIAction([CopyFile(str(result), str(work / 'output'))])]
                 job_id = jobs.enqueueJob(workflow)

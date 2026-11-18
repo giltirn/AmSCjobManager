@@ -71,6 +71,45 @@ class AdminSocketTests(unittest.IsolatedAsyncioTestCase):
             writer.close()
             await writer.wait_closed()
 
+    async def test_wallet_commands_require_password_and_persist(self):
+        """Use the Unix protocol to budget compute, reject unauthorized grants, and reopen.
+
+        Wallet changes go through a real JobManager/JobData, while the socket
+        fixture supplies password protection. Unlike sandbox roots, the balance
+        and enable flag must remain after the manager database is reopened.
+        """
+        from amscjobmanager.manager import JobManager
+        from amscjobmanager.job_data import JobData
+
+        database = self.root / 'wallet.sqlite'
+        manager = JobManager(database, max_workflows_active=0)
+        self.runtime.manager = manager
+        self.addCleanup(manager.stop, False, close_database=True)
+        manager.start()
+        for command, hours in (('enable_wallet', None), ('recharge_wallet', 2.5)):
+            denied = await asyncio.to_thread(execute_admin_command, self.address, command,
+                                            'local', None, 'wrong', node_hours=hours)
+            self.assertEqual(denied.code, 'authentication_failed')
+            self.assertEqual(manager(lambda jobs: jobs.getWallets()), {})
+        for command, hours in (('enable_wallet', None), ('recharge_wallet', 2.5),
+                               ('disable_wallet', None)):
+            result = await asyncio.to_thread(execute_admin_command, self.address, command,
+                                            'local', None, self.password, node_hours=hours)
+            self.assertTrue(result.success, result)
+        snapshot = manager(lambda jobs: jobs.getWallets())
+        self.assertEqual(snapshot['local']['available_node_hours'], 2.5)
+        self.assertFalse(snapshot['local']['enabled'])
+        # Invalid command-specific fields must fail before changing any state.
+        invalid = await self._send(json.dumps(dict(password=self.password,
+            command='enable_wallet', machine='local', path='/unexpected')).encode() + b'\n')
+        self.assertFalse(invalid['success'])
+        self.assertEqual(manager(lambda jobs: jobs.getWallets()), snapshot)
+        manager.stop(False, close_database=True)
+        reopened = JobData(database)
+        self.addCleanup(reopened.conn.close)
+        self.assertEqual(reopened.getWallets(), snapshot)
+        self.queries.assert_not_called()
+
     async def test_password_is_required_for_each_call_and_never_echoed(self):
         """Authenticate each connection and prove failures have no sandbox/API effects."""
         with patch.object(sandbox, 'addSandboxDirs', wraps=sandbox.addSandboxDirs) as add:
@@ -382,6 +421,48 @@ class SandboxRemovalTests(unittest.TestCase):
 
 
 class AdminUtilityIntegrationTests(unittest.TestCase):
+    def test_admin_help_selects_commands_without_socket_or_password(self):
+        """Run the real frontend's help forms without a terminal or running server.
+
+        Main help lists descriptions; both leading help flags show each command's
+        inputs and outputs. The existing SOCKET COMMAND --help form still works,
+        and unknown command help fails with a usage error before authentication.
+        """
+        descriptions = {
+            'add_sandbox': ('Add a sandbox directory', 'path'),
+            'remove_sandbox': ('Remove an exact sandbox', 'path'),
+            'enable_wallet': ('Enable persistent compute', 'machine'),
+            'disable_wallet': ('Disable compute budgeting', 'machine'),
+            'recharge_wallet': ('Add node-hours', 'node_hours'),
+        }
+        base = [sys.executable, 'utilities/manager_admin.py']
+        for flag in ('-h', '--help'):
+            main = subprocess.run(base + [flag], stdin=subprocess.DEVNULL, capture_output=True,
+                                  text=True, start_new_session=True, timeout=10)
+            self.assertEqual(main.returncode, 0, main.stderr)
+            self.assertIn('COMMAND', main.stdout)
+            for command, (description, argument) in descriptions.items():
+                with self.subTest(flag=flag, command=command):
+                    self.assertIn(command, main.stdout)
+                    result = subprocess.run(base + [flag, command], stdin=subprocess.DEVNULL,
+                                            capture_output=True, text=True, start_new_session=True, timeout=10)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertIn(description, result.stdout)
+                    self.assertIn(argument, result.stdout)
+                    self.assertIn('Outputs:', result.stdout)
+                    self.assertIn('exit code 0', result.stdout)
+                    self.assertIn('no socket connection or password', result.stdout)
+                    self.assertNotIn('Admin password:', result.stdout + result.stderr)
+        native = subprocess.run(base + ['/unused/admin.sock', 'recharge_wallet', '--help'],
+                                stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=10)
+        self.assertEqual(native.returncode, 0, native.stderr)
+        self.assertIn('node_hours', native.stdout)
+        invalid = subprocess.run(base + ['-h', 'unknown_command'], stdin=subprocess.DEVNULL,
+                                 capture_output=True, text=True, timeout=10)
+        self.assertEqual(invalid.returncode, 2)
+        self.assertIn('Unknown command', invalid.stderr)
+        self.assertNotIn('Admin password:', invalid.stdout + invalid.stderr)
+
     def test_frontends_reject_exposed_password_input(self):
         """Run both real frontends without a terminal; neither may fall back to visible stdin.
 
@@ -409,15 +490,18 @@ class AdminUtilityIntegrationTests(unittest.TestCase):
         self.assertIn('requires --admin-socket', result.stderr)
         self.assertNotIn(secret, result.stdout + result.stderr)
 
-    def _runAdminUtility(self, address, command, directory, password):
-        """Run the real CLI with address/command/directory/password (str), returning exit/output.
+    def _runAdminUtility(self, address, command, argument, password):
+        """Run the real CLI with address/command/password (str) and argument (str | None).
+
+        Return (exit code int, output str). argument supplies a sandbox path or
+        recharge amount; None is used for enable/disable commands.
 
         Enter the secret only after the pseudo-terminal prompt, when echo is
         disabled. Bound the child to ten seconds. Never put it in argv or logs.
         """
         master, slave = pty.openpty()
         process = subprocess.Popen([sys.executable, 'utilities/manager_admin.py', str(address),
-                                    command, 'local', str(directory)], stdin=slave, stdout=slave,
+                                    command, 'local', *([] if argument is None else [str(argument)])], stdin=slave, stdout=slave,
                                    stderr=slave, start_new_session=True)
         os.close(slave)
         output = b''
@@ -525,6 +609,18 @@ class AdminUtilityIntegrationTests(unittest.TestCase):
                 self.assertNotIn('add_sandbox', json.dumps(discovery))
                 self.assertFalse(call('add_sandbox', {'machine': 'local', 'path': target})['success'])
                 self.assertEqual(call('list_sandbox_directories')['results'][0]['result'], {'local': []})
+                # Wallet mutations travel only over the password-protected CLI;
+                # read-only MCP inspection reflects the same durable balances.
+                self.assertNotIn('recharge_wallet', json.dumps(discovery))
+                self.assertEqual(self._runAdminUtility(socket_argument, 'enable_wallet', None, password)[0], 0)
+                self.assertEqual(self._runAdminUtility(socket_argument, 'recharge_wallet', '1.5', password)[0], 0)
+                wallet = call('list_compute_wallets')['results'][0]['result']['local']
+                self.assertTrue(wallet['enabled'])
+                self.assertEqual(wallet['available_node_hours'], 1.5)
+                denied = self._runAdminUtility(socket_argument, 'recharge_wallet', '5', 'wrong')
+                self.assertNotEqual(denied[0], 0)
+                self.assertEqual(call('list_compute_wallets')['results'][0]['result']['local'], wallet)
+                self.assertEqual(self._runAdminUtility(socket_argument, 'disable_wallet', None, password)[0], 0)
                 self.assertEqual(write('denied-before'), 'FAILED')
                 self.assertEqual(self._runAdminUtility(socket_argument, 'add_sandbox', directory, password)[0], 0)
                 listed = call('list_sandbox_directories', {'machine': 'LOCAL'})
@@ -571,6 +667,9 @@ class AdminUtilityIntegrationTests(unittest.TestCase):
                     else:
                         self.fail('Restart did not become ready')
                     self.assertFalse(address.exists())
+                    persisted_wallet = call('list_compute_wallets')['results'][0]['result']['local']
+                    self.assertFalse(persisted_wallet['enabled'])
+                    self.assertEqual(persisted_wallet['available_node_hours'], 1.5)
                     self.assertEqual(write('denied-after-restart'), 'FAILED')
                     self.assertTrue((directory / 'allowed').exists())
                 finally:

@@ -119,6 +119,36 @@ class JobData:
         if point == self._test_crash_at:
             raise SimulatedCrash(point)
        
+    def setWalletEnabled(self, machine: str, enabled: bool) -> None:
+        """Enable/disable a compute wallet through its owning action manager.
+
+        machine (str) is case-insensitive; enabled (bool) controls new
+        reservations. Return None; new wallets have zero funds. Use JobManager's
+        lock while running. Server callers must use the privileged admin route.
+        """
+        self.action_man[ActionClass.COMPUTE].setWalletEnabled(machine, enabled)
+
+    def rechargeWallet(self, machine: str, node_hours: float) -> None:
+        """Add node-hours to a machine's persistent compute wallet.
+
+        machine (str) is case-insensitive; node_hours (positive int | float)
+        grants funds as floating-point node-hours. Return None. Missing
+        wallets are created disabled. This additive operation is not idempotent.
+        Use JobManager's lock and, on a server, the privileged admin route.
+        """
+        self.action_man[ActionClass.COMPUTE].rechargeWallet(machine, node_hours)
+
+    def getWallets(self, machine: str | None = None) -> dict:
+        """Read machine-specific balances without querying the compute provider.
+
+        machine (str | None) filters case-insensitively; None selects all recorded
+        wallets. Return dict keyed by machine, each containing enabled (bool),
+        available_node_hours/reserved_node_hours (float), and updated_at (int Unix
+        seconds). Unrecorded targets are absent and have no enforcement. Use
+        JobManager's lock while running. This query requires no admin password.
+        """
+        return self.action_man[ActionClass.COMPUTE].getWallets(machine)
+
     def enqueueJob(self, workflow, job_group=None, *, submission_key: str | None = None) -> int:
         """Persist a sequential workflow and assign all its action IDs without starting it.
 
@@ -476,8 +506,9 @@ class JobData:
         By default return the recorded head ActionStatus, including SCHEDULING
         and intermediate COMPLETED states. If return_api_status (bool, default
         False) is True, return
-        (action_status, api_status), where api_status is the provider's status
-        string (for example 'queued'), or None before execution begins, before a remote status is known
+        (action_status, api_status), where api_status is a provider status
+        string (for example 'queued') or manager-side submission reason
+        ('INSUFFICIENT_WALLET_BALANCE'), or None before execution begins, before a remote status is known
         or when no head action exists. This is not the full API response body.
         Use jobStatus to distinguish intermediate completion from a finished
         workflow. Access through JobManager's lock while its thread is running.

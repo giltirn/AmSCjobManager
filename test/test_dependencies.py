@@ -82,10 +82,10 @@ class DependencyExpressionTests(unittest.TestCase):
         """
         condition = ['prepared', 'AND', ['solver_a', 'OR', 'solver_b']]
         stages = [APIAction([], depends_on=condition),
-                  ExecuteBatchScriptComputeAction('local', '', '', '60', 'date', '/tmp', 1, 1, 0,
-                                                  depends_on=condition),
-                  ExecuteJobComputeAction('local', '', '', '60', '/bin/true', [], '/tmp', 1, 1, 0,
-                                          depends_on=condition),
+                  ExecuteBatchScriptComputeAction('local', '', '', '60', 'date', '/tmp', 1, 0,
+                                                  depends_on=condition, nodes=1),
+                  ExecuteJobComputeAction('local', '', '', '60', '/bin/true', [], '/tmp', 1, 0,
+                                          depends_on=condition, nodes=1),
                   GlobusTransfer('dest', '/output', 'source', '/input', depends_on=condition)]
         restored = workflow_adapter.validate_json(workflow_adapter.dump_json(stages))
         self.assertEqual(restored, stages)

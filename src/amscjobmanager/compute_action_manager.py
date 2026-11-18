@@ -1,30 +1,237 @@
+"""Compute-job supervision and persistent machine-specific node-hour budgets."""
+
+import math
+import sqlite3
+import time
+
 from .action_manager import ActionStatus
 from .async_action_manager import AsyncActionManager
-import sqlite3
 from .api_general import cancelJob, getJobState, findJobByName
+from .logging import wfmanLog
+
 
 class ComputeActions(AsyncActionManager):
-    """Action manager for all compute jobs submitted via the IRI API"""
+    """Manage compute jobs and optionally reserve their cost against machine wallets."""
+
     terminal_api_statuses = {"completed", "failed", "canceled"}
-    def __init__(self, connection : sqlite3.Connection, **kwargs):
-        #IRI API: 
-        #0"new"
-        #1"queued"
-        #2"active"
-        #3"completed"
-        #4"failed"
-        #5"canceled"
-        # TODO: Live-test Slurm dependency jobs through IRI to establish whether
-        # dependency waits are reported as held or queued by each implementation.
-        smap = {"new": ActionStatus.ACTIVE, "queued" : ActionStatus.ACTIVE, "active" : ActionStatus.ACTIVE,
-                "held": ActionStatus.PROVIDER_HELD,
-                "completed" : ActionStatus.COMPLETED, "failed" : ActionStatus.FAILED, "canceled" : ActionStatus.CANCELED }
+
+    def __init__(self, connection, **kwargs):
+        """Initialize compute execution and wallet tables without enabling any wallet.
+
+        connection (LockedConnection) is the shared database owner. kwargs are
+        AsyncActionManager supervision settings. Return None. Existing balances,
+        reservations and settlements survive reopening; no configuration grants
+        funds. Missing wallets impose no budget restriction.
+        """
+        # Provider-held compute jobs wait in the queue and do not occupy nodes.
+        # TODO: Live-test Slurm dependency jobs to verify held/queued reporting.
+        smap = {"new": ActionStatus.ACTIVE, "queued": ActionStatus.ACTIVE,
+                "active": ActionStatus.ACTIVE, "held": ActionStatus.PROVIDER_HELD,
+                "completed": ActionStatus.COMPLETED, "failed": ActionStatus.FAILED,
+                "canceled": ActionStatus.CANCELED}
         super().__init__(connection, "computes", smap, **kwargs)
+        with self.conn as conn:
+            conn.execute('''CREATE TABLE IF NOT EXISTS compute_wallets (
+                machine TEXT PRIMARY KEY,
+                enabled INTEGER NOT NULL CHECK(enabled IN (0, 1)),
+                available_node_hours REAL NOT NULL CHECK(available_node_hours >= 0),
+                updated_at INTEGER NOT NULL
+            )''')
+            conn.execute('''CREATE TABLE IF NOT EXISTS compute_wallet_actions (
+                action_id INTEGER PRIMARY KEY REFERENCES computes(action_id),
+                machine TEXT NOT NULL,
+                nodes INTEGER NOT NULL CHECK(nodes > 0),
+                requested_node_hours REAL NOT NULL CHECK(requested_node_hours > 0),
+                reserved_node_hours REAL NOT NULL CHECK(reserved_node_hours >= 0),
+                used_node_hours REAL NOT NULL DEFAULT 0 CHECK(used_node_hours >= 0),
+                observed_at INTEGER,
+                provider_status TEXT,
+                settled INTEGER NOT NULL DEFAULT 0 CHECK(settled IN (0, 1))
+            )''')
+
+    def setWalletEnabled(self, machine: str, enabled: bool) -> None:
+        """Enable or disable submission budgeting for one machine, without changing funds.
+
+        machine (nonempty str) is case-insensitive. enabled (bool) controls future
+        reservations. A new wallet starts at zero. Return None. Disabling does
+        not release existing reservations; their unused funds still settle.
+        Privileged server callers must authenticate before invoking this method.
+        """
+        # Validate the public request before modifying durable wallet state.
+        if not isinstance(machine, str) or not machine.strip():
+            raise ValueError('Wallet machine must be a nonempty string')
+        if not isinstance(enabled, bool):
+            raise ValueError('Wallet enabled must be a bool')
+        machine = machine.lower()
+
+        # Preserve any existing balance while changing the admission policy.
+        # ON CONFLICT here means that if the new row's key (machine) already exists, just update the enabled and updated_at columns
+        with self.conn as conn:
+            conn.execute('''INSERT INTO compute_wallets VALUES (?, ?, 0, ?)
+                ON CONFLICT(machine) DO UPDATE SET enabled = excluded.enabled,
+                updated_at = excluded.updated_at''', (machine, enabled, int(time.time())))
+
+    def rechargeWallet(self, machine: str, node_hours: float) -> None:
+        """Add a positive node-hour grant to one persistent machine wallet.
+
+        machine (nonempty str) is case-insensitive. node_hours (finite positive
+        int | float) is stored directly as floating-point node-hours, without
+        rounding to whole seconds. Return None. A missing wallet is
+        created disabled. Recharging is additive, not idempotent: callers must
+        not blindly retry after an uncertain response. No running jobs change.
+        Privileged server callers must authenticate before invoking this method.
+        """
+        # Validate the public request before modifying durable wallet state.
+        if not isinstance(machine, str) or not machine.strip():
+            raise ValueError('Wallet machine must be a nonempty string')
+        if (isinstance(node_hours, bool) or not isinstance(node_hours, (int, float))
+                or not math.isfinite(node_hours) or node_hours <= 0):
+            raise ValueError('Node-hours must be a finite positive number')
+        node_hours = float(node_hours)
+        machine = machine.lower()
+
+        # Leave headroom for every outstanding reservation to be refunded.
+        with self.conn as conn:
+            row = conn.execute('''SELECT available_node_hours + COALESCE((SELECT SUM(reserved_node_hours)
+                FROM compute_wallet_actions WHERE machine = ? AND settled = 0), 0.0)
+                FROM compute_wallets WHERE machine = ?''', (machine, machine)).fetchone()
+            if row is not None and not math.isfinite(row[0] + node_hours):
+                raise ValueError('Wallet balance must remain finite')
+            conn.execute('''INSERT INTO compute_wallets VALUES (?, 0, ?, ?)
+                ON CONFLICT(machine) DO UPDATE SET
+                available_node_hours = available_node_hours + excluded.available_node_hours,
+                updated_at = excluded.updated_at''', (machine, node_hours, int(time.time())))
+
+    def getWallets(self, machine: str | None = None) -> dict:
+        """Return recorded wallet balances for all machines or one selected target.
+
+        machine (str | None) filters case-insensitively; None lists all wallets.
+        Return dict[str, dict] keyed by machine, empty for an unrecorded target.
+        Each value contains enabled (bool), available_node_hours (float, funds
+        after reservations), reserved_node_hours (float, unsettled reservations),
+        and updated_at (int Unix seconds). Missing wallets mean no enforcement.
+        No provider call, mutation or credential is required.
+        """
+        if machine is not None and (not isinstance(machine, str) or not machine.strip()):
+            raise ValueError('Wallet machine must be a nonempty string or None')
+
+        # Aggregate reservations without exposing mutable owner state.
+        with self.conn as conn:
+            query = '''SELECT w.*, COALESCE((SELECT SUM(reserved_node_hours) FROM
+                compute_wallet_actions a WHERE a.machine = w.machine AND a.settled = 0), 0.0)
+                AS reserved FROM compute_wallets w'''
+            rows = conn.execute(query + (' WHERE w.machine = ?' if machine is not None else '') + ' ORDER BY w.machine',
+                                () if machine is None else (machine.lower(),)).fetchall()
+            return {row['machine']: {'enabled': bool(row['enabled']),
+                    'available_node_hours': row['available_node_hours'],
+                    'reserved_node_hours': row['reserved'],
+                    'updated_at': row['updated_at']} for row in rows}
+
+    def _authorizeSubmission(self, action_id, action) -> bool:
+        """Authorize submission by reserving its cost, or record a visible wallet wait.
+
+        action_id (int) is the compute database ID; action (ComputeActionBase)
+        supplies machine, positive nodes, and walltime seconds (str). Return
+        True if budgeting is disabled, funds are already reserved, or the
+        current wallet can cover the request; otherwise return False.
+        Admission and balance debit share one transaction. Unfunded actions stay
+        SCHEDULING without a submission attempt. A disabled or missing wallet
+        permits submission without creating an accounting record. Enabling a
+        wallet applies to subsequent attempts that have no existing reservation.
+        """
+        # Compute the maximum possible reservation from the common resource fields.
+        machine = action.machine.lower()
+        seconds = int(action.time)
+        cost = seconds * action.nodes / 3600 #IRI times are in seconds
+        if cost <= 0 or not math.isfinite(cost):
+            raise ValueError('Requested node-hours must be finite and positive')
+        with self.conn as conn:
+            # Reuse a reservation after a crash or uncertain acceptance;
+            # never debit twice for the same action.
+            existing = conn.execute('SELECT 1 FROM compute_wallet_actions WHERE action_id = ?', (action_id,)).fetchone()
+
+            #Sanity check that the action is in SCHEDULING state
+            state = conn.execute('SELECT action_status FROM computes WHERE action_id = ?', (action_id,)).fetchone()
+            if state[0] != ActionStatus.SCHEDULING.name:
+                return False
+
+            wallet = conn.execute('SELECT enabled, available_node_hours FROM compute_wallets WHERE machine = ?', (machine,)).fetchone()
+            if existing is None and wallet is not None and wallet['enabled']:
+                # Apply the current wallet policy to an unreserved attempt.
+                if wallet['available_node_hours'] < cost:
+                    conn.execute("UPDATE computes SET api_status = 'INSUFFICIENT_WALLET_BALANCE' WHERE action_id = ?", (action_id,))
+                    return False
+
+                conn.execute('UPDATE compute_wallets SET available_node_hours = available_node_hours - ?, updated_at = ? WHERE machine = ?',
+                             (cost, int(time.time()), machine))
+                conn.execute('''INSERT INTO compute_wallet_actions
+                    (action_id, machine, nodes, requested_node_hours, reserved_node_hours)
+                    VALUES (?, ?, ?, ?, ?)''', (action_id, machine, action.nodes, cost, cost))
+                self._maybeSimulateCrash('wallet_reservation_recorded')
+
+            # If the attempt was previously rejected it would be marked with INSUFFICIENT_WALLET_BALANCE. It has now been accepted (user has recharged wallet or disabled it)
+            # so we can clear this flag
+            conn.execute("UPDATE computes SET api_status = NULL WHERE action_id = ? AND api_status = 'INSUFFICIENT_WALLET_BALANCE'", (action_id,))
+        self._maybeSimulateCrash('wallet_reserved')
+        return True
+
+    def _recordStatusObservation(self, conn: sqlite3.Connection, action_id, api_status, *,
+                                 finished=False, remote_work_submitted=False) -> None:
+        """Estimate occupied node-hours and settle unused funds on remote termination.
+
+        conn (sqlite3.Connection) is the caller's locked transaction; action_id
+        (int) identifies the compute action. api_status (str | None) is the raw
+        provider state. finished (bool) means completion/failure or acknowledged
+        cancellation. remote_work_submitted (bool, default False) means a remote
+        job was accepted, as established by its provider ID; False refunds the
+        full reservation when finished is True. Return None. Settlement is atomic with the caller's
+        action-state write, including after crashes. Previously settled actions
+        and jobs submitted without a reservation are not charged here.
+        """
+        # Repeated recovery observations cannot charge or refund settled work.
+        record = conn.execute('SELECT * FROM compute_wallet_actions WHERE action_id = ?', (action_id,)).fetchone()
+        if record is None or record['settled']:
+            return
+        now = int(time.time())
+        used = record['used_node_hours']
+        previous_time = record['observed_at']
+        # Without a previous observation, use the recorded submission-attempt
+        # time. This can also be None if a crash occurred after reserving funds
+        # but before recording an attempt, followed by cancellation on recovery.
+        if previous_time is None:
+            submission = conn.execute('SELECT last_submission_attempt FROM computes WHERE action_id = ?', (action_id,)).fetchone()
+            previous_time = submission[0]
+
+        # Charge uncertain transition intervals conservatively, capped at the
+        # reservation. Repeated new/queued/held observations cost nothing.
+        # Downtime after a running observation remains chargeable on recovery.
+        if previous_time is not None and (record['provider_status'] == 'active'
+                                         or api_status == 'active' or finished):
+            used = min(record['reserved_node_hours'], used + max(0, now - previous_time) * record['nodes'] / 3600)
+
+        # Publish usage and any refund within the caller's status transaction.
+        if not remote_work_submitted:
+            used = 0.0
+        if finished:
+            refund = record['reserved_node_hours'] - used
+            conn.execute('UPDATE compute_wallets SET available_node_hours = available_node_hours + ?, updated_at = ? WHERE machine = ?',
+                         (refund, now, record['machine']))
+        conn.execute('''UPDATE compute_wallet_actions SET used_node_hours = ?, observed_at = ?,
+            provider_status = ?, settled = ? WHERE action_id = ?''',
+                     (used, now, api_status, int(finished), action_id))
+        if finished:
+            self._maybeSimulateCrash('wallet_settlement_recorded')
+            if record['reserved_node_hours']:
+                wfmanLog(f'Compute wallet settled for action {action_id}: estimated {used:g} node-hours; refunded {record["reserved_node_hours"] - used:g}')
+
     def _queryStatusInternal(self, machine, api_key):
+        """Return provider job state (str) for machine (str) and api_key (str)."""
         return getJobState(machine, api_key)
 
     def _findRemoteActionByName(self, machine, name):
+        """Return provider job ID (str | None) for machine/name (str), None if absent."""
         return findJobByName(machine, name)
 
     def _cancelActionInternal(self, machine, api_key):
+        """Cancel machine's provider job; machine/api_key are str. Return None."""
         cancelJob(machine, api_key)

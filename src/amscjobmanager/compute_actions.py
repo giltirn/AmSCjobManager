@@ -18,7 +18,6 @@ class ExecuteBatchScriptComputeAction(ComputeActionBase):
 
     script_body: StrictStr
     rundir: Annotated[StrictStr, Field(description="Target working directory inside a configured sandbox.")]
-    nodes: Annotated[int, Field(strict=True, ge=1, description="Number of compute nodes; local requires one.")]
     ranks_per_node: Annotated[int, Field(strict=True, ge=1, description="MPI ranks per node.")]
     gpus_per_rank: Annotated[int, Field(strict=True, ge=0, description="GPUs per MPI rank.")]
     exclusive: StrictBool = True
@@ -42,7 +41,6 @@ class ExecuteJobComputeAction(ComputeActionBase):
     executable: Annotated[StrictStr, Field(description="Executable path or command on the target machine.")]
     arguments: List[StrictStr]
     rundir: Annotated[StrictStr, Field(description="Target working directory inside a configured sandbox.")]
-    nodes: Annotated[int, Field(strict=True, ge=1, description="Number of compute nodes; local requires one.")]
     ranks_per_node: Annotated[int, Field(strict=True, ge=1, description="MPI ranks per node.")]
     gpus_per_rank: Annotated[int, Field(strict=True, ge=0, description="GPUs per MPI rank.")]
     pre_launch: StrictStr | None = None

@@ -28,8 +28,8 @@ class WorkflowSchemaTests(unittest.TestCase):
                        DownloadFile('local', '/tmp/download', '/tmp/work/data'),
                        CopyFile('/tmp/copy', '/tmp/download'),
                        RunLocal('/bin/true', [], '/tmp')]),
-            ExecuteBatchScriptComputeAction('local', '', '', '60', 'date', '/tmp', 1, 1, 0),
-            ExecuteJobComputeAction('local', '', '', '60', '/bin/true', [], '/tmp', 1, 1, 0),
+            ExecuteBatchScriptComputeAction('local', '', '', '60', 'date', '/tmp', 1, 0, nodes=1),
+            ExecuteJobComputeAction('local', '', '', '60', '/bin/true', [], '/tmp', 1, 0, nodes=1),
             GlobusTransfer('dest', '/result', 'source', '/input', 'filesystem', 'globus'),
         ]
         encoded = workflow_adapter.dump_json(stages)

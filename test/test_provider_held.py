@@ -46,7 +46,7 @@ class ProviderHeldTests(unittest.TestCase):
         }
         self.enterContext(patch.object(compute_action_manager, 'findJobByName', return_value=None))
         self.enterContext(patch.object(globus_transfer_action, 'findGlobusTransferByLabel', return_value=None))
-        self.actions = [ExecuteJobComputeAction('local', '', '', '60', '/bin/true', [], '/tmp', 1, 1, 0),
+        self.actions = [ExecuteJobComputeAction('local', '', '', '60', '/bin/true', [], '/tmp', 1, 0, nodes=1),
                         GlobusTransfer('dest', '/output', 'source', '/input')]
 
     def _newJobs(self, *, filename=None, workers=False):

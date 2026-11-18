@@ -1,4 +1,4 @@
-"""MCP workflow, sandbox-inspection, and user-interaction tools."""
+"""MCP workflow, sandbox/wallet inspection, and user-interaction tools."""
 
 import json
 from typing import Annotated, Literal
@@ -31,7 +31,8 @@ class WorkflowSummary(BaseModel):
         head_action_class (str): ActionClass name: COMPUTE, TRANSFER, API, or NONE.
         head_action_status (str): Exact head ActionStatus name, including
             SCHEDULING, PROVIDER_HELD, and intermediate COMPLETED states.
-        api_status (str | None): Provider status such as 'queued' or 'ACTIVE',
+        api_status (str | None): Provider status such as 'queued' or 'ACTIVE', or a manager-side
+            submission reason such as 'INSUFFICIENT_WALLET_BALANCE',
             preserving provider casing; None if no head status is recorded.
             This is not the complete API response body.
         last_status_change (int | None): Recorded Unix timestamp in whole
@@ -46,7 +47,7 @@ class WorkflowSummary(BaseModel):
     head_action_type: str | None = Field(description='Head action class name; NoneType after normal workflow completion.')
     head_action_class: str = Field(description='Action category: COMPUTE, TRANSFER, API, or NONE.')
     head_action_status: str = Field(description='Exact head status, including SCHEDULING, PROVIDER_HELD, and intermediate COMPLETED.')
-    api_status: str | None = Field(description='Recorded provider status with original casing, such as queued or ACTIVE; null if unknown. Not the full API response.')
+    api_status: str | None = Field(description='Recorded provider status with original casing, or submission reason INSUFFICIENT_WALLET_BALANCE while SCHEDULING; null if unknown. Not the full API response.')
     last_status_change: int | None = Field(description='Recorded Unix timestamp in whole seconds; not necessarily the last API poll time.')
 
 
@@ -96,13 +97,36 @@ class SandboxDirectoryListing(BaseModel):
     result: dict[str, list[str]] = Field(description='Registered filesystem roots grouped by lowercase machine name. Lists contain path strings, including roots awaiting validation. Empty lists mean no registered roots; an empty object means no matching machines. Implicit /tmp and staging allowances are excluded.')
 
 
+class ComputeWalletSummary(BaseModel):
+    """One recorded machine budget, expressed in node-hours.
+
+    enabled (bool) controls future reservations; available_node_hours (float)
+    excludes reserved funds. reserved_node_hours (float) sums unsettled full
+    reservations. updated_at (int) is Unix seconds for the last wallet mutation.
+    """
+
+    enabled: bool = Field(description='Whether new compute admissions require funds; missing wallets are unrestricted.')
+    available_node_hours: float = Field(description='Unreserved machine balance, in node-hours.')
+    reserved_node_hours: float = Field(description='Full unsettled compute reservations, in node-hours.')
+    updated_at: int = Field(description='Last wallet mutation as Unix time in whole seconds.')
+
+
+class ComputeWalletListing(BaseModel):
+    """Wallets keyed by case-insensitive machine name; missing means unrestricted.
+
+    result (dict[str, ComputeWalletSummary]) is empty when no wallets match.
+    """
+
+    result: dict[str, ComputeWalletSummary]
+
+
 def registerTools(mcp_server: MCPServer, runtime: ServerRuntime) -> None:
-    """Register workflow, sandbox-listing, and user-interaction tools on an MCP server.
+    """Register workflow, sandbox/wallet inspection, and user-interaction MCP tools.
 
     mcp_server (MCPServer) receives the tool handlers and response schemas;
     runtime (ServerRuntime) supplies manager readiness, workflow state and its
     query queue. Return None. Registration starts no workers or listeners.
-    Workflow and sandbox-listing tools require a live manager; user-query tools
+    Workflow and sandbox/wallet inspection tools require a live manager; user-query tools
     remain available during initialization or failure without the manager lock.
     """
     @mcp_server.tool(annotations=ToolAnnotations(read_only_hint=False, destructive_hint=True))
@@ -320,6 +344,36 @@ def registerTools(mcp_server: MCPServer, runtime: ServerRuntime) -> None:
             return CallToolResult(is_error=True, structured_content={'error': error},
                                   content=[TextContent(type='text', text=error['message'])])
         listing = SandboxDirectoryListing(result=records).model_dump(mode='json')
+        return CallToolResult(structured_content=listing,
+                              content=[TextContent(type='text', text=json.dumps(records))])
+
+    @mcp_server.tool(annotations=ToolAnnotations(read_only_hint=True, destructive_hint=False))
+    def list_compute_wallets(
+        machine: Annotated[StrictStr | None, Field(description='Optional case-insensitive machine filter; omit to list all recorded wallets. Missing wallets impose no limit.')] = None,
+    ) -> Annotated[CallToolResult, ComputeWalletListing]:
+        """List persistent compute wallet balances without changing them.
+
+        machine (str | None) filters a target; None selects all recorded wallets.
+        Return CallToolResult with {'result': dict[str, ComputeWalletSummary]}.
+        Balances are node-hours; missing entries mean budgeting is disabled.
+        This read-only tool requires no password. Mutations use the local admin
+        utility. An unavailable manager or invalid filter returns is_error=True
+        with {'error': {'code': str, 'message': str}}.
+        """
+        error = {'code': 'manager_unavailable', 'message': f'The workflow manager is {runtime.state}'}
+        manager = runtime.manager
+        if manager is not None and manager.isAlive():
+            with manager as jobs:
+                if manager.isAlive():
+                    try:
+                        records = jobs.getWallets(machine)
+                        error = None
+                    except ValueError as exc:
+                        error = {'code': 'invalid_input', 'message': str(exc)}
+        if error is not None:
+            return CallToolResult(is_error=True, structured_content={'error': error},
+                                  content=[TextContent(type='text', text=error['message'])])
+        listing = ComputeWalletListing(result=records).model_dump(mode='json')
         return CallToolResult(structured_content=listing,
                               content=[TextContent(type='text', text=json.dumps(records))])
 

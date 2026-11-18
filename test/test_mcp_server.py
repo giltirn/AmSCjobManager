@@ -424,7 +424,7 @@ class MCPToolTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(response.is_error)
             self.assertEqual(response.structured_content['error']['code'], 'manager_unavailable')
             self.assertEqual({tool.name for tool in (await call_mcp(client)).tools},
-                             {'list_workflows', 'list_sandbox_directories', 'list_user_queries', 'respond_to_user_query', 'submit_workflow', 'cancel_workflow'})
+                             {'list_workflows', 'list_sandbox_directories', 'list_compute_wallets', 'list_user_queries', 'respond_to_user_query', 'submit_workflow', 'cancel_workflow'})
             with self.assertRaisesRegex(RuntimeError, 'cannot be restarted'):
                 manager.start()
             response = await asyncio.wait_for(call_mcp(client, 'list_workflows', {}), timeout=3)
@@ -538,6 +538,64 @@ class MCPToolTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(output.getvalue(), 'ordinary stdout\n')
                 self.assertEqual((manager_logging.wfman_log_func, manager_logging.api_log_func, manager_logging.api_query_user_func), previous_hooks)
 
+    async def test_compute_wallet_listing_and_visible_submission_wait(self):
+        """Read budgets and the wallet-wait marker through MCP, without privileged tools.
+
+        Fund changes use JobData directly, standing in for the separate admin
+        endpoint. A real compute worker must wait without submitting; its reason
+        must appear in list_workflows and survive schema/CLI serialization.
+        """
+        from amscjobmanager.manager import JobManager
+        from amscjobmanager.server.cli import parse_tool_arguments
+        from amscjobmanager.server.runner import ManagerHTTPServer
+        from amscjobmanager.compute_actions import ExecuteJobComputeAction
+
+        self.enterContext(patch('amscjobmanager.api_general.queryMachineStatus', return_value=True))
+        submit = self.enterContext(patch('amscjobmanager.compute_actions.executeJob',
+                                        side_effect=AssertionError('Unfunded job submitted')))
+        manager = JobManager(max_workflows_active=0, poll_freq=.02)
+        server = ManagerHTTPServer(lambda: manager, port=0,
+                                   log_path=Path(tempfile.gettempdir()) / 'amsc-wallet-list.log')
+        self.addCleanup(server.runtime.stop)
+        async with Client(server.mcp_server, cache=None) as client:
+            unavailable = await call_mcp(client, 'list_compute_wallets')
+            self.assertTrue(unavailable.is_error)
+            server.runtime.start()
+            await asyncio.to_thread(server.runtime._startup_worker.future.result, 3)
+            empty = await call_mcp(client, 'list_compute_wallets')
+            self.assertEqual(empty.structured_content, {'result': {}})
+            manager(lambda jobs: jobs.setWalletEnabled('local', True))
+            manager(lambda jobs: jobs.rechargeWallet('other', 2))
+            tools = await client.list_tools()
+            tool = next(tool for tool in tools.tools if tool.name == 'list_compute_wallets')
+            self.assertTrue(tool.annotations.read_only_hint)
+            request = parse_tool_arguments(tool, ['--machine', 'LOCAL'])
+            self.assertEqual(request.arguments, {'machine': 'LOCAL'})
+            result = await call_mcp(client, 'list_compute_wallets', request.arguments)
+            self.assertEqual(set(result.structured_content['result']), {'local'})
+            self.assertEqual(result.structured_content['result']['local']['available_node_hours'], 0)
+            all_wallets = await call_mcp(client, 'list_compute_wallets')
+            self.assertEqual(set(all_wallets.structured_content['result']), {'local', 'other'})
+            invalid = await call_mcp(client, 'list_compute_wallets', {'machine': 4})
+            self.assertTrue(invalid.is_error)
+            unknown = await call_mcp(client, 'list_compute_wallets', {'machine': 'missing'})
+            self.assertEqual(unknown.structured_content, {'result': {}})
+            job = manager(lambda jobs: jobs.enqueueJob(ExecuteJobComputeAction(
+                machine='local', account='', queue='', time='60', nodes=1,
+                executable='/bin/true', arguments=[], rundir='/tmp', ranks_per_node=1, gpus_per_rank=0)))
+            manager(lambda jobs: jobs.startWorkflows([job]))
+            for _ in range(100):
+                state = manager(lambda jobs: jobs.headActionStatus(job, return_api_status=True))
+                if state[1] == 'INSUFFICIENT_WALLET_BALANCE':
+                    break
+                await asyncio.sleep(.02)
+            listing = await call_mcp(client, 'list_workflows', {'workflow_id': job})
+            record = listing.structured_content['result'][0]
+            self.assertEqual(record['api_status'], 'INSUFFICIENT_WALLET_BALANCE')
+            self.assertEqual(record['head_action_status'], 'SCHEDULING')
+            self.assertFalse(any(tool.name in ('enable_wallet', 'disable_wallet', 'recharge_wallet') for tool in tools.tools))
+        submit.assert_not_called()
+
     async def test_sandbox_listing_groups_filters_and_never_validates_directories(self):
         """Query the real MCP tool without probes, exposing paths rather than internal flags.
 
@@ -638,7 +696,7 @@ class MCPToolTests(unittest.IsolatedAsyncioTestCase):
         async with Client(server.mcp_server, cache=None) as client:
             tools = await call_mcp(client)
             self.assertEqual({tool.name for tool in tools.tools},
-                             {'list_workflows', 'list_sandbox_directories', 'list_user_queries', 'respond_to_user_query', 'submit_workflow', 'cancel_workflow'})
+                             {'list_workflows', 'list_sandbox_directories', 'list_compute_wallets', 'list_user_queries', 'respond_to_user_query', 'submit_workflow', 'cancel_workflow'})
             result = await call_mcp(client, 'list_workflows', {})
             self.assertEqual(result.structured_content, {'result': []})
             action = ExecuteJobComputeAction(
@@ -990,7 +1048,7 @@ class MCPSubprocessTests(unittest.TestCase):
                 self.assertEqual(completed.returncode, 0, completed.stderr)
                 tools = json.loads(completed.stdout)['results'][0]['result']
                 self.assertEqual({tool['name'] for tool in tools},
-                                 {'list_workflows', 'list_sandbox_directories', 'list_user_queries', 'respond_to_user_query', 'submit_workflow', 'cancel_workflow'})
+                                 {'list_workflows', 'list_sandbox_directories', 'list_compute_wallets', 'list_user_queries', 'respond_to_user_query', 'submit_workflow', 'cancel_workflow'})
 
                 # stdin accepts the same request format as an inline string
                 # or file. Broken JSON must instead return a JSON error envelope.

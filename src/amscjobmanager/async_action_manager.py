@@ -69,6 +69,31 @@ class AsyncActionManager(ActionManager):
             )
             """)
 
+    def _authorizeSubmission(self, action_id, action) -> bool:
+        """Authorize an attempted submission through a backend policy hook.
+
+        action_id (int) is the global database ID; action (object) is its stored
+        definition. Return True to proceed, False to defer without consuming an
+        attempt. The default imposes no additional policy. Overrides may persist
+        reservations and diagnostic API status, but must be safe to repeat.
+        """
+        return True
+
+    def _recordStatusObservation(self, conn, action_id, api_status, *, finished=False,
+                                 remote_work_submitted=False) -> None:
+        """Record backend accounting alongside an action-state transaction.
+
+        conn (sqlite3.Connection) is the caller's locked transaction; action_id
+        (int) identifies the action. api_status (str | None) is an actual provider
+        state, or None if unavailable. finished (bool) means remote work has
+        ended; remote_work_submitted (bool, default False) means a remote job was
+        accepted, as established by its provider ID. False allows a full refund
+        when submission never occurred or no accepted job was found.
+        Return None. The default does nothing; overrides must use this transaction
+        and perform no API calls so settlement and terminal state remain atomic.
+        """
+        return None
+
     def _maybeSimulateCrash(self, point):
         """Raise SimulatedCrash for matching point (str), otherwise return None."""
         if point == self._test_crash_at:
@@ -243,13 +268,15 @@ class AsyncActionManager(ActionManager):
         # Recover uncertain acceptance by name before deciding that there is
         # nothing to cancel. No database lock is held during provider calls.
         if api_key is None:
+            #If the key was none, it may be just that the task was submitted but the key was not recorded. We can attempt to look it up using our idempotency info
             api_key = self._findRemoteActionByName(
                 action["machine"], self._remoteActionName(action_id)
             )
             if api_key is None and action["submission_attempts"] > 0:
-                # The submission may have reached the remote service before
-                # its ID was saved. Give name indexing the same delay used
-                # before retrying that submission.
+                # A missing lookup result does not yet establish non-submission:
+                # the request may still be in flight, or accepted work may not
+                # yet appear in name lookups. Allow the submission retry delay
+                # to elapse before treating the action as absent.
                 retry_delay = self.scheduling_retry_delay * (
                     2 ** (action["submission_attempts"] - 1)
                 )
@@ -262,20 +289,29 @@ class AsyncActionManager(ActionManager):
                         "WHERE action_id = ?",
                         (api_key, int(time.time()), action_id),
                     )
+        #Not an else condition of the above, as the above check could result in finding a missing key
         if api_key is not None:
+            #If the remote task was actually submitted, check its status. 
+            #If it has already terminated we set the updated action status to the appropriate value, else we cancel it and leave the updated action status as CANCELED
             api_status = self._queryStatusInternal(action["machine"], api_key)
+            with self.conn as conn:
+                self._recordStatusObservation(conn, action_id, api_status, remote_work_submitted=True) #remote work was submitted, api key existence is proof
             if api_status in self.terminal_api_statuses:
                 action_status = self.api_action_status_map[api_status]
             else:
                 self._cancelActionInternal(action["machine"], api_key)
                 self._maybeSimulateCrash("remote_cancellation_completed")
 
+        self._maybeSimulateCrash("before_cancellation_settlement")
         with self.conn as conn:
+            self._recordStatusObservation(conn, action_id, api_status, finished=True,
+                                          remote_work_submitted=api_key is not None)
             conn.execute(
                 f"UPDATE {self.table_name} SET api_status = ?, action_status = ?, "
                 "last_update = ? WHERE action_id = ?",
                 (api_status, action_status.name, int(time.time()), action_id),
             )
+        self._maybeSimulateCrash("cancellation_settled")
         return action_id
 
     def cancelOrResumeCancelingAction(self, action_id, *, recovery: tuple[object, int] | None = None):
@@ -390,6 +426,7 @@ class AsyncActionManager(ActionManager):
                     f"{action['submission_attempts']} attempts); marking FAILED: {error}"
                 )
                 with self.conn as conn:
+                    self._recordStatusObservation(conn, action_id, None, finished=True)
                     conn.execute(
                         f"UPDATE {self.table_name} SET api_status = ?, action_status = ?, "
                         "last_submission_error = ?, last_update = ? WHERE action_id = ? AND action_status = ?",
@@ -397,6 +434,10 @@ class AsyncActionManager(ActionManager):
                     )
                 return action_id
 
+            # Reserve backend resources before recording a submission attempt.
+            # Repeated recovery calls must reuse an existing reservation.
+            if not self._authorizeSubmission(action_id, submitted_action):
+                return None
             checkForThreadCurrentWorkerInterruption()
             # Persist the attempt before contacting the remote service. A
             # crash during submission then triggers lookup and retry backoff.
@@ -456,6 +497,9 @@ class AsyncActionManager(ActionManager):
         self._maybeSimulateCrash("remote_status_obtained")
         action_status = self.api_action_status_map[api_status]
         with self.conn as conn:
+            self._recordStatusObservation(conn, action_id, api_status,
+                                          finished=api_status in self.terminal_api_statuses,
+                                          remote_work_submitted=True)
             conn.execute(
                 f"UPDATE {self.table_name} SET api_key = ?, api_status = ?, action_status = ?, last_update = ? WHERE action_id = ? AND action_status = ?",
                 (api_key, api_status, action_status.name, int(time.time()), action_id, ActionStatus.SCHEDULING.name),
@@ -531,10 +575,15 @@ class AsyncActionManager(ActionManager):
             return
         api_status = self._queryStatusInternal(action['machine'], action['api_key'])
         status = self.api_action_status_map[api_status]
+        self._maybeSimulateCrash("before_status_settlement")
         with self.conn as conn:
+            self._recordStatusObservation(conn, action_id, api_status,
+                                          finished=api_status in self.terminal_api_statuses,
+                                          remote_work_submitted=True)
             conn.execute(f'UPDATE {self.table_name} SET api_status = ?, action_status = ?, last_update = ? '
                          'WHERE action_id = ? AND action_status = ?',
                          (api_status, status.name, int(time.time()), action_id, action['action_status']))
+        self._maybeSimulateCrash("status_settled")
 
     def _recordWorkerFailure(self, action_id: int, error: Exception) -> None:
         """Record error (Exception) for positive action_id; return None.
@@ -570,7 +619,9 @@ class AsyncActionManager(ActionManager):
 
         action_id (int) is the positive global action ID. force_update (bool,
         default False) wakes an existing worker to poll the provider, without
-        waiting. Return (ActionStatus, provider str | None) from the database;
+        waiting. Return (ActionStatus, str | None) from the database; the second value is
+        a provider state or manager-side submission reason such as
+        INSUFFICIENT_WALLET_BALANCE;
         the requested poll may finish later. This call does not change the
         configured polling interval or start/recover a worker.
         """

@@ -93,8 +93,8 @@ class MCPWorkflowTests(unittest.IsolatedAsyncioTestCase):
 
         server = await self._startServer()
         native = [APIAction([WriteFile('local', str(self.root / 'data'), b'\xff')]),
-                  ExecuteBatchScriptComputeAction('local', '', '', '60', 'date', str(self.root), 1, 1, 0),
-                  ExecuteJobComputeAction('local', '', '', '60', '/bin/true', [], str(self.root), 1, 1, 0),
+                  ExecuteBatchScriptComputeAction('local', '', '', '60', 'date', str(self.root), 1, 0, nodes=1),
+                  ExecuteJobComputeAction('local', '', '', '60', '/bin/true', [], str(self.root), 1, 0, nodes=1),
                   GlobusTransfer('dest', '/out', 'source', '/in')]
         stages = json.loads(workflow_adapter.dump_json(native))
         async with Client(server.mcp_server, cache=None) as client:
@@ -141,8 +141,8 @@ class MCPWorkflowTests(unittest.IsolatedAsyncioTestCase):
                       'done\n'
                       f'printf done > ../{name}.result\n')
             stages.append([ExecuteJobComputeAction(
-                'local', '', '', '60', '/bin/sh', ['-c', script], str(root / name), 1, 1, 0,
-                depends_on='ready', producer_key=name)])
+                'local', '', '', '60', '/bin/sh', ['-c', script], str(root / name), 1, 0,
+                depends_on='ready', producer_key=name, nodes=1)])
         stages.append([APIAction([WriteFile('local', str(root / 'joined'), 'joined')],
                                  depends_on=['a', 'AND', 'b'])])
         async with Client(server.mcp_server, cache=None) as client:
@@ -220,7 +220,7 @@ class MCPWorkflowTests(unittest.IsolatedAsyncioTestCase):
         """Cancel via MCP twice and retain the record/key without submitting compute work."""
         server = await self._startServer()
         stage = json.loads(workflow_adapter.dump_json([
-            ExecuteJobComputeAction('local', '', '', '60', '/bin/sleep', ['30'], str(self.root), 1, 1, 0)]))
+            ExecuteJobComputeAction('local', '', '', '60', '/bin/sleep', ['30'], str(self.root), 1, 0, nodes=1)]))
         async with Client(server.mcp_server, cache=None) as client:
             submitted = await client.call_tool('submit_workflow', {'stages': stage, 'submission_key': 'cancel-me'})
             workflow_id = submitted.structured_content['workflow_id']
@@ -274,10 +274,10 @@ class MCPWorkflowTests(unittest.IsolatedAsyncioTestCase):
         native = [APIAction([MakeDirectory('local', str(path)) for path in (batch, job, transferred)] +
                             [WriteFile('local', str(source), payload),
                              UploadFile('local', str(batch / 'input'), str(source))]),
-                  ExecuteBatchScriptComputeAction('local', '', '', '60', 'cp input batch-result', str(batch), 1, 1, 0),
+                  ExecuteBatchScriptComputeAction('local', '', '', '60', 'cp input batch-result', str(batch), 1, 0, nodes=1),
                   ExecuteJobComputeAction('local', '', '', '60', '/bin/sh',
-                    ['-c', f'cp {shlex.quote(str(batch / "batch-result"))} result'], str(job), 1, 1, 0,
-                    pre_launch='printf pre > pre-marker', post_launch='printf post > post-marker'),
+                    ['-c', f'cp {shlex.quote(str(batch / "batch-result"))} result'], str(job), 1, 0,
+                    pre_launch='printf pre > pre-marker', post_launch='printf post > post-marker', nodes=1),
                   GlobusTransfer('destination', str(transferred), 'source', str(job / 'result'), 'filesystem', 'filesystem'),
                   APIAction([DownloadFile('local', str(self.root / 'download'), str(transferred / 'result')),
                              CopyFile(str(self.root / 'copy'), str(self.root / 'download')),
@@ -408,10 +408,10 @@ class MCPWorkflowCLITests(unittest.TestCase):
                     '--url', f'http://127.0.0.1:{port}/mcp', '--timeout', '5']
             batch, job = root / 'batch', root / 'job'
             native = [APIAction([MakeDirectory('local', str(batch)), MakeDirectory('local', str(job))]),
-                      ExecuteBatchScriptComputeAction('local', '', '', '60', 'printf batch > marker', str(batch), 1, 1, 0),
+                      ExecuteBatchScriptComputeAction('local', '', '', '60', 'printf batch > marker', str(batch), 1, 0, nodes=1),
                       ExecuteJobComputeAction('local', '', '', '60', '/bin/sh',
                         ['-c', f'test -f {shlex.quote(str(batch / "marker"))} && printf done > result'],
-                        str(job), 1, 1, 0, pre_launch='printf pre > before', post_launch='printf post > after')]
+                        str(job), 1, 0, pre_launch='printf pre > before', post_launch='printf post > after', nodes=1)]
             stages = json.loads(workflow_adapter.dump_json(native))
             document = {'tool': 'submit_workflow', 'arguments': {
                 'stages': stages, 'job_group': 'cli-test', 'submission_key': 'cli-workflow'}}

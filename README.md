@@ -43,6 +43,10 @@ recovery when the application restarts.
   blast radius of agent actions when exposing the checked operations. The
   [sandboxing guide](docs/sandboxing.md) describes enforcement coverage,
   explicit overrides, staging permissions, and current exceptions.
+- **Machine-specific compute budgets.** Optional persistent node-hour wallets
+  reserve a job's requested cost before submission and refund estimated unused
+  time when it ends. Agents can inspect balances; funding and disabling limits
+  use the password-protected local admin utility. See [compute wallets](docs/compute_wallets.md).
 - **Compute and data movement in one workflow.** Express staging, computation,
   and result transfers as ordered actions. Configured path mappings translate
   filesystem paths into Globus paths, reducing the mappings callers need to

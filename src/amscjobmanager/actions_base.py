@@ -123,6 +123,7 @@ class ComputeActionBase(ActionDefinition):
 
     machine (str) selects a configured target or local; account/queue (str)
     select the project and scheduler queue. time (str) is walltime in seconds.
+    nodes (positive int, keyword-only) is the requested compute-node count.
     Subclasses define execution fields and may implement provider operations.
     """
 
@@ -130,6 +131,7 @@ class ComputeActionBase(ActionDefinition):
     account : StrictStr
     queue : StrictStr
     time : StrictStr
+    nodes: Annotated[int, Field(strict=True, ge=1, description="Number of compute nodes; local requires one.")] = field(kw_only=True)
 
     def queryResourceStatus(self) -> bool:
         """Return whether this action's compute resource reports being up.
@@ -142,12 +144,12 @@ class ComputeActionBase(ActionDefinition):
         return queryMachineStatus(self.machine)
 
     def getInfo(self)->dict:
-        """
-        Return the transfer information in a common dictionary format with entries {"machine", "queue", "time"}
+        """Return the common compute resource description without making API calls.
 
-        NOTE: Derived classes can override this to provide any custom information they want
+        Take no arguments. Return dict with machine/queue/time (str, walltime in
+        seconds) and nodes (positive int). Subclasses may add execution metadata.
         """
-        return {"machine" : self.machine, "queue" : self.queue, "time" : self.time}    
+        return {"machine" : self.machine, "queue" : self.queue, "time" : self.time, "nodes": self.nodes}
 
     def initiateAction(self, job_id, name: str | None = None)->str:
         """Initiate the action and return the API key; name identifies the action."""

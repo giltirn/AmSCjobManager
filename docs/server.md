@@ -131,6 +131,11 @@ shell history; prefer the prompt. Neither the password nor its salted verifier
 is written to the configuration, database, or logs. Without `--admin-socket`,
 administration is disabled. Password entry refuses an exposed stdin fallback.
 
+Use `python utilities/manager_admin.py -h` for the command list and
+`python utilities/manager_admin.py -h COMMAND` (or `--help COMMAND`) for a
+command's description, inputs, and outputs. Help needs no socket argument,
+password, or running server.
+
 Run the admin utility on the server host, in another terminal:
 
 ```bash
@@ -447,7 +452,8 @@ ID is an error. Each record contains:
 - `workflow_id`, `job_group`, and `workflow_status` from the public manager API.
 - `workflow_stage`, `head_action_id`, `head_action_type`, `head_action_class`,
   and `head_action_status`.
-- `api_status`: the provider's recorded status string, or `null` when unavailable.
+- `api_status`: a recorded provider status, a submission-blocking reason such as
+  `INSUFFICIENT_WALLET_BALANCE`, or `null` when unavailable.
 - `last_status_change`: the recorded timestamp in Unix seconds.
 
 `statuses` optionally selects overall workflow statuses: `PENDING`, `ACTIVE`,
@@ -470,6 +476,35 @@ status `ACTIVE` includes provider states `new`, `queued`, and `active`, so inspe
 `api_status` to distinguish queueing from execution. `workflow_status` remains
 `ACTIVE` between steps; `head_action_status` can be `SCHEDULING`, `PROVIDER_HELD`,
 or `COMPLETED`. A held head remains monitored and can be canceled normally.
+
+## Compute wallets
+
+Optional persistent machine wallets reserve requested node-hours before compute
+submission and refund estimated unused funds after termination. Unfunded actions
+remain `SCHEDULING`, with `api_status=INSUFFICIENT_WALLET_BALANCE`, and resume when
+funding permits. Wallets start disabled unless explicitly enabled; they are not
+configured through JSON.
+
+Use the read-only MCP tool or generated CLI command:
+
+```bash
+python utilities/manager_client.py list_compute_wallets
+python utilities/manager_client.py list_compute_wallets --machine frontier
+```
+
+Wallet mutation is available only through the separate password-protected admin
+utility on the server host:
+
+```bash
+python utilities/manager_admin.py ./admin.sock enable_wallet frontier
+python utilities/manager_admin.py ./admin.sock recharge_wallet frontier 100
+python utilities/manager_admin.py ./admin.sock disable_wallet frontier
+```
+
+A new enabled wallet has zero funds. Recharge is additive; a lost response does
+not make it safe to repeat automatically. Wallet changes survive server restart.
+See [compute wallets](compute_wallets.md) for units, returned fields, recovery,
+and the limits of estimated usage.
 
 ## JSON sequences and results
 

@@ -13,7 +13,7 @@ import stat
 import sys
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, StrictStr, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, StrictStr, ValidationError, model_validator
 
 from .. import globals as sandbox
 from ..logging import wfmanLog
@@ -30,16 +30,35 @@ class AdminRequest(BaseModel):
     """One authenticated operation; no field represents Python code or a method name.
 
     password (SecretStr) is the per-request credential, never returned or logged.
-    command selects add_sandbox/remove_sandbox. machine (str) is a configured
+    command selects sandbox addition/removal or wallet enabling/disabling/recharge.
+    node_hours (float | None) is a positive node-hour grant, required only for recharge. machine (str) is a configured
     target, and path (str) is a sandbox root; removal matches its registered text
     exactly. Requests reject extra fields. Credentials are not persisted.
     """
 
     model_config = ConfigDict(extra='forbid', hide_input_in_errors=True)
     password: SecretStr
-    command: Literal['add_sandbox', 'remove_sandbox']
+    command: Literal['add_sandbox', 'remove_sandbox', 'enable_wallet', 'disable_wallet', 'recharge_wallet']
     machine: StrictStr = Field(min_length=1)
-    path: StrictStr = Field(min_length=1)
+    path: StrictStr | None = Field(default=None, min_length=1)
+    node_hours: float | None = Field(default=None, gt=0, allow_inf_nan=False, strict=True)
+
+    @model_validator(mode='after')
+    def validateCommandArguments(self):
+        """Check command-specific fields on this AdminRequest; return self unchanged.
+
+        Sandbox commands require path (str) only; recharge_wallet requires
+        node_hours (positive float) only; enable/disable take neither field.
+        """
+        if self.command in ('add_sandbox', 'remove_sandbox'):
+            if self.path is None or self.node_hours is not None:
+                raise ValueError('Sandbox commands require path only')
+        elif self.command == 'recharge_wallet':
+            if self.node_hours is None or self.path is not None:
+                raise ValueError('Recharge requires node_hours only')
+        elif self.path is not None or self.node_hours is not None:
+            raise ValueError('Enable/disable require only a machine')
+        return self
 
 
 class AdminResponse(BaseModel):
@@ -47,8 +66,9 @@ class AdminResponse(BaseModel):
 
     success (bool) means the command finished successfully. code (str) is 'ok'
     or a stable error category; message (str) is safe frontend text. A transport
-    error after dispatch can leave an uncertain outcome; both commands are
-    idempotent. Changes affect only this server session's sandbox registration.
+    error after dispatch can leave an uncertain outcome. Sandbox and wallet-enable
+    operations are idempotent; recharge is additive and must not be blindly retried.
+    Wallet changes persist; sandbox registration changes last for this session.
     """
 
     model_config = ConfigDict(extra='forbid')
@@ -59,7 +79,7 @@ class AdminResponse(BaseModel):
 
 
 class AdminServer:
-    """Serve one password-checked sandbox operation per local socket connection."""
+    """Serve one password-checked administration operation per local connection."""
 
     def __init__(self, socket_path: str | Path, password: str, runtime: ServerRuntime):
         """Prepare the listener and retain only a salted password verifier.
@@ -200,14 +220,16 @@ class AdminServer:
                         else:
                             request = AdminRequest.model_validate(document)
                             command, machine, path = request.command, request.machine.lower(), request.path
+                            node_hours = request.node_hours
                             del request
 
                             def apply() -> AdminResponse:
                                 """Apply the captured authenticated command; return a credential-free result.
 
-                                Take no arguments; command/machine/path (str)
-                                are captured from the validated request. Check
-                                readiness and use the sandbox owner's API. The
+                                Take no arguments; command/machine (str), path
+                                (str | None), and node_hours (float | None,
+                                node-hour grant) are captured from the validated request. Check
+                                readiness and use the state owner's API. The
                                 worker can wait for existing API/user queries
                                 without blocking MCP or manager progression.
                                 """
@@ -222,13 +244,25 @@ class AdminServer:
                                     if command == 'add_sandbox':
                                         sandbox.addSandboxDirs({machine: path})
                                         message = 'Sandbox directory added.'
-                                    else:
+                                    elif command == 'remove_sandbox':
                                         sandbox.removeSandboxDirs({machine: path})
                                         message = 'Sandbox directory removed.'
+                                    else:
+                                        # Wallet state is owned by the compute manager,
+                                        # reached through JobData under the manager lock.
+                                        with manager as jobs:
+                                            if not manager.isAlive():
+                                                return AdminResponse(success=False, code='manager_unavailable', message='Workflow manager is not running.')
+                                            if command == 'recharge_wallet':
+                                                jobs.rechargeWallet(machine, node_hours)
+                                                message = 'Compute wallet recharged.'
+                                            else:
+                                                jobs.setWalletEnabled(machine, command == 'enable_wallet')
+                                                message = 'Compute wallet enabled.' if command == 'enable_wallet' else 'Compute wallet disabled.'
                                 except WorkerInterrupted:
                                     raise
                                 except Exception as exc:
-                                    # Only sandbox operations enter this block;
+                                    # Only state-owner operations enter this block;
                                     # they receive no password or wire document.
                                     wfmanLog(f'Admin {command} failed: {type(exc).__name__}: {exc}')
                                     return AdminResponse(success=False,
@@ -249,7 +283,7 @@ class AdminServer:
                     # Request validation is deliberately generic. Provider errors
                     # retain their normal API logs; do not log credential input.
                     wfmanLog(f'Admin operation failed ({type(exc).__name__})')
-                    response = AdminResponse(success=False, code='operation_failed', message='Sandbox operation failed; check server logs or pending user queries.')
+                    response = AdminResponse(success=False, code='operation_failed', message='Admin operation failed; check server logs or pending user queries.')
             if self._closed:
                 return
             writer.write(response.model_dump_json().encode('utf-8') + b'\n')
@@ -267,22 +301,25 @@ class AdminServer:
                 pass
 
 
-def execute_admin_command(socket_path: str | Path, command: str, machine: str, path: str,
-                          password: str, *, timeout: float = 120) -> AdminResponse:
+def execute_admin_command(socket_path: str | Path, command: str, machine: str, path: str | None,
+                          password: str, *, node_hours: float | None = None, timeout: float = 120) -> AdminResponse:
     """Send one authenticated local command and return its AdminResponse.
 
     socket_path (str | Path) selects a private Unix socket owned by this OS user.
     Relative paths use the current working directory; '~' is rejected, not expanded.
     Shared or other-owned parent directories produce advice on stderr, not errors.
-    command (str) is add_sandbox/remove_sandbox; machine/path (str) select the
-    target and registered root. password (str) is used for this request only.
+    command (str) selects add_sandbox/remove_sandbox or enable_wallet,
+    disable_wallet, recharge_wallet. machine (str) selects the target; path
+    (str | None) is required only for sandbox commands. node_hours (float | None)
+    is the positive grant in node-hours, required only for recharge. password
+    (str) is used for this request only.
     timeout (finite positive float) bounds socket operations in seconds, default
     120. Transport errors propagate; the operation may already have taken effect.
     No credentials are printed or persisted. Run on the server host.
     """
     if not math.isfinite(timeout) or timeout <= 0:
         raise ValueError('Admin timeout must be finite and positive')
-    request = AdminRequest(password=password, command=command, machine=machine, path=path)
+    request = AdminRequest(password=password, command=command, machine=machine, path=path, node_hours=node_hours)
     # SecretStr deliberately redacts ordinary serialization; reveal it only for
     # the local wire message. Never return this document as part of an error.
     document = request.model_dump(mode='json')

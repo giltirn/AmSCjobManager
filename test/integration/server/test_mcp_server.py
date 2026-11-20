@@ -648,7 +648,7 @@ class MCPToolTests(unittest.IsolatedAsyncioTestCase):
         async with Client(server.mcp_server, cache=None) as client:
             tools = await call_mcp(client)
             self.assertEqual({tool.name for tool in tools.tools},
-                             {'list_workflows', 'list_sandbox_directories', 'list_compute_wallets', 'list_active_and_past_compute_actions', 'list_user_queries', 'respond_to_user_query', 'submit_workflow', 'cancel_workflow'})
+                             {'list_workflows', 'list_workflow_dependency_groups', 'list_sandbox_directories', 'list_compute_wallets', 'list_active_and_past_compute_actions', 'list_user_queries', 'respond_to_user_query', 'submit_workflow', 'cancel_workflow'})
             result = await call_mcp(client, 'list_workflows', {})
             self.assertEqual(result.structured_content, {'result': []})
             action = ExecuteJobComputeAction(
@@ -963,6 +963,22 @@ class MCPSubprocessTests(unittest.TestCase):
                 self.assertEqual(completed.returncode, 0, completed.stderr)
                 self.assertEqual(len(json.loads(completed.stdout)['results'][0]['result']), 2)
 
+                # The graph query returns nested groups through the real HTTP
+                # CLI, including singleton components for independent workflows.
+                completed = run_client(base + ['list_workflow_dependency_groups',
+                                              '--workflow-id', str(workflow_id)],
+                                       capture_output=True, text=True, timeout=15)
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                groups = json.loads(completed.stdout)['results'][0]['result']
+                self.assertEqual([[item['workflow_id'] for item in group] for group in groups], [[workflow_id]])
+                self.assertEqual(groups[0][0]['producer_keys'], [])
+                self.assertEqual(groups[0][0]['dependency_conditions'], [])
+                completed = run_client(base + ['-h', 'list_workflow_dependency_groups'],
+                                       capture_output=True, text=True, timeout=15)
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                self.assertIn('--workflow-id', completed.stdout)
+                self.assertIn('dependency_conditions', completed.stdout)
+
                 # The manager-owned action query is discovered automatically;
                 # its CLI returns the same independent workflow identifier.
                 completed = run_client(base + ['list_active_and_past_compute_actions',
@@ -1015,7 +1031,7 @@ class MCPSubprocessTests(unittest.TestCase):
                 self.assertEqual(completed.returncode, 0, completed.stderr)
                 tools = json.loads(completed.stdout)['results'][0]['result']
                 self.assertEqual({tool['name'] for tool in tools},
-                                 {'list_workflows', 'list_sandbox_directories', 'list_compute_wallets', 'list_active_and_past_compute_actions', 'list_user_queries', 'respond_to_user_query', 'submit_workflow', 'cancel_workflow'})
+                                 {'list_workflows', 'list_workflow_dependency_groups', 'list_sandbox_directories', 'list_compute_wallets', 'list_active_and_past_compute_actions', 'list_user_queries', 'respond_to_user_query', 'submit_workflow', 'cancel_workflow'})
 
                 # stdin accepts the same request format as an inline string
                 # or file. Broken JSON must instead return a JSON error envelope.

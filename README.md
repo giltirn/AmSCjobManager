@@ -31,6 +31,11 @@ recovery when the application restarts.
   actions let the manager coordinate independent workflows without waiting for
   each remote task to finish before managing others. A configurable concurrency
   limit controls how many workflows are active.
+- **Complex, interdependent workflows.** Connect workflow stages using producer
+  keys and nested AND/OR dependency conditions evaluated against successful
+  action completion. Build parallel branches, joins, and conditional dependencies
+  across workflows and facilities. Inspect connected groups through Python or
+  MCP/CLI. See [workflow dependencies](docs/workflows.md#connect-workflows-with-dependencies).
 - **Connect agents through a private MCP server.** Run the manager as a persistent
   server listening on localhost and connect MCP-compatible agents to submit,
   monitor, and cancel workflows. A command-line client supports the same

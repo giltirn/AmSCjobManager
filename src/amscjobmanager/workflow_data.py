@@ -12,6 +12,7 @@ from .manager_functions import EmptyFunctionResult, FunctionDefinition, Function
 from .manager_models import (
     ListWorkflowArguments, MachineFilter, SandboxArguments, SandboxDirectoryListing,
     SubmitWorkflowArguments, WorkflowIdArguments, WorkflowListing, WorkflowReceipt, WorkflowSummary,
+    WorkflowDependencyFilter, WorkflowDependencyListing, WorkflowDependencySummary,
 )
 import time
 import json
@@ -191,10 +192,29 @@ class WorkflowData:
             """
             return SandboxDirectoryListing(result=getSandboxDirs(args.machine))
 
+        def _list_dependency_groups(workflows: WorkflowData, args: WorkflowDependencyFilter) -> WorkflowDependencyListing:
+            """Read connected groups from workflows (WorkflowData) selected by args (WorkflowDependencyFilter).
+
+            Return WorkflowDependencyListing with status names serialized as strings.
+            The caller owns any required manager lock; no provider polling occurs.
+            """
+            try:
+                groups = workflows.listWorkflowDependencyGroups(args.workflow_id)
+            except ValueError as exc:
+                raise FunctionError('workflow_not_found', str(exc)) from exc
+            return WorkflowDependencyListing(result=[[
+                WorkflowDependencySummary(
+                    workflow_id=workflow['workflow_id'], producer_keys=workflow['producer_keys'],
+                    dependency_conditions=workflow['dependency_conditions'],
+                    workflow_status=workflow['workflow_status'].name,
+                ) for workflow in group
+            ] for group in groups])
+
         return (
             FunctionDefinition('submit_workflow', 'Persist an ordered workflow for background execution, or retrieve a keyed submission.', _submit_workflow),
             FunctionDefinition('cancel_workflow', 'Request workflow cancellation, including its current compute or transfer job.', _cancel_workflow, idempotent=True),
             FunctionDefinition('list_workflows', 'List all workflows, or select one by its positive workflow_id.', _list_workflows, read_only=True, idempotent=True),
+            FunctionDefinition('list_workflow_dependency_groups', 'List connected workflow dependency groups, or the full group containing one workflow_id. Includes all declared AND/OR alternatives, future stages and historical workflows; reads recorded state without polling.', _list_dependency_groups, read_only=True, idempotent=True),
             FunctionDefinition('list_sandbox_directories', 'List registered sandbox directories for all machines or one selected machine.', _list_sandboxes, read_only=True, idempotent=True),
         )
 
@@ -602,6 +622,100 @@ class WorkflowData:
                 params.extend(status.name for status in statuses)
             rows = conn.execute(query + ' ORDER BY workflow_id', params).fetchall()
             return [self.workflowState(row['workflow_id']) for row in rows]
+
+    def listWorkflowDependencyGroups(self, workflow_id: int | None = None) -> list[list[dict]]:
+        """Read connected groups of workflows from their declared action dependencies.
+
+        workflow_id (positive int | None) selects its whole connected component;
+        None includes all components. Unknown explicit IDs raise ValueError.
+        Return list[list[dict]], preserving an outer singleton list when filtered.
+        Groups are ordered by their smallest workflow ID and members by ID. Each
+        workflow record contains:
+            workflow_id (int): Owning workflow database ID, not a list position.
+            producer_keys (list[dict]): Entries with action_id (positive global
+                action database ID, not a stage index) and producer_key (str).
+            dependency_conditions (list[dict]): Entries with action_id (int) and
+                depends_on (str | nested AND/OR list), preserved without evaluation.
+            workflow_status (ActionStatus): Recorded overall workflow state.
+        Metadata lists follow stage order and omit unset fields; duplicate keys
+        retain separate action entries. Include future stages and terminal history.
+
+        Follow relationships in both directions, connecting consumers to every
+        workflow publishing a referenced key. Shared labels alone do not connect
+        producers without a consumer; workflow_group metadata does not affect
+        grouping. Independent workflows form singleton groups; empty storage
+        returns []. Read one database snapshot without unpickling definitions,
+        polling providers, or changing state. Use the WorkflowManager lock while
+        its background thread runs.
+        """
+        if workflow_id is not None and (type(workflow_id) is not int or workflow_id < 1):
+            raise ValueError('workflow_id must be a positive integer')
+
+        # Read normalized workflow/action metadata in one consistent snapshot.
+        with self.conn as conn:
+            rows = conn.execute('''
+                SELECT w.workflow_id, w.workflow_status, a.action_id, a.producer_key, a.depends_on
+                FROM workflows w LEFT JOIN actions a ON a.workflow_id = w.workflow_id
+                ORDER BY w.workflow_id, a.workflow_stage
+            ''').fetchall()
+
+        summaries, producers, consumers = {}, {}, {}
+        for row in rows:
+            owner_id = row['workflow_id']
+            if owner_id not in summaries:
+                summaries[owner_id] = dict(workflow_id=owner_id, producer_keys=[], dependency_conditions=[],
+                                           workflow_status=ActionStatus[row['workflow_status']])
+            if row['producer_key'] is not None:
+                summaries[owner_id]['producer_keys'].append(dict(action_id=row['action_id'], producer_key=row['producer_key']))
+                producers.setdefault(row['producer_key'], set()).add(owner_id)
+            if row['depends_on'] is not None:
+                condition = json.loads(row['depends_on'])
+                summaries[owner_id]['dependency_conditions'].append(dict(action_id=row['action_id'], depends_on=condition))
+                # Expressions are already validated at enqueue time. Visit only
+                # operand positions, retaining every AND/OR branch as a relation.
+                operands = [condition]
+                while operands:
+                    operand = operands.pop()
+                    if isinstance(operand, str):
+                        consumers.setdefault(operand, set()).add(owner_id)
+                    else:
+                        operands.extend(operand[::2])
+        if workflow_id is not None and workflow_id not in summaries:
+            raise ValueError(f'Workflow {workflow_id} does not exist')
+
+        # A consumed key connects all of its producers and consumers. A star
+        # gives the same connected component without constructing every pair
+        # when many workflows share a key. Unconsumed producer labels add no edges.
+        neighbors = {owner_id: set() for owner_id in summaries}
+        for key, consumer_ids in consumers.items():
+            producer_ids = producers.get(key)
+            if not producer_ids:
+                continue
+            participants = producer_ids | consumer_ids
+            anchor = min(participants)
+            for owner_id in participants - {anchor}:
+                neighbors[anchor].add(owner_id)
+                neighbors[owner_id].add(anchor)
+
+        # Traverse complete components, then filter; selecting a downstream
+        # workflow must retain its prerequisites, siblings and downstream branches.
+        groups, visited = [], set()
+        for root in summaries:
+            if root in visited:
+                continue
+            component, pending = set(), [root]
+            while pending:
+                owner_id = pending.pop()
+                if owner_id in visited:
+                    continue
+                visited.add(owner_id)
+                component.add(owner_id)
+                pending.extend(neighbors[owner_id] - visited)
+            if workflow_id is None or workflow_id in component:
+                groups.append([summaries[owner_id] for owner_id in sorted(component)])
+                if workflow_id is not None:
+                    break
+        return groups
 
     def headActionStatus(self, workflow_id, *, force_poll=False, return_api_status=False):
         """Return the head action's ActionStatus, optionally with its API status.

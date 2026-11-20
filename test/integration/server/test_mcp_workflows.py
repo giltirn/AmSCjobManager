@@ -83,6 +83,62 @@ class MCPWorkflowTests(unittest.IsolatedAsyncioTestCase):
         listing = await client.call_tool('list_workflows', {})
         self.fail(f'Workflow {workflow_id} did not reach {status}; recorded workflows: {listing.structured_content}')
 
+    async def test_dependency_groups_preserve_action_metadata_and_generated_cli_schema(self):
+        """Submit related workflows through MCP and inspect their complete declared graph.
+
+        Keep automatic execution disabled. Check all/filtered/empty groups,
+        nested conditions, independent database IDs, read-only metadata, CLI
+        parsing/help, and invalid-input/missing-workflow responses.
+        """
+        from amscjobmanager.server.cli import parse_function_arguments
+
+        server = await self._startServer()
+        condition = ['ready', 'OR', ['ready', 'AND', 'ready']]
+        async with Client(server.mcp_server, cache=None) as client:
+            empty = await call_mcp(client, 'list_workflow_dependency_groups')
+            self.assertEqual(empty.structured_content, {'result': []})
+            ids = []
+            for stages in ([APIAction(producer_key='ready'), APIAction()],
+                           [APIAction(depends_on=condition)], [APIAction()]):
+                response = await call_mcp(client, 'submit_workflow',
+                                          {'stages': json.loads(workflow_adapter.dump_json(stages))})
+                self.assertFalse(response.is_error, response)
+                ids.append(response.structured_content['workflow_id'])
+            root, child, isolated = ids
+            listing = await call_mcp(client, 'list_workflow_dependency_groups')
+            groups = listing.structured_content['result']
+            self.assertEqual([[row['workflow_id'] for row in group] for group in groups], [[root, child], [isolated]])
+            states = server.runtime.manager(lambda workflows: {
+                state['workflow_id']: state for state in workflows.listWorkflows()})
+            self.assertEqual(groups[0][0]['producer_keys'], [
+                {'action_id': states[root]['head_action_id'], 'producer_key': 'ready'}])
+            self.assertEqual(groups[0][1]['dependency_conditions'], [
+                {'action_id': states[child]['head_action_id'], 'depends_on': condition}])
+            self.assertNotEqual(states[child]['head_action_id'], child)
+            self.assertEqual(groups[0][1]['workflow_status'], 'PENDING')
+
+            # The existing CLI generator discovers the input and nested output
+            # schemas; this feature needs no command-specific client code.
+            tools = await client.list_tools()
+            tool = next(tool for tool in tools.tools if tool.name == 'list_workflow_dependency_groups')
+            self.assertTrue(tool.annotations.read_only_hint)
+            self.assertTrue(tool.annotations.idempotent_hint)
+            arguments = parse_function_arguments(tool, ['--workflow-id', str(child)])
+            selected = await call_mcp(client, tool.name, arguments)
+            self.assertEqual(selected.structured_content, {'result': [groups[0]]})
+            help_text = parse_function_arguments(tool, ['--help'])
+            for field in ('--workflow-id', 'producer_keys', 'dependency_conditions', 'action_id', 'workflow_status'):
+                self.assertIn(field, help_text)
+            for arguments, code in (({'workflow_id': child + 100}, 'workflow_not_found'),
+                                    ({'workflow_id': True}, 'invalid_input'),
+                                    ({'workflow_id': 0}, 'invalid_input'),
+                                    ({'refresh': True}, 'invalid_input')):
+                with self.subTest(arguments=arguments):
+                    response = await call_mcp(client, tool.name, arguments)
+                    self.assertTrue(response.is_error)
+                    self.assertEqual(response.structured_content['error']['code'], code)
+            self.assertNotIn(tool.name, {item.name for item in server.runtime.describeFunctions('admin')})
+
     async def test_native_stage_submission_idempotency_and_cli_schema(self):
         """Enqueue every built-in stage through MCP without executing any remote work.
 

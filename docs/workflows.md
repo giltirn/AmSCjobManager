@@ -86,6 +86,45 @@ and repeated keys survive while another producer is not ruled out by cancellatio
 submissions requiring canceled producers are rejected. Later replacement
 producers do not restart workflows already canceled by a cascade.
 
+### Inspect dependency groups
+
+Inspect the connected workflows without starting work or polling providers:
+
+```python
+with manager as workflows:
+    groups = workflows.listWorkflowDependencyGroups()
+    selected = workflows.listWorkflowDependencyGroups(workflow_id=joined)
+```
+
+The return value is a list of groups, each a list of workflow records. Selecting
+an ID still returns an outer list containing its one complete group. Members
+are ordered by workflow ID, and groups by their smallest ID. Independent
+workflows form singleton groups; empty storage returns `[]`. An unknown explicit
+ID raises `ValueError`.
+
+Each record contains `workflow_id`, the recorded `workflow_status` (`ActionStatus`
+in Python), and two lists ordered by action stage:
+
+- `producer_keys`: dictionaries containing `action_id` and `producer_key`.
+- `dependency_conditions`: dictionaries containing `action_id` and `depends_on`,
+  preserving the original key or nested AND/OR expression.
+
+Only actions with the corresponding metadata appear in each list. Repeated
+keys retain separate action entries. Action IDs are global database IDs, not
+workflow IDs or stage positions. Future stages and completed/failed/canceled
+history are included; action definitions are not unpickled.
+
+Grouping follows declared relationships in both directions, so selecting a join
+also returns prerequisites, sibling branches, and downstream consumers. All
+producers of every referenced key are included, even for OR alternatives that
+are no longer needed to run. Shared producer labels alone do not connect
+workflows until some action references that label. `workflow_group` metadata
+does not affect these groups. Results are rebuilt from current records on each
+call, so later submissions can join previously separate groups.
+
+The same query is available through MCP and the generated CLI; see
+[dependency-group inspection](server.md#inspecting-workflow-dependency-groups).
+
 ## Construct actions
 
 Short filesystem preparation and local processing can be distinct `APIAction`

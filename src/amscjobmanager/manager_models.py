@@ -1,9 +1,10 @@
-"""Transport-independent input/output models for WorkflowManager operations."""
+"""Transport-independent input/output models for workflow operations."""
 
 from typing import Literal
 from pydantic import BaseModel, Field, StrictBool, StrictStr
 
 from .manager_functions import ConfiguredMachineArguments, FunctionArguments
+from .actions_base import DependencyCondition
 from .workflow import Workflow
 
 
@@ -32,6 +33,53 @@ class ListWorkflowArguments(FunctionArguments):
     workflow_id: int | None = Field(default=None, gt=0, strict=True, description='Optional positive workflow database ID; omit for all workflows.')
     refresh: StrictBool = Field(default=False, description='Wake supervisors to poll active workflow heads before filtering; return recorded state without waiting or advancing stages.')
     statuses: list[Literal['PENDING', 'ACTIVE', 'COMPLETED', 'FAILED', 'CANCELING', 'CANCELED']] | None = Field(default=None, description='Filter overall workflow statuses using OR. COMPLETED selects fully finished workflows. Omit for all; [] matches none.')
+
+
+class WorkflowDependencyFilter(FunctionArguments):
+    """workflow_id (positive int | None) selects its connected group; None includes all groups."""
+
+    workflow_id: int | None = Field(default=None, gt=0, strict=True, description='Optional positive workflow database ID; return only its complete dependency group. Omit for all groups; an unknown ID is an error.')
+
+
+class WorkflowProducerSummary(BaseModel):
+    """action_id (positive int) identifies the action publishing producer_key (str)."""
+
+    action_id: int = Field(description='Positive global action database ID, not a workflow ID or stage index.')
+    producer_key: str = Field(description='Producer label published by this action; repeated labels retain separate action entries.')
+
+
+class WorkflowConditionSummary(BaseModel):
+    """action_id (positive int) identifies the action requiring depends_on (str | nested list)."""
+
+    action_id: int = Field(description='Positive global action database ID, not a workflow ID or stage index.')
+    depends_on: DependencyCondition = Field(description='Declared dependency key or nested AND/OR expression, preserved without evaluation.')
+
+
+class WorkflowDependencySummary(BaseModel):
+    """One workflow's declared dependency metadata and recorded overall status.
+
+    workflow_id (positive int) is its database ID. producer_keys
+    (list[WorkflowProducerSummary]) and dependency_conditions
+    (list[WorkflowConditionSummary]) include only actions with those fields set,
+    ordered by workflow stage, including future and historical actions.
+    workflow_status (str) is the recorded overall ActionStatus name.
+    """
+
+    workflow_id: int = Field(description='Positive workflow database ID, independent of action IDs.')
+    producer_keys: list[WorkflowProducerSummary] = Field(description='Producer entries ordered by workflow stage, each containing action_id and producer_key; [] if none.')
+    dependency_conditions: list[WorkflowConditionSummary] = Field(description='Dependency entries ordered by workflow stage, each containing action_id and depends_on; [] if none. Nested conditions and repeated entries are preserved.')
+    workflow_status: Literal['PENDING', 'ACTIVE', 'COMPLETED', 'FAILED', 'CANCELING', 'CANCELED'] = Field(description='Recorded overall workflow status; relationships remain present after completion, failure, or cancellation.')
+
+
+class WorkflowDependencyListing(BaseModel):
+    """result (list[list[WorkflowDependencySummary]]) contains connected workflow groups.
+
+    Each group is ordered by workflow_id; groups are ordered by their smallest ID.
+    Independent workflows form singleton groups. An ID filter retains one outer
+    group rather than changing the response shape. Empty storage returns [].
+    """
+
+    result: list[list[WorkflowDependencySummary]] = Field(description='Connected groups of workflow records, following declared references in both directions through all producer alternatives. Sorted within groups by workflow_id, and between groups by minimum ID; singleton groups include independent workflows.')
 
 
 class MachineFilter(FunctionArguments):

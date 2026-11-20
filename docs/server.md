@@ -488,6 +488,56 @@ status `ACTIVE` includes provider states `new`, `queued`, and `active`, so inspe
 `ACTIVE` between steps; `head_action_status` can be `SCHEDULING`, `PROVIDER_HELD`,
 or `COMPLETED`. A held head remains monitored and can be canceled normally.
 
+## Inspecting workflow dependency groups
+
+Use `list_workflow_dependency_groups(workflow_id=None)` to inspect connected
+groups of workflows, or the entire group containing one selected workflow:
+
+```bash
+python utilities/manager_client.py list_workflow_dependency_groups
+python utilities/manager_client.py list_workflow_dependency_groups --workflow-id 2
+python utilities/manager_client.py -h list_workflow_dependency_groups
+```
+
+MCP clients pass `{}` or `{"workflow_id": 2}`. The MCP structured response is
+`{"result": [[...], ...]}`; the CLI places the nested groups in the operation's
+`result` field. An example group is:
+
+```json
+[
+  [
+    {
+      "workflow_id": 1,
+      "producer_keys": [{"action_id": 4, "producer_key": "ready"}],
+      "dependency_conditions": [],
+      "workflow_status": "COMPLETED"
+    },
+    {
+      "workflow_id": 2,
+      "producer_keys": [],
+      "dependency_conditions": [{"action_id": 7, "depends_on": "ready"}],
+      "workflow_status": "PENDING"
+    }
+  ]
+]
+```
+
+The output always has two list levels, including a filtered query. Independent
+workflows have singleton groups; no workflows returns `[]`. Groups are ordered
+by their smallest workflow ID, with members in ID order. Metadata entries use
+global action database IDs and follow stage order, preserving duplicate producer
+keys and nested dependency expressions. A workflow without that metadata has an
+empty corresponding list. An unknown explicit ID returns `workflow_not_found`;
+malformed IDs return `invalid_input`.
+
+The query is read-only and returns recorded status without polling. It includes
+future stages and terminal history, following declared relationships in both
+directions through every AND/OR alternative and every producer of a referenced
+key. These are connected relationships, not a prediction of which alternative
+will execute. A shared label without a consumer does not connect producers;
+`workflow_group` labels do not influence grouping. See
+[workflow dependencies](workflows.md#inspect-dependency-groups) for Python usage.
+
 ## Inspecting compute actions
 
 `list_active_and_past_compute_actions` queries the compute manager's records,

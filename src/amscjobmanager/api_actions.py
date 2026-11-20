@@ -1,10 +1,12 @@
 """Replay-safe synchronous operations used as distinct workflow stages."""
 
 from dataclasses import field
+from abc import ABC, abstractmethod
 import base64
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictStr, field_serializer, field_validator
+from pydantic import BaseModel, ConfigDict, Field, SerializeAsAny, StrictBool, StrictStr, field_serializer, field_validator
+from pydantic_core import core_schema
 from pydantic.dataclasses import dataclass
 import io
 from pathlib import Path
@@ -17,6 +19,19 @@ from .globals import checkSafePath
 from .local_api import localCopyFile
 
 
+class APIActionStageBase(ABC):
+    """An in-process, replay-safe operation in an APIAction sequence.
+
+    Store recovery inputs in pickleable instance fields and define subclasses
+    in importable modules. Workers share process globals, but those globals are
+    not persisted. Return values are ignored; exceptions fail the action.
+    """
+
+    @abstractmethod
+    def execute(self, job_id: int) -> None:
+        """Perform work for workflow database ID job_id; tolerate replay."""
+
+
 class BinaryContent(BaseModel):
     """JSON representation of bytes: base64 (str) is standard padded Base64 data."""
 
@@ -25,7 +40,7 @@ class BinaryContent(BaseModel):
 
 
 @dataclass(config=ConfigDict(extra="forbid"))
-class MakeDirectory:
+class MakeDirectory(APIActionStageBase):
     """Ensure a directory exists; successful replay leaves it unchanged.
 
     machine (str) is a configured target or 'local'; path (str) is the directory
@@ -51,7 +66,7 @@ class MakeDirectory:
 
 
 @dataclass(config=ConfigDict(extra="forbid"))
-class WriteFile:
+class WriteFile(APIActionStageBase):
     """Write complete contents, overwriting a partial destination on replay.
 
     machine (str) selects a target or 'local'; path (str) is the complete
@@ -99,7 +114,7 @@ class WriteFile:
 
 
 @dataclass(config=ConfigDict(extra="forbid"))
-class UploadFile:
+class UploadFile(APIActionStageBase):
     """Upload a small manager-host file, overwriting its destination on replay.
 
     machine (str) selects the destination target; dest_path (str) is its full
@@ -123,7 +138,7 @@ class UploadFile:
 
 
 @dataclass(config=ConfigDict(extra="forbid"))
-class DownloadFile:
+class DownloadFile(APIActionStageBase):
     """Download a file synchronously to a checked manager-host destination.
 
     machine (str) selects the source target; dest_path (str) is a local filename
@@ -146,7 +161,7 @@ class DownloadFile:
 
 
 @dataclass(config=ConfigDict(extra="forbid"))
-class CopyFile:
+class CopyFile(APIActionStageBase):
     """Copy a file on the manager host using the local API's sandbox checks.
 
     dest_path (str) is a local filename or existing directory; source_path (str)
@@ -167,7 +182,7 @@ class CopyFile:
 
 
 @dataclass(config=ConfigDict(extra="forbid"))
-class RunLocal:
+class RunLocal(APIActionStageBase):
     """Run a short, trusted, replay-safe program on the manager host.
 
     executable (str) is a command name or path, arguments (list[str]) contains
@@ -216,18 +231,40 @@ class RunLocal:
                 raise RuntimeError(f'Local command {executable!r} exited with {result.returncode}: {reason}')
 
 
-APIOperation = Annotated[
+BuiltinAPIOperation = Annotated[
     MakeDirectory | WriteFile | UploadFile | DownloadFile | CopyFile | RunLocal,
     Field(discriminator='type', json_schema_extra={'required': ['type']}),
 ]
+
+
+class _APIOperationSchema:
+    """Accept Python extensions while retaining the built-in JSON contract."""
+
+    @classmethod
+    def __get_pydantic_core_schema__(cls, source_type, handler):
+        """Build a schema for base-class instances or built-in operation data.
+
+        source_type is the annotated base; handler generates the built-in
+        discriminated union. Return a core schema with built-in-only JSON input.
+        """
+        builtin = handler.generate_schema(BuiltinAPIOperation)
+        return core_schema.json_or_python_schema(
+            json_schema=builtin,
+            python_schema=core_schema.union_schema([
+                core_schema.is_instance_schema(APIActionStageBase), builtin,
+            ]),
+        )
+
+
+APIOperation = SerializeAsAny[Annotated[APIActionStageBase, _APIOperationSchema]]
 
 
 @dataclass(config=ConfigDict(extra="forbid"))
 class APIAction(ActionDefinition):
     """An ordered sequence of synchronous, replay-safe workflow operations.
 
-    operations (list) contains MakeDirectory, WriteFile, UploadFile, DownloadFile,
-    CopyFile or RunLocal instances, defaulting to an empty sequence. Indices are
+    operations (list) contains APIActionStageBase instances, defaulting to an
+    empty sequence. JSON input supports built-in operations only. Indices are
     zero-based. Each operation must tolerate replay after partial execution or
     success before its checkpoint commits. Completed operations are skipped on
     recovery. Local paths and commands refer to the manager host, not a client.

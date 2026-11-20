@@ -61,8 +61,57 @@ workflow's positive integer ID. `RunLocal` also expands this placeholder in its
 executable and argument strings. File contents are not expanded.
 
 All local files and processes belong to the **manager host**, not the machine
-running an MCP or CLI client. The operations currently have a Python interface;
-this change does not add MCP workflow submission tools.
+running an MCP or CLI client. Built-in operations also support workflow JSON and
+MCP submission through their `type` tags.
+
+## Application-defined Python operations
+
+Subclass `APIActionStageBase` and implement `execute(job_id)`. No registration
+or manager modification is required. For example, define this class in an
+importable application module:
+
+```python
+from dataclasses import dataclass
+from amscjobmanager.api_actions import APIAction, APIActionStageBase
+
+@dataclass
+class CollectResult(APIActionStageBase):
+    source_path: str
+    dest_path: str
+
+    def execute(self, job_id: int) -> None:
+        """Replay-safe copy for workflow database ID job_id."""
+        from amscjobmanager.api_general import downloadFile
+        downloadFile("local", self.dest_path, self.source_path)
+
+action = APIAction([CollectResult("/tmp/source.txt", "/tmp/result.txt")])
+```
+
+Python construction accepts subclass instances, including mixtures with built-in
+operations. A Python dictionary or JSON payload still selects from the built-in
+discriminated union; arbitrary application types cannot be reconstructed through
+JSON/MCP. The generated JSON schemas continue to describe the built-ins only.
+JSON export preserves fields of supported dataclasses/models, but exporting a
+custom operation does not make it JSON-importable. Ordinary Python classes may
+need their own serialization support for JSON export; database storage uses
+pickle independently of JSON.
+
+`execute` runs on a worker thread in the existing interpreter, with access to
+module globals. The manager ignores its return value and records exceptions as
+action failures. Shared mutable state needs thread coordination. Custom Python
+operations run with the application's permissions; use the existing API helpers
+when sandbox-checked file operations are required.
+
+Capture every recovery input in pickleable instance fields before enqueueing.
+Do not store open files, clients, manager objects, closures, or thread state.
+Keep the class importable at the same module path after restart. Module globals
+are shared during execution but are not persisted; restore authentication and
+manager configuration at startup. Referenced input files must remain available.
+
+The manager snapshots the operation with its workflow and checkpoints successful
+operations. An unfinished operation may run again even if its effects completed
+before a crash. Make it replay-safe and save results to a stable location,
+preferably by atomically replacing the output after writing a temporary file.
 
 ## Execution and recovery
 

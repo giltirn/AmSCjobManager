@@ -1,110 +1,95 @@
-"""Administer a running manager's sandbox roots and compute wallets through its private local admin socket."""
+"""Discover and execute password-protected administration through a local Unix socket."""
 
 import argparse
 import getpass
 import sys
 import warnings
 
-from amscjobmanager.server.admin import execute_admin_command
+from amscjobmanager.server.admin import AdminCallRequest, AdminDiscoveryRequest, execute_admin_request
+from amscjobmanager.server.cli import format_function_list, parse_function_arguments
 
 
-def build_parser(*, help_command: str | None = None) -> argparse.ArgumentParser:
-    """Build the main admin parser or select one command's parser for help.
+def build_parser(*, command_selection=False) -> argparse.ArgumentParser:
+    """Build one stage of the connection/command parser.
 
-    help_command (str | None, default None) selects a known command's parser;
-    None returns the main parser. Unknown names produce an argparse usage error.
-    Return argparse.ArgumentParser without parsing input or making a connection.
-    socket (str) selects the server's Unix socket. Subcommands add/remove
-    sandboxes, enable/disable wallets, or recharge a wallet. Each requires machine
-    (str); sandbox commands require path (str), recharge requires node_hours
-    (positive float).
-    --timeout is the positive socket timeout in seconds, default 120.
+    command_selection (bool, default False) selects parsing command/global
+    options after the socket; False parses the socket and preserves later tokens.
+    Return argparse.ArgumentParser. socket (str) is required except for offline -h/--help. command (str | None)
+    selects a discovered operation; None lists commands. --timeout is seconds,
+    default 120. Command-specific inputs/help come only from server schemas.
     """
-    # Define connection arguments and the main help page.
-    parser = argparse.ArgumentParser(description=__doc__, add_help=False)
-    parser.add_argument('-h', '--help', action='help',
-                        help='Show the main help page; -h COMMAND or --help COMMAND shows help for that command')
-    parser.add_argument('socket',
-                        help='Unix socket on the server host (relative paths use the working directory)')
-    parser.add_argument('--timeout', type=float, default=120, help='Socket operation timeout in seconds (default: 120)')
-
-    # Share command descriptions and argument definitions across both help forms.
-    descriptions = {
-        'add_sandbox': 'Add a sandbox directory for this server session; validation occurs on first use.',
-        'remove_sandbox': 'Remove an exact sandbox registration for this session without deleting files.',
-        'enable_wallet': 'Enable persistent compute budgeting for a machine; a new wallet starts at zero.',
-        'disable_wallet': 'Disable compute budgeting for new submissions while retaining existing reservations.',
-        'recharge_wallet': 'Add node-hours to a persistent compute wallet without changing whether it is enabled.',
-    }
-    commands = parser.add_subparsers(dest='command', required=True, title='commands', metavar='COMMAND')
-    selected_parser = None
-    for command, description in descriptions.items():
-        subparser = commands.add_parser(
-            command, help=description, description=description, add_help=False,
-            epilog=('Connection: supply the Unix socket path before the command. '
-                    'Global --timeout SECONDS defaults to 120 and precedes the command. '
-                    'Execution prompts privately for the admin password. '
-                    'Outputs: success message on stdout and exit code 0; '
-                    'operation errors on stderr and exit code 1; syntax errors exit with 2. '
-                    f'Help: manager_admin.py -h {command} or manager_admin.py --help {command}. '
-                    'Help requires no socket connection or password.'),
-        )
-        subparser.add_argument('-h', '--help', action='help', help="Show this command's help")
-        if command == help_command:
-            selected_parser = subparser
-        subparser.add_argument('machine', help='Configured machine name, or local')
-        if command in ('add_sandbox', 'remove_sandbox'):
-            subparser.add_argument('path', help='Sandbox root; removal matches registered text exactly')
-        elif command == 'recharge_wallet':
-            subparser.add_argument('node_hours', type=float, help='Positive node-hour grant; additive, do not blindly retry')
-
-    # Command help uses the same parser without requiring connection arguments.
-    if help_command is not None:
-        if selected_parser is None:
-            parser.error(f"Unknown command {help_command!r}; choose from {', '.join(descriptions)}")
-        return selected_parser
+    parser = argparse.ArgumentParser(description=__doc__, add_help=False,
+        epilog='Use SOCKET -h for available commands, or SOCKET -h COMMAND for command help. Help requires a running initialized server but no password.')
+    parser.add_argument('-h', '--help', action='store_true',
+                        help='Show connection help; with SOCKET, list commands or show help for COMMAND')
+    if not command_selection:
+        parser.add_argument('socket', help='Unix socket on the server host; relative paths use the working directory')
+    parser.add_argument('--timeout', type=float, default=None if command_selection else 120, help='Socket operation timeout in seconds (default: 120); place before COMMAND')
+    if command_selection:
+        parser.add_argument('command', nargs='?', help='Server-advertised command name')
+    parser.add_argument('arguments', nargs=argparse.REMAINDER, help='Command inputs; required values are positional, optional values use flags')
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Prompt privately, send one local admin command, and report its outcome.
+    """Discover schemas, display help or parse inputs, then privately authorize one execution.
 
     argv (list[str] | None) supplies CLI tokens, or None uses sys.argv[1:].
-    Required positionals are socket, command, machine, followed by path for
-    sandbox commands or node_hours for recharge;
-    --timeout is optional and measured in seconds. -h/--help alone shows main
-    help; -h COMMAND/--help COMMAND shows command help without a socket argument,
-    password prompt, or connection. SOCKET COMMAND -h/--help also works.
-    Return exit code 0 on success, 1 on authentication/transport/operation error;
-    argparse syntax errors exit with code 2. Print successes to stdout and
-    errors to stderr. Never accept a password argument, environment variable,
-    file, or exposed stdin fallback. No credential or login is saved.
+    -h/--help alone shows offline connection help. SOCKET -h COMMAND and SOCKET
+    COMMAND -h retrieve detailed help without prompting. Actual execution prompts
+    for a password only after discovery and input validation. Return 0 for success
+    or help, 1 on request/transport/authentication failure; argparse exits with 2
+    for connection syntax errors. Success/help uses stdout; errors use stderr.
+    No execution retries, saved passwords or exposed password input are supported.
     """
-    # Select command help before parsing the otherwise required socket argument.
     tokens = list(sys.argv[1:] if argv is None else argv)
-    help_command = tokens[1] if len(tokens) > 1 and tokens[0] in ('-h', '--help') else None
-    parser = build_parser(help_command=help_command)
-    if help_command is not None:
+    parser = build_parser()
+    if tokens in (['-h'], ['--help']):
         parser.print_help()
         return 0
     args = parser.parse_args(tokens)
+    # Parse connection flags after SOCKET before consuming command arguments.
+    # Once COMMAND is reached, its flags belong exclusively to its schema.
+    selection = build_parser(command_selection=True).parse_args(args.arguments)
+    args.command, args.arguments = selection.command, selection.arguments
+    args.help = args.help or selection.help
+    if selection.timeout is not None:
+        args.timeout = selection.timeout
     try:
-        # The frontend owns password input; it must never enter MCP's query queue.
+        # Metadata discovery precedes password input and contains no credentials.
+        discovery = execute_admin_request(args.socket, AdminDiscoveryRequest(), timeout=args.timeout)
+        if not discovery.success:
+            print(discovery.message, file=sys.stderr)
+            return 1
+        if args.command is None:
+            print(format_function_list(discovery.functions or []), end='')
+            return 0
+        function = next((item for item in discovery.functions or [] if item.name == args.command), None)
+        if function is None:
+            raise ValueError('Unknown command; use SOCKET -h to discover available commands.')
+        arguments = parse_function_arguments(
+            function, args.arguments + (['--help'] if args.help else []),
+            required_positionals=True, program='manager_admin.py', connection_arguments='SOCKET',
+        )
+        if isinstance(arguments, str):
+            print(arguments, end='')
+            return 0
+
+        # The frontend owns password input; it never enters the server query queue.
         with warnings.catch_warnings():
             warnings.simplefilter('error', getpass.GetPassWarning)
             password = getpass.getpass('Admin password: ')
-        response = execute_admin_command(args.socket, args.command, args.machine, getattr(args, 'path', None),
-                                         password, node_hours=getattr(args, 'node_hours', None), timeout=args.timeout)
+        request = AdminCallRequest(command=function.name, arguments=arguments, password=password)
         password = None
+        response = execute_admin_request(args.socket, request, timeout=args.timeout)
     except (getpass.GetPassWarning, EOFError):
         print('A terminal with hidden password input is required.', file=sys.stderr)
         return 1
     except OSError:
-        print('Admin connection failed or timed out. Check the socket and server; the operation may already have taken effect.', file=sys.stderr)
+        print('Admin connection failed or timed out. Check the socket and server; an execution request may already have taken effect.', file=sys.stderr)
         return 1
-    except ValueError:
-        # Pydantic errors can contain submitted input, so do not print them.
-        print('Invalid admin request, response, socket permissions, or timeout.', file=sys.stderr)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
         return 1
     except KeyboardInterrupt:
         print('Admin command interrupted; an already submitted operation may still complete.', file=sys.stderr)

@@ -1,12 +1,10 @@
-"""Translate an MCP tool's input schema into traditional command-line options."""
+"""Generate transport-independent command arguments and help from JSON schemas."""
 
 import argparse
 import json
 
 import jsonschema
-from mcp.types import Tool
-
-from .client import ToolRequest
+from ..manager_functions import FunctionDescription
 
 
 def _format_schema(schema: dict, *, root: dict | None = None, label='', indent=0, seen=()) -> str:
@@ -78,20 +76,24 @@ def _format_schema(schema: dict, *, root: dict | None = None, label='', indent=0
     return '\n'.join(lines)
 
 
-def parse_tool_arguments(tool: Tool, arguments: list[str]) -> ToolRequest | str:
+def parse_function_arguments(function: FunctionDescription, arguments: list[str], *,
+                             required_positionals=False, program='manager_client.py',
+                             connection_arguments='') -> dict | str:
     """Parse CLI tokens using the server's schema, or return tool help text.
 
     Args:
-        tool (mcp.types.Tool): Discovered tool, including name, description,
-            input_schema and output_schema. Underscores become option hyphens.
+        function (FunctionDescription): Discovered schemas/description; input
+            underscores become option hyphens. parameter_order orders positionals.
         arguments (list[str]): Tokens after the tool name, excluding global
-            connection options. Integers/numbers/strings take one value; bools
+            connection options. required_positionals (bool, default False)
+            makes required fields positional; program (str) and
+            connection_arguments (str) customize usage/help. Integers/numbers/strings take one value; bools
             use --flag/--no-flag; arrays take one or more values. Objects and
             other complex schemas take JSON values. Omitted fields are not
             sent, leaving server defaults intact. -h/--help requests help.
 
     Returns:
-        ToolRequest | str: Validated request model, or formatted help including
+        dict | str: Validated argument values, or formatted help including
             description, input types/options and output fields/types without
             executing the tool. No network calls are performed here.
 
@@ -99,17 +101,21 @@ def parse_tool_arguments(tool: Tool, arguments: list[str]) -> ToolRequest | str:
         ValueError: Unknown/malformed options, missing required fields, or
             arguments incompatible with the advertised JSON schema.
     """
+    prefix = ' '.join(part for part in (program, connection_arguments) if part)
     parser = argparse.ArgumentParser(
-        prog=f'manager_client.py {tool.name}', description=(tool.description or '').split('\n\n', 1)[0],
+        prog=f'{prefix} {function.name}', description=(function.description or '').split('\n\n', 1)[0],
         exit_on_error=False, allow_abbrev=False, add_help=False,
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=(f"Show this command's help: manager_client.py -h {tool.name} "
-                f'or manager_client.py --help {tool.name}\n'
-                'Show the main help page: manager_client.py -h or manager_client.py --help'),
+        epilog=(f"Show this command's help: {prefix} -h {function.name} "
+                f'or {prefix} --help {function.name}\n'
+                f'Show the main help page: {prefix} -h or {prefix} --help'),
     )
-    schema = tool.input_schema
+    schema = function.input_schema
     try:
-        for name, field in schema.get('properties', {}).items():
+        properties = schema.get('properties', {})
+        order = getattr(function, 'parameter_order', None) or list(properties)
+        for name in order:
+            field = properties[name]
             # A nullable scalar/array uses its non-null option type. Omission
             # leaves its default on the server; JSON mode supports explicit null.
             branches = field.get('anyOf', [])
@@ -125,7 +131,10 @@ def parse_tool_arguments(tool: Tool, arguments: list[str]) -> ToolRequest | str:
             if name in schema.get('required', []):
                 description += ' (required)'
             options = {'dest': name, 'default': argparse.SUPPRESS, 'help': description}
-            if kind == 'boolean':
+            positional = required_positionals and name in schema.get('required', [])
+            if positional:
+                options.pop('dest')
+            if kind == 'boolean' and not positional:
                 options['action'] = argparse.BooleanOptionalAction
             else:
                 value_schema = shape.get('items', {}) if kind == 'array' else shape
@@ -137,10 +146,10 @@ def parse_tool_arguments(tool: Tool, arguments: list[str]) -> ToolRequest | str:
                     options['nargs'] = '+'
                 if 'enum' in value_schema:
                     options['choices'] = value_schema['enum']
-            parser.add_argument('--' + name.replace('_', '-'), **options)
+            parser.add_argument(name if positional else '--' + name.replace('_', '-'), **options)
 
         if '-h' in arguments or '--help' in arguments:
-            outputs = _format_schema(tool.output_schema) if tool.output_schema else 'No structured output schema advertised by the server.'
+            outputs = _format_schema(function.output_schema) if function.output_schema else 'No structured output schema advertised by the server.'
             return (parser.format_help() + '\nInputs (server schema):\n' + _format_schema(schema)
                     + '\n\nOutputs (server schema):\n' + outputs + '\n')
         parsed, unknown = parser.parse_known_args(arguments)
@@ -153,4 +162,20 @@ def parse_tool_arguments(tool: Tool, arguments: list[str]) -> ToolRequest | str:
         jsonschema.validate(values, schema)
     except (argparse.ArgumentError, jsonschema.ValidationError, jsonschema.SchemaError) as exc:
         raise ValueError(getattr(exc, 'message', str(exc))) from exc
-    return ToolRequest(tool=tool.name, arguments=values)
+    return values
+
+
+def format_function_list(functions: list[FunctionDescription]) -> str:
+    """Format discovered functions (list[FunctionDescription]) as a command overview.
+
+    Return str with command names aligned beside each description's first line.
+    An empty list reports that no commands are advertised. No transport calls occur.
+    """
+    lines = ['Commands (from server):']
+    width = max((len(function.name) for function in functions), default=0)
+    for function in functions:
+        brief = (function.description or 'No description provided.').splitlines()[0]
+        lines.append(f'  {function.name:<{width}}  {brief}')
+    if not functions:
+        lines.append('  No commands are advertised by this server.')
+    return '\n'.join(lines) + '\n'

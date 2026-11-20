@@ -266,7 +266,7 @@ class MCPToolTests(unittest.IsolatedAsyncioTestCase):
             fields, enums, bounds, and malformed/unknown options.
         """
         from mcp.types import Tool
-        from amscjobmanager.server.cli import parse_tool_arguments
+        from amscjobmanager.server.cli import parse_function_arguments
 
         schema = {'type': 'object', 'properties': {
             'count': {'type': 'integer', 'minimum': 0, 'default': 3},
@@ -288,10 +288,9 @@ class MCPToolTests(unittest.IsolatedAsyncioTestCase):
                  (['--metadata', '{"mode":"test"}'], {'metadata': {'mode': 'test'}})]
         for tokens, expected in cases:
             with self.subTest(tokens=tokens):
-                request = parse_tool_arguments(tool, tokens)
-                self.assertEqual(request.tool, 'example')
-                self.assertEqual(request.arguments, expected)
-        help_text = parse_tool_arguments(tool, ['--help'])
+                request = parse_function_arguments(tool, tokens)
+                self.assertEqual(request, expected)
+        help_text = parse_function_arguments(tool, ['--help'])
         self.assertIn('--no-enabled', help_text)
         self.assertIn('FAILED', help_text)
         self.assertIn('Outputs (server schema)', help_text)
@@ -304,10 +303,10 @@ class MCPToolTests(unittest.IsolatedAsyncioTestCase):
         for tokens in (['--count', '-1'], ['--count'], ['--statuses', 'INVALID'],
                        ['--unknown'], ['--offset', 'nan'], ['--metadata', '{broken']):
             with self.subTest(invalid_tokens=tokens), self.assertRaises(ValueError):
-                parse_tool_arguments(tool, tokens)
+                parse_function_arguments(tool, tokens)
         required = tool.model_copy(update={'input_schema': {**schema, 'required': ['label']}})
         with self.assertRaises(ValueError):
-            parse_tool_arguments(required, [])
+            parse_function_arguments(required, [])
 
     async def test_traditional_command_discovers_and_executes_on_one_connection(self):
         """Use one mocked SDK session for discovery and the subsequent typed call.
@@ -413,7 +412,7 @@ class MCPToolTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(runtime.stop)
         async with Client(server.mcp_server, cache=None) as client:
             response = await asyncio.wait_for(call_mcp(client, 'list_workflows', {}), timeout=3)
-            self.assertEqual(response.structured_content['error']['code'], 'manager_unavailable')
+            self.assertEqual(response.structured_content['error']['code'], 'server_initializing')
             with patch.object(manager.job_data, 'progressActiveState', side_effect=RuntimeError('injected manager crash')), \
                  patch('amscjobmanager.manager.wfmanLog') as log:
                 runtime.start()
@@ -425,7 +424,7 @@ class MCPToolTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(response.is_error)
             self.assertEqual(response.structured_content['error']['code'], 'manager_unavailable')
             self.assertEqual({tool.name for tool in (await call_mcp(client)).tools},
-                             {'list_workflows', 'list_sandbox_directories', 'list_compute_wallets', 'list_user_queries', 'respond_to_user_query', 'submit_workflow', 'cancel_workflow'})
+                             {'list_user_queries', 'respond_to_user_query'})
             with self.assertRaisesRegex(RuntimeError, 'cannot be restarted'):
                 manager.start()
             response = await asyncio.wait_for(call_mcp(client, 'list_workflows', {}), timeout=3)
@@ -547,7 +546,7 @@ class MCPToolTests(unittest.IsolatedAsyncioTestCase):
         must appear in list_workflows and survive schema/CLI serialization.
         """
         from amscjobmanager.manager import JobManager
-        from amscjobmanager.server.cli import parse_tool_arguments
+        from amscjobmanager.server.cli import parse_function_arguments
         from amscjobmanager.server.runner import ManagerHTTPServer
         from amscjobmanager.compute_actions import ExecuteJobComputeAction
 
@@ -570,9 +569,9 @@ class MCPToolTests(unittest.IsolatedAsyncioTestCase):
             tools = await client.list_tools()
             tool = next(tool for tool in tools.tools if tool.name == 'list_compute_wallets')
             self.assertTrue(tool.annotations.read_only_hint)
-            request = parse_tool_arguments(tool, ['--machine', 'LOCAL'])
-            self.assertEqual(request.arguments, {'machine': 'LOCAL'})
-            result = await call_mcp(client, 'list_compute_wallets', request.arguments)
+            request = parse_function_arguments(tool, ['--machine', 'LOCAL'])
+            self.assertEqual(request, {'machine': 'LOCAL'})
+            result = await call_mcp(client, 'list_compute_wallets', request)
             self.assertEqual(set(result.structured_content['result']), {'local'})
             self.assertEqual(result.structured_content['result']['local']['available_node_hours'], 0)
             all_wallets = await call_mcp(client, 'list_compute_wallets')
@@ -605,7 +604,7 @@ class MCPToolTests(unittest.IsolatedAsyncioTestCase):
         and copied Python results that cannot mutate the owner's records.
         """
         from amscjobmanager.manager import JobManager
-        from amscjobmanager.server.cli import parse_tool_arguments
+        from amscjobmanager.server.cli import parse_function_arguments
         from amscjobmanager.server.runner import ManagerHTTPServer
 
         self.enterContext(patch.object(manager_globals, 'remote_workdir', {
@@ -627,7 +626,7 @@ class MCPToolTests(unittest.IsolatedAsyncioTestCase):
             # Before readiness, do not expose potentially incomplete setup state.
             unavailable = await call_mcp(client, 'list_sandbox_directories')
             self.assertTrue(unavailable.is_error)
-            self.assertEqual(unavailable.structured_content['error']['code'], 'manager_unavailable')
+            self.assertEqual(unavailable.structured_content['error']['code'], 'server_initializing')
             server.runtime.start()
             await asyncio.to_thread(server.runtime._startup_worker.future.result, 3)
 
@@ -635,8 +634,8 @@ class MCPToolTests(unittest.IsolatedAsyncioTestCase):
             tool = next(tool for tool in tools.tools if tool.name == 'list_sandbox_directories')
             self.assertTrue(tool.annotations.read_only_hint)
             self.assertIn('result', tool.output_schema['properties'])
-            request = parse_tool_arguments(tool, ['--machine', 'FRONTIER'])
-            self.assertEqual(request.arguments, {'machine': 'FRONTIER'})
+            request = parse_function_arguments(tool, ['--machine', 'FRONTIER'])
+            self.assertEqual(request, {'machine': 'FRONTIER'})
             for arguments, paths in (({}, expected), ({'machine': None}, expected),
                                      ({'machine': 'FrOnTiEr'}, {'frontier': expected['frontier']}),
                                      ({'machine': 'local'}, {'local': []}), ({'machine': 'unknown'}, {})):

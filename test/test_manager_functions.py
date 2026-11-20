@@ -1,0 +1,338 @@
+"""Extensible manager capabilities, typed dispatch, and transport-independent schemas.
+
+Run: PYTHONPATH=test python -m unittest test_manager_functions -v
+The transport test needs optional server dependencies and permission for a local
+Unix socket. No credentials, remote API, or actual compute job is used.
+"""
+
+from pathlib import Path
+import tempfile
+import sys
+import subprocess
+import unittest
+from unittest.mock import patch
+
+from pydantic import Field, RootModel, ValidationError
+
+from amscjobmanager.actions_base import ActionClass
+from amscjobmanager.compute_action_manager import ComputeActions
+from amscjobmanager.job_data import JobData
+from amscjobmanager.manager import JobManager
+from amscjobmanager.manager_functions import FunctionArguments, FunctionDefinition
+from amscjobmanager.server.functions import FunctionError, FunctionRegistry
+from amscjobmanager.server.runtime import ServerRuntime
+
+
+class ExtensionArguments(FunctionArguments):
+    """Required value (nonnegative strict int) supplies an example manager input."""
+
+    value: int = Field(ge=0, description='Nonnegative example input.')
+
+
+class ExtensionResult(FunctionArguments):
+    """result (int) is the implementation's computed example value."""
+
+    result: int
+
+
+class ExtensionComputeActions(ComputeActions):
+    """Test implementation advertising new methods without transport modifications."""
+
+    invocations = 0
+
+    def inspectExtension(self, value: int, multiplier: int = 2) -> int:
+        """Return value * multiplier (int inputs), counting invocations for test observability."""
+        self.invocations += 1
+        return value * multiplier
+
+    def getMCPFunctions(self):
+        """Describe inherited inspection and one annotated extension operation."""
+        def _inspect(manager: ExtensionComputeActions, args: ExtensionArguments) -> ExtensionResult:
+            """Return manager's computed result for validated args.value."""
+            return ExtensionResult(result=manager.inspectExtension(args.value))
+
+        return super().getMCPFunctions() + (FunctionDefinition(
+            'inspect_extension', 'Inspect an extension-owned result.', _inspect, read_only=True, idempotent=True,
+        ),)
+
+    def getAdminFunctions(self):
+        """Describe inherited admin commands and an adapter choosing its own argument binding."""
+        def _apply(manager: ExtensionComputeActions, args: ExtensionArguments) -> ExtensionResult:
+            """Call manager with args.value and a fixed multiplier; return the output model."""
+            return ExtensionResult(result=manager.inspectExtension(args.value, multiplier=3))
+
+        return super().getAdminFunctions() + (FunctionDefinition(
+            'apply_extension', 'Apply an extension operation.', _apply, success_message='Extension applied.',
+        ),)
+
+
+class ExtensionJobManager(JobManager):
+    """Advertise workflow-manager operations without modifying transport code."""
+
+    def getMCPFunctions(self):
+        """Describe standard operations and a JobManager-owned extension."""
+        def _inspect(manager: ExtensionJobManager, args: ExtensionArguments) -> ExtensionResult:
+            """Return args.value plus ten under the supplied manager's lock."""
+            with manager:
+                return ExtensionResult(result=args.value + 10)
+
+        return super().getMCPFunctions() + (FunctionDefinition(
+            'inspect_manager_extension', 'Inspect a JobManager extension.', _inspect, read_only=True,
+        ),)
+
+    def getAdminFunctions(self):
+        """Describe standard administration and a JobManager-owned extension."""
+        def _apply(manager: ExtensionJobManager, args: ExtensionArguments) -> ExtensionResult:
+            """Return args.value plus twenty under the supplied manager's lock."""
+            with manager:
+                return ExtensionResult(result=args.value + 20)
+
+        return super().getAdminFunctions() + (FunctionDefinition(
+            'apply_manager_extension', 'Apply a JobManager extension.', _apply,
+        ),)
+
+
+class ManagerFunctionTests(unittest.TestCase):
+    """Test the public registration contract and dispatch against real JobData owners."""
+
+    def setUp(self):
+        """Construct an empty database with the extension manager; register close cleanup."""
+        self.jobs = JobData(_test_action_manager_factories={ActionClass.COMPUTE: ExtensionComputeActions})
+        self.addCleanup(self.jobs.conn.close)
+
+    def test_discovery_and_invocation_resolve_the_supplied_jobdata(self):
+        """Use one registry against two databases to prove manager instances are not captured."""
+        registry = FunctionRegistry(self.jobs)
+        other = JobData(_test_action_manager_factories={ActionClass.COMPUTE: ExtensionComputeActions})
+        self.addCleanup(other.conn.close)
+        descriptions = {item.name: item for item in registry.describe('mcp')}
+        self.assertIn('inspect_extension', descriptions)
+        self.assertNotIn('apply_extension', descriptions)
+        description = descriptions['inspect_extension']
+        self.assertEqual(description.parameter_order, ['value'])
+        self.assertEqual(description.input_schema['required'], ['value'])
+        self.assertTrue(description.read_only)
+        result, _ = registry.invoke(other, 'mcp', 'inspect_extension', {'value': 4})
+        self.assertEqual(result, {'result': 8})
+        self.assertEqual(self.jobs.getManager(ActionClass.COMPUTE).invocations, 0)
+        self.assertEqual(other.getManager(ActionClass.COMPUTE).invocations, 1)
+        result, message = registry.invoke(other, 'admin', 'apply_extension', {'value': 4})
+        self.assertEqual(result, {'result': 12})
+        self.assertEqual(message, 'Extension applied.')
+
+    def test_invalid_arguments_and_wrong_channels_never_invoke_methods(self):
+        """Reject extra fields, type coercions, invalid bounds, and admin calls through MCP."""
+        registry = FunctionRegistry(self.jobs)
+        for arguments in ({'value': -1}, {'value': True}, {'value': '2'}, {'value': 2, 'multiplier': 99}):
+            with self.subTest(arguments=arguments), self.assertRaises(ValidationError):
+                registry.invoke(self.jobs, 'admin', 'apply_extension', arguments)
+        with self.assertRaises(FunctionError):
+            registry.invoke(self.jobs, 'mcp', 'apply_extension', {'value': 2})
+        self.assertEqual(self.jobs.getManager(ActionClass.COMPUTE).invocations, 0)
+
+    def test_invalid_output_is_reported_after_exactly_one_invocation(self):
+        """Distinguish a faulty result contract from invalid input, without retrying the operation."""
+        registry = FunctionRegistry(self.jobs)
+        with patch.object(ExtensionComputeActions, 'inspectExtension', return_value='not an integer') as operation:
+            with self.assertRaises(FunctionError) as error:
+                registry.invoke(self.jobs, 'admin', 'apply_extension', {'value': 3})
+            self.assertEqual(error.exception.code, 'operation_failed')
+            operation.assert_called_once_with(3, multiplier=3)
+
+    def test_invalid_registrations_fail_before_publication(self):
+        """Reject duplicate names, missing model hints, invalid arity, and non-model returns."""
+        definition = self.jobs.getManager(ActionClass.COMPUTE).getMCPFunctions()[-1]
+        from dataclasses import replace
+
+        def _unannotated(manager, args):
+            """Provide an intentionally unannotated registration without executing work."""
+            raise AssertionError('Registration must not execute this function')
+
+        def _wrong_arity(args: ExtensionArguments) -> ExtensionResult:
+            """Provide a deliberately unsupported one-argument registration."""
+            raise AssertionError('Registration must not execute this function')
+
+        def _wrong_return(manager, args: ExtensionArguments) -> int:
+            """Provide an annotated but non-model result contract."""
+            raise AssertionError('Registration must not execute this function')
+
+        def _root_result(manager, args: ExtensionArguments) -> RootModel[list[int]]:
+            """Provide a root-array output that cannot be advertised as a structured object."""
+            raise AssertionError('Registration must not execute this function')
+
+        for definitions in ((definition, definition),
+                            (replace(definition, invoke=_unannotated),),
+                            (replace(definition, invoke=_wrong_arity),),
+                            (replace(definition, invoke=_wrong_return),),
+                            (replace(definition, invoke=_root_result),)):
+            with self.subTest(definitions=definitions), \
+                 patch.object(ExtensionComputeActions, 'getMCPFunctions', return_value=definitions), \
+                 self.assertRaises(ValueError):
+                FunctionRegistry(self.jobs)
+
+    def test_backend_definitions_do_not_import_server_or_mcp(self):
+        """Describe all backend functions in a fresh process with both transport imports blocked."""
+        script = """
+import sys
+sys.modules['mcp'] = None
+sys.modules['amscjobmanager.server'] = None
+from amscjobmanager.manager import JobManager
+from amscjobmanager.actions_base import ActionClass
+from amscjobmanager.user_queries import UserQueryQueue
+manager = JobManager(max_workflows_active=0)
+try:
+    providers = [manager, UserQueryQueue(), manager.job_data.getManager(ActionClass.COMPUTE)]
+    for provider in providers:
+        for definition in provider.getMCPFunctions() + provider.getAdminFunctions():
+            definition.describe()
+finally:
+    manager.stop(False, close_database=True)
+"""
+        result = subprocess.run([sys.executable, '-c', script], capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_annotations_support_named_and_positional_only_parameters(self):
+        """Infer models by parameter position rather than name, including positional-only callables."""
+        def _call(owner, query: ExtensionArguments, /) -> ExtensionResult:
+            """Return query.value in a result model; owner is accepted explicitly and unused."""
+            return ExtensionResult(result=query.value)
+
+        definition = FunctionDefinition('example', 'Example.', _call)
+        self.assertEqual(definition.models(), (ExtensionArguments, ExtensionResult))
+        self.assertEqual(definition.describe().parameter_order, ['value'])
+        self.assertEqual(definition.invoke(None, ExtensionArguments(value=7)), ExtensionResult(result=7))
+
+    def test_jobmanager_functions_are_backend_owned_and_keep_raw_receipt_shape(self):
+        """Dispatch workflow-manager callbacks directly without importing MCP or a transport handler."""
+        manager = ExtensionJobManager(max_workflows_active=0)
+        self.addCleanup(manager.stop, False, close_database=True)
+        manager.start()
+        with manager as jobs:
+            registry = FunctionRegistry(jobs, manager=manager)
+        receipt, _ = registry.invoke(None, 'mcp', 'submit_workflow',
+            {'stages': [{'type': 'api', 'operations': []}]}, manager=manager)
+        self.assertEqual(set(receipt), {'workflow_id', 'workflow_status'})
+        listing, _ = registry.invoke(None, 'mcp', 'list_workflows', {}, manager=manager)
+        self.assertEqual(listing['result'][0]['workflow_id'], receipt['workflow_id'])
+        extended, _ = registry.invoke(None, 'mcp', 'inspect_manager_extension', {'value': 4}, manager=manager)
+        self.assertEqual(extended, {'result': 14})
+        with self.assertRaises(FunctionError) as error:
+            registry.invoke(None, 'mcp', 'cancel_workflow', {'workflow_id': 999}, manager=manager)
+        self.assertEqual(error.exception.code, 'workflow_not_found')
+
+    def test_wallet_adapters_keep_enabled_out_of_public_inputs(self):
+        """Retain separate enable/disable commands with typed machine-only inputs."""
+        registry = FunctionRegistry(self.jobs)
+        with patch('amscjobmanager.api_general.getKnownMachines', return_value=['local']):
+            descriptions = {item.name: item for item in registry.describe('admin')}
+            self.assertEqual(descriptions['enable_wallet'].parameter_order, ['machine'])
+            self.assertNotIn('enabled', descriptions['enable_wallet'].input_schema['properties'])
+            registry.invoke(self.jobs, 'admin', 'enable_wallet', {'machine': 'LOCAL'})
+            registry.invoke(self.jobs, 'admin', 'recharge_wallet', {'machine': 'local', 'node_hours': 2})
+            with self.assertRaises(ValidationError):
+                registry.invoke(self.jobs, 'admin', 'disable_wallet', {'machine': 'local', 'enabled': True})
+        wallet = self.jobs.getManager(ActionClass.COMPUTE).getWallets()['local']
+        self.assertTrue(wallet['enabled'])
+        self.assertEqual(wallet['available_node_hours'], 2)
+
+    def test_runtime_reports_initialization_and_failure_without_publishing_functions(self):
+        """A malformed registration fails initialization rather than exposing a partial catalog."""
+        runtime = ServerRuntime(lambda: JobManager(max_workflows_active=0))
+        self.addCleanup(runtime.stop)
+        with self.assertRaises(FunctionError) as error:
+            runtime.describeFunctions('admin')
+        self.assertEqual(error.exception.code, 'server_initializing')
+        with patch.object(ComputeActions, 'getMCPFunctions', return_value=(
+                self.jobs.getManager(ActionClass.COMPUTE).getMCPFunctions()[-1],) * 2):
+            runtime.start()
+            runtime._startup_worker.future.result(3)
+        self.assertEqual(runtime.state, 'failed')
+        self.assertIsNone(runtime.manager)
+        with self.assertRaises(FunctionError) as error:
+            runtime.describeFunctions('mcp')
+        self.assertEqual(error.exception.code, 'manager_unavailable')
+
+
+try:
+    from mcp import Client
+except ImportError:
+    Client = None
+
+
+@unittest.skipIf(Client is None, 'Install amsc-job-manager[server]')
+class FunctionTransportTests(unittest.IsolatedAsyncioTestCase):
+    async def test_extension_discovery_help_and_execution_on_both_transports(self):
+        """Advertise a new implementation through MCP and a real admin socket, with no adapters.
+
+        Before readiness metadata reports initialization and auth tools remain
+        available. After readiness each transport sees only its own commands;
+        shared parsing supports flags for MCP and positional inputs for admin.
+        """
+        import asyncio
+        from amscjobmanager.server.admin import AdminCallRequest, AdminDiscoveryRequest, AdminServer, execute_admin_request
+        from amscjobmanager.server.cli import parse_function_arguments
+        from amscjobmanager.server.runner import ManagerHTTPServer
+
+        temporary = self.enterContext(tempfile.TemporaryDirectory())
+        with patch('amscjobmanager.job_data.ComputeActions', ExtensionComputeActions):
+            manager = ExtensionJobManager(max_workflows_active=0)
+        server = ManagerHTTPServer(lambda: manager, port=0, log_path=Path(temporary) / 'server.log')
+        self.addCleanup(server.runtime.stop)
+        admin = AdminServer(Path(temporary) / 'private' / 'admin.sock', 'secret', server.runtime)
+        await admin.start()
+        self.addAsyncCleanup(admin.stop)
+        async with Client(server.mcp_server, cache=None) as client:
+            tools = await client.list_tools()
+            self.assertEqual(tools.meta['initialization_error']['code'], 'server_initializing')
+            self.assertEqual({tool.name for tool in tools.tools}, {'list_user_queries', 'respond_to_user_query'})
+            response_tool = next(tool for tool in tools.tools if tool.name == 'respond_to_user_query')
+            self.assertFalse(response_tool.annotations.destructive_hint)
+            auth_queries = await client.call_tool('list_user_queries', {})
+            self.assertFalse(auth_queries.is_error)
+            pending = await asyncio.to_thread(execute_admin_request, admin.socket_path, AdminDiscoveryRequest())
+            self.assertEqual(pending.code, 'server_initializing')
+            server.runtime.start()
+            await asyncio.to_thread(server.runtime._startup_worker.future.result, 3)
+            tools = await client.list_tools()
+            names = {tool.name for tool in tools.tools}
+            self.assertIn('inspect_extension', names)
+            self.assertIn('inspect_manager_extension', names)
+            self.assertNotIn('apply_extension', names)
+            response = await client.call_tool('inspect_extension', {'value': 5})
+            self.assertEqual(response.structured_content, {'result': 10})
+            response = await client.call_tool('inspect_manager_extension', {'value': 5})
+            self.assertEqual(response.structured_content, {'result': 15})
+            rejected = await client.call_tool('apply_extension', {'value': 5})
+            self.assertTrue(rejected.is_error)
+            discovery = await asyncio.to_thread(execute_admin_request, admin.socket_path, AdminDiscoveryRequest())
+            function = next(item for item in discovery.functions if item.name == 'apply_extension')
+            self.assertNotIn('inspect_extension', {item.name for item in discovery.functions})
+            self.assertNotIn('secret', discovery.model_dump_json())
+            # The actual CLI must discover this previously unknown command,
+            # with no local registration and no password required for help.
+            process = await asyncio.create_subprocess_exec(
+                sys.executable, 'utilities/manager_admin.py', str(admin.socket_path), '-h', 'apply_extension',
+                stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            output, errors = await asyncio.wait_for(process.communicate(), timeout=10)
+            self.assertEqual(process.returncode, 0, errors.decode())
+            self.assertIn('Nonnegative example input', output.decode())
+            self.assertNotIn('Admin password:', output.decode() + errors.decode())
+            arguments = parse_function_arguments(function, ['5'], required_positionals=True)
+            self.assertEqual(arguments, {'value': 5})
+            help_text = parse_function_arguments(function, ['--help'], required_positionals=True)
+            self.assertIn('Nonnegative example input', help_text)
+            failed = await asyncio.to_thread(execute_admin_request, admin.socket_path,
+                AdminCallRequest(command='apply_extension', arguments=arguments, password='wrong'))
+            self.assertEqual(failed.code, 'authentication_failed')
+            accepted = await asyncio.to_thread(execute_admin_request, admin.socket_path,
+                AdminCallRequest(command='apply_extension', arguments=arguments, password='secret'))
+            self.assertEqual(accepted.result, 15)
+            self.assertEqual(accepted.message, 'Extension applied.')
+            accepted = await asyncio.to_thread(execute_admin_request, admin.socket_path,
+                AdminCallRequest(command='apply_manager_extension', arguments=arguments, password='secret'))
+            self.assertEqual(accepted.result, 25)
+
+
+if __name__ == '__main__':
+    unittest.main()

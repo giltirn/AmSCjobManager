@@ -21,14 +21,15 @@ import sys
 import tempfile
 from threading import Event, Thread
 import time
-from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
 from amscjobmanager import globals as sandbox
 from amscjobmanager import logging as manager_logging
 from amscjobmanager.actions_base import ActionClass
-from amscjobmanager.server.admin import AdminRequest, AdminServer, execute_admin_command
+from amscjobmanager.server.admin import AdminCallRequest, AdminDiscoveryRequest, AdminResponse, AdminServer, execute_admin_request
+from amscjobmanager.server.runtime import ServerRuntime
+from amscjobmanager.manager import JobManager
 
 
 class AdminSocketTests(unittest.IsolatedAsyncioTestCase):
@@ -39,13 +40,16 @@ class AdminSocketTests(unittest.IsolatedAsyncioTestCase):
         self.root = Path(temporary.name)
         self.address = self.root / 'private' / 'admin.sock'
         self.password = 'private-admin-credential'
-        self.runtime = SimpleNamespace(manager=SimpleNamespace(isAlive=lambda: True))
         self.enterContext(patch.object(sandbox, 'remote_workdir', {'local': []}))
         self.enterContext(patch('amscjobmanager.api_general.getKnownMachines', return_value=['local']))
         self.logs = Mock()
         self.enterContext(patch.object(manager_logging, 'wfman_log_func', self.logs))
         self.queries = Mock(side_effect=AssertionError('Password reached a user-query hook'))
         self.enterContext(patch.object(manager_logging, 'api_query_user_func', self.queries))
+        self.runtime = ServerRuntime(lambda: JobManager(max_workflows_active=0))
+        self.addCleanup(self.runtime.stop)
+        self.runtime.start()
+        await asyncio.to_thread(self.runtime._startup_worker.future.result, 3)
         self.server = AdminServer(self.address, self.password, self.runtime)
         await self.server.start()
         self.addAsyncCleanup(self.server.stop)
@@ -56,9 +60,7 @@ class AdminSocketTests(unittest.IsolatedAsyncioTestCase):
         Return AdminResponse. None path uses self.root; None password uses the
         correct credential. The blocking client runs outside the server loop.
         """
-        return await asyncio.to_thread(execute_admin_command, self.address, command, 'local',
-                                       str(self.root) if path is None else str(path),
-                                       self.password if password is None else password)
+        return await asyncio.to_thread(execute_admin_request, self.address, AdminCallRequest(command=command, arguments={'machine': 'local', 'path': str(self.root) if path is None else str(path)}, password=self.password if password is None else password))
 
     async def _send(self, payload):
         """Send payload (bytes), end its write stream and return the JSON response dict."""
@@ -84,25 +86,25 @@ class AdminSocketTests(unittest.IsolatedAsyncioTestCase):
 
         database = self.root / 'wallet.sqlite'
         manager = JobManager(database, max_workflows_active=0)
-        self.runtime.manager = manager
-        self.addCleanup(manager.stop, False, close_database=True)
-        manager.start()
+        self.runtime.stop()
+        self.runtime = ServerRuntime(lambda: manager)
+        self.server.runtime = self.runtime
+        self.addCleanup(self.runtime.stop)
+        self.runtime.start()
+        await asyncio.to_thread(self.runtime._startup_worker.future.result, 3)
         for command, hours in (('enable_wallet', None), ('recharge_wallet', 2.5)):
-            denied = await asyncio.to_thread(execute_admin_command, self.address, command,
-                                            'local', None, 'wrong', node_hours=hours)
+            denied = await asyncio.to_thread(execute_admin_request, self.address, AdminCallRequest(command=command, arguments={'machine': 'local', **({} if hours is None else {'node_hours': hours})}, password='wrong'))
             self.assertEqual(denied.code, 'authentication_failed')
             self.assertEqual(manager(lambda jobs: jobs.getManager(ActionClass.COMPUTE).getWallets()), {})
         for command, hours in (('enable_wallet', None), ('recharge_wallet', 2.5),
                                ('disable_wallet', None)):
-            result = await asyncio.to_thread(execute_admin_command, self.address, command,
-                                            'local', None, self.password, node_hours=hours)
+            result = await asyncio.to_thread(execute_admin_request, self.address, AdminCallRequest(command=command, arguments={'machine': 'local', **({} if hours is None else {'node_hours': hours})}, password=self.password))
             self.assertTrue(result.success, result)
         snapshot = manager(lambda jobs: jobs.getManager(ActionClass.COMPUTE).getWallets())
         self.assertEqual(snapshot['local']['available_node_hours'], 2.5)
         self.assertFalse(snapshot['local']['enabled'])
         # Invalid command-specific fields must fail before changing any state.
-        invalid = await self._send(json.dumps(dict(password=self.password,
-            command='enable_wallet', machine='local', path='/unexpected')).encode() + b'\n')
+        invalid = await self._send(json.dumps(dict(type='call', command='enable_wallet', password=self.password, arguments=dict(machine='local', path='/unexpected'))).encode() + b'\n')
         self.assertFalse(invalid['success'])
         self.assertEqual(manager(lambda jobs: jobs.getManager(ActionClass.COMPUTE).getWallets()), snapshot)
         manager.stop(False, close_database=True)
@@ -128,8 +130,7 @@ class AdminSocketTests(unittest.IsolatedAsyncioTestCase):
         self.queries.assert_not_called()
         self.assertNotIn(self.password, str(self.logs.call_args_list))
         self.assertNotIn(self.password, failed.model_dump_json())
-        self.assertNotIn(self.password, repr(AdminRequest(
-            password=self.password, command='add_sandbox', machine='local', path=str(self.root))))
+        self.assertNotIn(self.password, repr(AdminCallRequest(command='add_sandbox', password=self.password, arguments=dict(machine='local', path=str(self.root)))))
 
     async def test_add_remove_changes_later_checks_without_deleting_files(self):
         """Add and remove a real directory; explicitly exclude /tmp's implicit allowance.
@@ -153,7 +154,7 @@ class AdminSocketTests(unittest.IsolatedAsyncioTestCase):
     async def test_invalid_inputs_and_unavailable_manager_do_not_mutate_roots(self):
         """Reject unsupported commands/fields and unhealthy runtimes without side effects."""
         for extra in ({'command': '__getattribute__'}, {'unexpected': self.password}, {'path': ''}):
-            request = dict(password=self.password, command='add_sandbox', machine='local', path=str(self.root))
+            request = dict(type='call', command='add_sandbox', password=self.password, arguments=dict(machine='local', path=str(self.root)))
             request.update(extra)
             result = await self._send(json.dumps(request).encode() + b'\n')
             self.assertEqual(result['code'], 'invalid_request')
@@ -161,7 +162,7 @@ class AdminSocketTests(unittest.IsolatedAsyncioTestCase):
         rejected = await self._call(path='~/unsupported')
         self.assertEqual(rejected.code, 'invalid_request')
         self.assertIn("'~'", rejected.message)
-        self.runtime.manager = None
+        self.runtime.stop()
         self.assertEqual((await self._call()).code, 'manager_unavailable')
         self.assertEqual(sandbox.remote_workdir, {'local': []})
 
@@ -172,8 +173,7 @@ class AdminSocketTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(result['success'])
         reader, writer = await asyncio.open_unix_connection(self.address)
         try:
-            payload = json.dumps(dict(password=self.password, command='add_sandbox',
-                                      machine='local', path=str(self.root))).encode() + b'\n'
+            payload = json.dumps(dict(type='call', command='add_sandbox', password=self.password, arguments=dict(machine='local', path=str(self.root)))).encode() + b'\n'
             # A stream may split at any byte; the server waits for the full frame.
             writer.write(payload[:12])
             await writer.drain()
@@ -243,14 +243,12 @@ class AdminSocketTests(unittest.IsolatedAsyncioTestCase):
         self.addAsyncCleanup(server.stop)
         self.assertEqual(server.socket_path, absolute)
         await server.start()
-        result = await asyncio.to_thread(execute_admin_command, relative, 'add_sandbox',
-                                         'local', str(self.root), self.password)
+        result = await asyncio.to_thread(execute_admin_request, relative, AdminCallRequest(command='add_sandbox', arguments={'machine': 'local', 'path': str(self.root)}, password=self.password))
         self.assertTrue(result.success)
         with self.assertRaisesRegex(ValueError, "containing '~'"):
             AdminServer('./socket~', self.password, self.runtime)
         with self.assertRaisesRegex(ValueError, "containing '~'"):
-            await asyncio.to_thread(execute_admin_command, './socket~', 'add_sandbox',
-                                    'local', str(self.root), self.password)
+            await asyncio.to_thread(execute_admin_request, './socket~', AdminCallRequest(command='add_sandbox', arguments={'machine': 'local', 'path': str(self.root)}, password=self.password))
 
     async def test_shared_parent_warns_but_commands_work_and_existing_entries_are_rejected(self):
         """Allow a mode-0755 parent with advice, keeping per-call auth and socket permissions."""
@@ -262,11 +260,9 @@ class AdminSocketTests(unittest.IsolatedAsyncioTestCase):
         await server.start()
         self.assertEqual(stat.S_IMODE(server.socket_path.stat().st_mode), 0o600)
         self.assertIn('0700', str(self.logs.call_args_list))
-        result = await asyncio.to_thread(execute_admin_command, server.socket_path, 'add_sandbox',
-                                         'local', str(self.root), self.password)
+        result = await asyncio.to_thread(execute_admin_request, server.socket_path, AdminCallRequest(command='add_sandbox', arguments={'machine': 'local', 'path': str(self.root)}, password=self.password))
         self.assertTrue(result.success)
-        failed = await asyncio.to_thread(execute_admin_command, server.socket_path, 'remove_sandbox',
-                                         'local', str(self.root), 'wrong-password')
+        failed = await asyncio.to_thread(execute_admin_request, server.socket_path, AdminCallRequest(command='remove_sandbox', arguments={'machine': 'local', 'path': str(self.root)}, password='wrong-password'))
         self.assertEqual(failed.code, 'authentication_failed')
         for name in ('file', 'link'):
             address = self.address.parent / name
@@ -422,47 +418,37 @@ class SandboxRemovalTests(unittest.TestCase):
 
 
 class AdminUtilityIntegrationTests(unittest.TestCase):
-    def test_admin_help_selects_commands_without_socket_or_password(self):
-        """Run the real frontend's help forms without a terminal or running server.
+    def test_admin_help_uses_discovered_schemas_without_password(self):
+        """Generate every admin help page from actual registry descriptions without authentication.
 
-        Main help lists descriptions; both leading help flags show each command's
-        inputs and outputs. The existing SOCKET COMMAND --help form still works,
-        and unknown command help fails with a usage error before authentication.
+        Stub only socket I/O; command definitions come from a real JobData.
+        Offline help shows connection instructions, while detailed help uses
+        SOCKET -h COMMAND and never prompts or submits an execution request.
         """
-        descriptions = {
-            'add_sandbox': ('Add a sandbox directory', 'path'),
-            'remove_sandbox': ('Remove an exact sandbox', 'path'),
-            'enable_wallet': ('Enable persistent compute', 'machine'),
-            'disable_wallet': ('Disable compute budgeting', 'machine'),
-            'recharge_wallet': ('Add node-hours', 'node_hours'),
-        }
-        base = [sys.executable, 'utilities/manager_admin.py']
+        import io
+        import runpy
+        from contextlib import redirect_stdout
+        from amscjobmanager.job_data import JobData
+        from amscjobmanager.server.functions import FunctionRegistry
+
+        jobs = JobData()
+        self.addCleanup(jobs.conn.close)
+        descriptions = FunctionRegistry(jobs).describe('admin')
+        main = runpy.run_path('utilities/manager_admin.py')['main']
         for flag in ('-h', '--help'):
-            main = subprocess.run(base + [flag], stdin=subprocess.DEVNULL, capture_output=True,
-                                  text=True, start_new_session=True, timeout=10)
-            self.assertEqual(main.returncode, 0, main.stderr)
-            self.assertIn('COMMAND', main.stdout)
-            for command, (description, argument) in descriptions.items():
-                with self.subTest(flag=flag, command=command):
-                    self.assertIn(command, main.stdout)
-                    result = subprocess.run(base + [flag, command], stdin=subprocess.DEVNULL,
-                                            capture_output=True, text=True, start_new_session=True, timeout=10)
-                    self.assertEqual(result.returncode, 0, result.stderr)
-                    self.assertIn(description, result.stdout)
-                    self.assertIn(argument, result.stdout)
-                    self.assertIn('Outputs:', result.stdout)
-                    self.assertIn('exit code 0', result.stdout)
-                    self.assertIn('no socket connection or password', result.stdout)
-                    self.assertNotIn('Admin password:', result.stdout + result.stderr)
-        native = subprocess.run(base + ['/unused/admin.sock', 'recharge_wallet', '--help'],
-                                stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=10)
-        self.assertEqual(native.returncode, 0, native.stderr)
-        self.assertIn('node_hours', native.stdout)
-        invalid = subprocess.run(base + ['-h', 'unknown_command'], stdin=subprocess.DEVNULL,
-                                 capture_output=True, text=True, timeout=10)
-        self.assertEqual(invalid.returncode, 2)
-        self.assertIn('Unknown command', invalid.stderr)
-        self.assertNotIn('Admin password:', invalid.stdout + invalid.stderr)
+            with patch.dict(main.__globals__, {'execute_admin_request': Mock(side_effect=AssertionError('Offline help connected'))}), redirect_stdout(io.StringIO()):
+                self.assertEqual(main([flag]), 0)
+            for function in descriptions:
+                output = io.StringIO()
+                discover = Mock(return_value=AdminResponse(success=True, code='ok', message='Available.', functions=descriptions))
+                with patch.dict(main.__globals__, {'execute_admin_request': discover}), \
+                     patch('getpass.getpass', side_effect=AssertionError('Help asked for password')), redirect_stdout(output):
+                    self.assertEqual(main(['/unused/admin.sock', flag, function.name]), 0)
+                self.assertEqual(discover.call_count, 1)
+                self.assertIsInstance(discover.call_args.args[1], AdminDiscoveryRequest)
+                self.assertIn('Inputs (server schema)', output.getvalue())
+                self.assertIn('Outputs (server schema)', output.getvalue())
+                self.assertIn(function.name, output.getvalue())
 
     def test_frontends_reject_exposed_password_input(self):
         """Run both real frontends without a terminal; neither may fall back to visible stdin.
@@ -482,7 +468,7 @@ class AdminUtilityIntegrationTests(unittest.TestCase):
                 result = subprocess.run(command, stdin=subprocess.DEVNULL, capture_output=True,
                                         text=True, start_new_session=True, timeout=10)
                 self.assertNotEqual(result.returncode, 0)
-                self.assertIn('hidden password input', result.stderr)
+                self.assertIn('Admin connection failed' if command[1].endswith('manager_admin.py') else 'hidden password input', result.stderr)
         secret = 'do-not-echo-this-credential'
         result = subprocess.run([sys.executable, 'utilities/manager_server.py', '/unused/config.json',
                                  '--database', '/unused/db', '--admin-password', secret],
@@ -668,7 +654,9 @@ class AdminUtilityIntegrationTests(unittest.TestCase):
                     else:
                         self.fail('Restart did not become ready')
                     self.assertFalse(address.exists())
-                    persisted_wallet = call('list_compute_wallets')['results'][0]['result']['local']
+                    response = call('list_compute_wallets')
+                    self.assertTrue(response['success'], f'{response}\n{restarted_log.read_text()}')
+                    persisted_wallet = response['results'][0]['result']['local']
                     self.assertFalse(persisted_wallet['enabled'])
                     self.assertEqual(persisted_wallet['available_node_hours'], 1.5)
                     self.assertEqual(write('denied-after-restart'), 'FAILED')

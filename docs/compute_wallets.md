@@ -21,6 +21,11 @@ python utilities/manager_admin.py ./admin.sock recharge_wallet frontier 100
 python utilities/manager_admin.py ./admin.sock disable_wallet frontier
 ```
 
+Command names, inputs, and help come from the running server. Inspect them
+without a password using `python utilities/manager_admin.py ./admin.sock -h`
+or append a command name for detailed help. Wallet definitions are owned by
+`ComputeActions`; its administrative operations are not MCP tools.
+
 Every command prompts privately for the server's admin password. These mutations
 are absent from MCP. Recharge adds the specified node-hours; **do not blindly
 repeat a recharge after a lost response**, since it may already have succeeded.

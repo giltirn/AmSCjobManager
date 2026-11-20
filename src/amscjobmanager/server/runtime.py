@@ -4,9 +4,10 @@ from threading import RLock
 from typing import Callable
 
 from ..logging import wfmanLog
+from .functions import FunctionError, FunctionRegistry
 from ..manager import JobManager
 from ..workers import Workers, WorkerInterrupted, checkForThreadCurrentWorkerInterruption
-from .queries import UserQueryQueue
+from ..user_queries import UserQueryQueue
 
 
 class ServerRuntime:
@@ -23,6 +24,8 @@ class ServerRuntime:
         self.queries = UserQueryQueue()
         self._initialize_manager = initialize_manager
         self._manager = None
+        self._functions = None
+        self._query_functions = FunctionRegistry(query_provider=self.queries)
         self._state = 'created'
         self._lock = RLock()
         self._workers = Workers()
@@ -49,6 +52,42 @@ class ServerRuntime:
                 return 'failed'
             return self._state
 
+    def describeFunctions(self, channel: str, *, include_unready=False) -> list:
+        """Describe published functions for channel ('mcp' or 'admin').
+
+        include_unready (bool, default False) returns only query-provider
+        functions before readiness or after failure/shutdown. Return
+        list[FunctionDescription]. Otherwise before readiness raise FunctionError
+        with code server_initializing; after failure/shutdown use
+        manager_unavailable. Discovery changes no state and needs no password.
+        """
+        with self._lock:
+            if include_unready and (self._state != 'running' or self._manager is None or not self._manager.isAlive()):
+                return self._query_functions.describe(channel)
+            if self._state in ('created', 'starting'):
+                raise FunctionError('server_initializing', 'The server is not fully initialized.')
+            if self._manager is None or not self._manager.isAlive():
+                raise FunctionError('manager_unavailable', 'Workflow manager is not running.')
+            return self._functions.describe(channel)
+
+    def invokeFunction(self, channel: str, name: str, arguments: dict) -> tuple[dict, str]:
+        """Dispatch an exposed function through its current backend provider.
+
+        channel (str) selects mcp/admin; name (str) is a registered name;
+        arguments (dict) are validated against the registered model. Return
+        (JSON result envelope dict, acknowledgment str). The admin transport must
+        authenticate before calling. Action operations acquire JobData here;
+        JobManager adapters own their locks, and query callbacks need no manager.
+        No retries or bound managers are retained.
+        """
+        # Query-provider operations remain available without a JobManager.
+        if self._query_functions.hasFunction(channel, name):
+            return self._query_functions.invoke(None, channel, name, arguments, query_provider=self.queries)
+        self.describeFunctions(channel)
+        with self._lock:
+            manager, functions = self._manager, self._functions
+        return functions.invoke(None, channel, name, arguments, manager=manager, query_provider=self.queries)
+
     def start(self) -> None:
         """Start asynchronous manager initialization for the server.
 
@@ -70,11 +109,14 @@ class ServerRuntime:
                 checkForThreadCurrentWorkerInterruption()
                 manager = self._initialize_manager()
                 checkForThreadCurrentWorkerInterruption()
+                with manager as jobs:
+                    functions = FunctionRegistry(jobs, manager=manager, query_provider=self.queries)
                 with self._lock:
                     if self._state != 'starting':
                         raise WorkerInterrupted('Server startup was stopped')
                     manager.start()
                     self._manager = manager
+                    self._functions = functions
                     self._state = 'running'
                     published = True
                 wfmanLog('Workflow manager ready')
@@ -121,6 +163,7 @@ class ServerRuntime:
             self._state = 'stopped'
             manager = self._manager
             self._manager = None
+            self._functions = None
             self.queries.close()
             self._workers.stop()
             stop_authentication = self._startup_worker is not None

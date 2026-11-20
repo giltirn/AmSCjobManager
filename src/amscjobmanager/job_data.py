@@ -119,6 +119,15 @@ class JobData:
         if point == self._test_crash_at:
             raise SimulatedCrash(point)
        
+    def getManagerClasses(self) -> tuple[ActionClass, ...]:
+        """List registered action categories for implementation discovery.
+
+        Take no arguments. Return tuple[ActionClass, ...] in registration order;
+        use getManager to retrieve each existing instance. No state changes or
+        provider requests occur. Use JobManager's lock while it is running.
+        """
+        return tuple(self.action_man)
+
     def getManager(self, action_class: ActionClass) -> ActionManager:
         """Retrieve the existing manager responsible for an action category.
 

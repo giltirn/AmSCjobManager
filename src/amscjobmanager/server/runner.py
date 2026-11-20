@@ -7,13 +7,12 @@ import sys
 from typing import Callable
 
 import uvicorn
-from mcp.server import MCPServer
 
 from ..logging import wfmanLog
 from ..manager import JobManager
 from .runtime import ServerRuntime
 from .admin import AdminServer
-from .tools import registerTools
+from .tools import ManagerMCPServer
 
 
 class ManagerHTTPServer(uvicorn.Server):
@@ -51,8 +50,7 @@ class ManagerHTTPServer(uvicorn.Server):
         self.endpoint = f'http://127.0.0.1:{port}/mcp'
         self.log_path = Path(log_path).resolve()
         # Keep routine HTTP/access logs out of machine-readable client output.
-        self.mcp_server = MCPServer("AmSC Job Manager", log_level="WARNING")
-        registerTools(self.mcp_server, self.runtime)
+        self.mcp_server = ManagerMCPServer(self.runtime)
         app = self.mcp_server.streamable_http_app(json_response=True)
         super().__init__(uvicorn.Config(app, host='127.0.0.1', port=port, log_level='warning'))
 

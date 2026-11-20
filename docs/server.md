@@ -70,8 +70,8 @@ the default hook prompts in the terminal. Worker shutdown signals prevent late
 server calls from prompting after the terminal hook has been restored.
 
 `server.runner.ManagerHTTPServer(initialize_manager, port=8765, log_path=...)`
-constructs its own runtime and MCP server, then registers the tools through
-`server.tools.registerTools`. `initialize_manager` is a no-argument
+constructs its own runtime and a generic MCP adapter. Tool definitions come from
+JobManager, its action managers, and the user-query provider. `initialize_manager` is a no-argument
 factory that configures the API and returns a new `JobManager`; it runs after
 listener startup. The server owns runtime startup/shutdown and emits readiness
 and termination announcements.
@@ -131,10 +131,20 @@ shell history; prefer the prompt. Neither the password nor its salted verifier
 is written to the configuration, database, or logs. Without `--admin-socket`,
 administration is disabled. Password entry refuses an exposed stdin fallback.
 
-Use `python utilities/manager_admin.py -h` for the command list and
-`python utilities/manager_admin.py -h COMMAND` (or `--help COMMAND`) for a
-command's description, inputs, and outputs. Help needs no socket argument,
-password, or running server.
+Use `python utilities/manager_admin.py -h` for offline connection instructions.
+The command list and detailed help are discovered from the initialized server:
+
+```bash
+python utilities/manager_admin.py ./admin.sock -h
+python utilities/manager_admin.py ./admin.sock -h recharge_wallet
+python utilities/manager_admin.py ./admin.sock --help add_sandbox
+```
+
+Discovery needs a socket and running server but no password. Both clients use
+the same JSON-schema parser and help renderer; admin required inputs are
+positional and optional inputs use flags. Global `--timeout` precedes COMMAND.
+Manager-specific commands and schemas are supplied by their action managers,
+rather than hard-coded in either client.
 
 Run the admin utility on the server host, in another terminal:
 
@@ -147,7 +157,8 @@ python utilities/manager_admin.py "$HOME/.local/run/amsc-manager/admin.sock" \
 ```
 
 Required arguments are positional: socket, command, machine, then path.
-Each invocation asks `Admin password:` without echo, sends one command, prints
+Each execution first discovers and validates its command, then asks
+`Admin password:` without echo, sends one authenticated command, prints
 the result, and disconnects. It accepts no password argument, environment
 variable, or password file. Each command authenticates independently: there is
 no global unlock or stored client login. Successful commands exit zero; failures
@@ -506,6 +517,49 @@ not make it safe to repeat automatically. Wallet changes survive server restart.
 See [compute wallets](compute_wallets.md) for units, returned fields, recovery,
 and the limits of estimated usage.
 
+## Manager function discovery and administration protocol
+
+Manager-owned functions are discovered after initialization. Before that,
+requests for them return `server_initializing` with the message "The server is
+not fully initialized." MCP discovery continues to list the user-query provider functions and
+includes that status in result metadata. User-query tools remain callable so
+clients can complete authentication. The CLI reports the initialization message
+rather than treating a not-yet-published manager command as an unknown name.
+Clients retry discovery when needed; the server sends no pushed notifications.
+Failed/stopped managers return `manager_unavailable`.
+
+The Unix socket accepts one newline-delimited JSON request per connection.
+Metadata discovery is deliberately unauthenticated:
+
+```json
+{"type": "discover"}
+```
+
+A successful response contains `success`, `code`, `message`, and `functions`.
+Each function describes `name`, `description`, `input_schema`, `output_schema`,
+`parameter_order`, `read_only`, `idempotent`, and an optional `destructive` hint. Schemas contain no credentials,
+current balances, manager instances, or internal method names.
+
+Execution uses a separately authenticated envelope:
+
+```json
+{
+  "type": "call",
+  "command": "recharge_wallet",
+  "arguments": {"machine": "frontier", "node_hours": 100},
+  "password": "<entered privately by the admin utility>"
+}
+```
+
+The server validates the envelope, password and registered argument schema,
+then resolves the current backend provider. Action-manager callbacks run under
+the JobManager lock; JobManager callbacks acquire their own locks, while query
+callbacks remain available independently of initialization. Success returns `success: true`, `code: "ok"`, an acknowledgment `message`, and the
+operation's `result` when non-null. Failures return `success: false` with a
+stable `code` and credential-free `message`. Unknown commands/arguments are
+rejected before invocation. Requests remain limited to 16 KiB and responses to
+1 MiB. Execution is never automatically retried; recharge remains additive.
+
 ## JSON sequences and results
 
 Pass a request object or a nonempty array using `--request`, `--file requests.json`,
@@ -615,7 +669,7 @@ Globus provider, pending/active cancellation, generated nested-schema help and
 submission-key reuse after server restart. `test_workflow_schema.py` verifies
 native JSON/pickle round trips and rejects invalid schemas before execution.
 
-`test_server_admin.py` tests the private Unix protocol, password checks, framing,
+`test_server_admin.py` tests the private Unix protocol, password checks, metadata discovery, framing,
 permissions, connection limits, shutdown and sandbox revocation. Its integration
 test starts the real server/admin utilities with pseudo-terminal password entry,
 then checks real local writes through MCP before addition and after removal.

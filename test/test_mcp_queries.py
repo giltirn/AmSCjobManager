@@ -155,9 +155,9 @@ class MCPQueryTests(unittest.IsolatedAsyncioTestCase):
         async with Client(server.mcp_server, cache=None) as client:
             tools = await call_mcp(client)
             self.assertEqual({tool.name for tool in tools.tools},
-                             {'list_workflows', 'list_sandbox_directories', 'list_compute_wallets', 'list_user_queries', 'respond_to_user_query', 'submit_workflow', 'cancel_workflow'})
+                             {'list_user_queries', 'respond_to_user_query'})
             response = await call_mcp(client, 'list_workflows')
-            self.assertEqual(response.structured_content['error']['code'], 'manager_unavailable')
+            self.assertEqual(response.structured_content['error']['code'], 'server_initializing')
             question = await self._pending(client)
             reply = {'session_id': 'previous-session', 'query_id': question['query_id'], 'response': 'private-code'}
             response = await client.call_tool('respond_to_user_query', reply)

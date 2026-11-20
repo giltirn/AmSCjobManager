@@ -89,7 +89,7 @@ class MCPWorkflowTests(unittest.IsolatedAsyncioTestCase):
         through public state, and verify discovered schemas drive CLI
         parsing/help for nested API operations and all stage alternatives.
         """
-        from amscjobmanager.server.cli import parse_tool_arguments
+        from amscjobmanager.server.cli import parse_function_arguments
 
         server = await self._startServer()
         native = [APIAction([WriteFile('local', str(self.root / 'data'), b'\xff')]),
@@ -112,11 +112,11 @@ class MCPWorkflowTests(unittest.IsolatedAsyncioTestCase):
 
             tools = await client.list_tools()
             tool = next(tool for tool in tools.tools if tool.name == 'submit_workflow')
-            parsed = parse_tool_arguments(tool, ['--stages', *[json.dumps(stage) for stage in stages], '--submission-key', 'cli-key'])
-            self.assertEqual(parsed.arguments, {'stages': stages, 'submission_key': 'cli-key'})
+            parsed = parse_function_arguments(tool, ['--stages', *[json.dumps(stage) for stage in stages], '--submission-key', 'cli-key'])
+            self.assertEqual(parsed, {'stages': stages, 'submission_key': 'cli-key'})
             with self.assertRaises(ValueError):
-                parse_tool_arguments(tool, ['--stages', '{"operations":[]}'])
-            help_text = parse_tool_arguments(tool, ['--help'])
+                parse_function_arguments(tool, ['--stages', '{"operations":[]}'])
+            help_text = parse_function_arguments(tool, ['--help'])
             for field in ('batch_script', 'execute_job', 'globus_transfer', 'run_local', 'base64', 'post_launch', 'operations'):
                 self.assertIn(field, help_text)
 
@@ -258,7 +258,8 @@ class MCPWorkflowTests(unittest.IsolatedAsyncioTestCase):
                     for tool, arguments in (('submit_workflow', {'stages': [{'type': 'api', 'operations': []}]}),
                                             ('cancel_workflow', {'workflow_id': 1})):
                         response = await client.call_tool(tool, arguments)
-                        self.assertEqual(response.structured_content['error']['code'], 'manager_unavailable')
+                        self.assertEqual(response.structured_content['error']['code'],
+                                         'server_initializing' if state == 'created' else 'manager_unavailable')
 
     async def test_mixed_workflow_executes_in_order(self):
         """Run setup, both compute forms, asynchronous transfer and local processing.

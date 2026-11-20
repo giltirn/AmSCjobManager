@@ -19,7 +19,7 @@ from amscjobmanager.api_actions import APIAction, WriteFile
 from amscjobmanager.database import DatabaseClosed
 from amscjobmanager.iri_api import auth
 from amscjobmanager.manager import JobManager
-from amscjobmanager.server.queries import QueryResponseError, UserQueryQueue
+from amscjobmanager.user_queries import QueryResponseError, UserQueryQueue
 from amscjobmanager.server.runtime import ServerRuntime
 from amscjobmanager.workers import Workers, WorkerInterrupted
 

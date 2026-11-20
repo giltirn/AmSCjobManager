@@ -5,7 +5,47 @@ from threading import Condition, Event
 import time
 from uuid import uuid4
 
-from ..workers import WorkerInterrupted, checkForThreadCurrentWorkerInterruption, getThreadCurrentWorkerInterruptionEvent
+from .workers import WorkerInterrupted, checkForThreadCurrentWorkerInterruption, getThreadCurrentWorkerInterruptionEvent
+
+
+from typing import Literal
+from pydantic import BaseModel, Field, StrictStr
+from .manager_functions import FunctionArguments, FunctionDefinition, FunctionError
+
+
+class UserQuerySummary(BaseModel):
+    """Pending server question; responses are deliberately excluded.
+
+    session_id (str) is the server-session UUID, query_id (int) is positive and
+    session-local, title/prompt (str) are instructions, and created_at (float)
+    is the Unix creation time in seconds. IDs are not workflow IDs/list indices.
+    """
+
+    session_id: str = Field(description='Server-session UUID required when replying; changes on restart.')
+    query_id: int = Field(description='Positive query number within this server session; not a workflow ID or list index.')
+    title: str = Field(description='Short description of the requested user interaction.')
+    prompt: str = Field(description='Question or authentication URL/instructions for the user.')
+    created_at: float = Field(description='Question creation time as Unix seconds.')
+
+
+class QueryResponseReceipt(BaseModel):
+    """Delivery acknowledgment: accepted=True means queued, not authenticated."""
+
+    accepted: Literal[True] = Field(description='Response delivered once. Authentication/API execution continues separately and may ask another question.')
+
+
+class QueryResponseArguments(FunctionArguments):
+    """Session UUID (str), positive session-local query_id (int), and exact response text (str)."""
+
+    session_id: StrictStr = Field(description='Server-session UUID from list_user_queries; changes on restart.')
+    query_id: int = Field(gt=0, strict=True, description='Positive session-local query number; not a workflow ID.')
+    response: StrictStr = Field(description='Response text, including an empty answer. Delivery does not confirm authentication; use JSON file/stdin to avoid putting codes in arguments.')
+
+
+class UserQueryListing(BaseModel):
+    """result (list[UserQuerySummary]) lists pending questions in ascending session-local ID order."""
+
+    result: list[UserQuerySummary]
 
 
 class QueryResponseError(ValueError):
@@ -47,6 +87,36 @@ class UserQueryQueue:
         self._pending = {}
         self._next_id = 1
         self._closed = False
+
+    def getMCPFunctions(self) -> tuple[FunctionDefinition, ...]:
+        """Describe user-query operations available throughout initialization and shutdown.
+
+        Take no arguments; return local callables receiving this session's
+        UserQueryQueue explicitly. No question responses are captured in metadata.
+        """
+        def _list_queries(queries: UserQueryQueue, args: FunctionArguments) -> UserQueryListing:
+            """Read queries' pending questions; args is an empty validated model; return the listing."""
+            return UserQueryListing(result=queries.listPending())
+
+        def _respond(queries: UserQueryQueue, args: QueryResponseArguments) -> QueryResponseReceipt:
+            """Deliver args.response once using its session/query IDs; return accepted=True on delivery."""
+            try:
+                queries.respond(args.session_id, args.query_id, args.response)
+            except QueryResponseError as exc:
+                raise FunctionError(exc.code, str(exc)) from exc
+            return QueryResponseReceipt(accepted=True)
+
+        return (
+            FunctionDefinition('list_user_queries', 'List unanswered user questions, including during manager initialization.', _list_queries, read_only=True, idempotent=True),
+            FunctionDefinition('respond_to_user_query', 'Deliver one response and allow the waiting worker to continue.', _respond, destructive=False),
+        )
+
+    def getAdminFunctions(self) -> tuple[FunctionDefinition, ...]:
+        """Expose no privileged user-query operations.
+
+        Take no arguments; return an empty tuple of function definitions.
+        """
+        return ()
 
     def ask(self, title: str, query: str) -> str:
         """Publish a question and wait for its response without blocking other callers.

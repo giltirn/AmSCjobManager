@@ -6,6 +6,7 @@ from typing import Callable
 import time
 
 from .database import DatabaseClosed, LockedConnection
+from .manager_functions import FunctionDefinition
 from .logging import wfmanLog
 from .workers import Workers, WorkerInterrupted, clearThreadCurrentWorkerInterruptUnlessStopping
 
@@ -107,6 +108,24 @@ class ActionManager(ABC):
         self.workers = workers if workers is not None else Workers()
         self._action_workers = {}
         self._worker_lock = RLock()
+
+    def getMCPFunctions(self) -> tuple[FunctionDefinition, ...]:
+        """Describe explicitly exposed MCP operations supplied by this implementation.
+
+        Take no arguments. Return tuple[FunctionDefinition, ...], empty by
+        default. Definitions contain annotated callables receiving the current
+        manager explicitly. Discovery performs no provider requests or state changes.
+        """
+        return ()
+
+    def getAdminFunctions(self) -> tuple[FunctionDefinition, ...]:
+        """Describe operations requiring authenticated local administration.
+
+        Take no arguments. Return tuple[FunctionDefinition, ...], empty by
+        default. These definitions are never exposed as MCP tools; discovery
+        performs no provider requests or state changes.
+        """
+        return ()
 
     def _startExecutionWorker(self, action_id: int, *, execute_action: Callable[[int], None],
                               complete_cancellation: Callable[[int], None]):

@@ -233,12 +233,13 @@ the production persistence path.
 
 ## Server user interactions
 
-`server.queries.UserQueryQueue` owns session-local pending questions, response
+`user_queries.UserQueryQueue` owns session-local pending questions, response
 validation and condition waits; it uses no database or MCP dependency.
 `server.runtime.ServerRuntime` owns the queue and asynchronous configuration/
 manager startup. `server.runner.ManagerHTTPServer` constructs this runtime from
-a manager factory. `server.tools.registerTools` registers the query and workflow
-handlers on its MCP server; response models live alongside those handlers. Its
+a manager factory. `server.tools.ManagerMCPServer` adapts backend-provided
+function definitions; query models live in `user_queries`, and workflow models
+live in `manager_models`. Its
 `mcp_server` supports in-process SDK tests. Query tools use only the queue lock,
 never the manager or SQLite lock. Runtime failure does not take down the listener.
 
@@ -312,3 +313,48 @@ The generic CLI discovers these tools and prints nested union schemas in help.
 Run `test_workflow_schema.py` and `test_mcp_workflows.py` for native JSON/pickle,
 malformed inputs, local execution, simulated Globus work, HTTP/CLI lifecycle and
 submission-key recovery tests.
+
+
+## Exposing action-manager functions
+
+`JobData.getManagerClasses()` enumerates registered `ActionClass` values;
+`getManager(action_class)` retrieves their existing instances. Managers advertise
+transport-independent `FunctionDefinition` tuples through `getMCPFunctions()`
+and `getAdminFunctions()`. The base implementation returns empty tuples.
+
+Definitions in `amscjobmanager.manager_functions` contain an external name,
+description, annotated `invoke` callable, effect/repeatability hints, and admin
+acknowledgment. There are no stored input/output model classes, method names,
+or fixed-argument dictionaries. `inspect.signature` and `get_type_hints` infer
+models from the callable's second parameter and return annotations. Keep models
+at module scope when using postponed annotations. The callable accepts its owner
+and a validated input instance positionally and returns its annotated output
+model. Input models should derive from `FunctionArguments` to reject extra fields
+and hide values in validation errors. Output models can preserve their own field
+layout; no mandatory `result` wrapper is imposed. Declaration order of input
+fields determines admin CLI positional ordering.
+
+Getters define local named `_functions` for their operations. `ComputeActions`
+provides wallet adapters, `JobManager` provides workflow and sandbox adapters,
+and `UserQueryQueue` provides authentication question/response adapters. Each
+callable receives its owner explicitly and must not capture the discovery-time
+instance. Enable/disable adapters pass their Boolean directly to the public
+method. Existing tool names, response shapes and privileges are retained.
+
+`ServerRuntime` builds `FunctionRegistry` from the managers and query provider
+before publishing readiness. Duplicate names and invalid/missing model
+annotations fail initialization. MCP and admin maps remain separate. At dispatch
+the registry validates input, resolves the current provider, invokes once, and
+validates the returned model. Action-manager operations resolve through locked
+JobData; JobManager callbacks acquire their own locks; query operations remain
+available without JobManager. Registry code contains no operation definitions,
+and MCP code handles only transport/schema adaptation. Do not perform provider
+calls or user waits while holding the JobManager lock; existing workers handle
+such work.
+
+The admin wire format uses `AdminDiscoveryRequest`/`AdminCallRequest` and
+`execute_admin_request`. Discovery has no password and returns only public
+`FunctionDescription` models. The shared CLI code consumes those models rather
+than transport objects. MCP clients normalize SDK tool schemas to the same
+format. Required admin arguments are positional, while MCP arguments remain
+flags. New manager functions need no changes to frontend parsers or dispatchers.

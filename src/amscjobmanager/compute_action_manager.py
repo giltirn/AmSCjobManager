@@ -4,10 +4,51 @@ import math
 import sqlite3
 import time
 
+from pydantic import BaseModel, Field, StrictStr
+
 from .action_manager import ActionStatus
 from .async_action_manager import AsyncActionManager
 from .api_general import cancelJob, getJobState, findJobByName
 from .logging import wfmanLog
+
+from .manager_functions import (
+    ConfiguredMachineArguments, EmptyFunctionResult, FunctionArguments, FunctionDefinition,
+)
+
+
+class WalletFilter(FunctionArguments):
+    """Optional machine (str | None) filters wallet names case-insensitively; None lists all."""
+
+    machine: StrictStr | None = Field(default=None, description='Optional case-insensitive machine filter; omit for all recorded wallets. Missing wallets impose no limit.')
+
+
+class WalletRechargeArguments(ConfiguredMachineArguments):
+    """Required machine (str) and node_hours (finite positive number) specify an additive grant."""
+
+    node_hours: float = Field(gt=0, allow_inf_nan=False, description='Positive node-hour grant; additive, do not blindly retry after a lost response.')
+
+
+class ComputeWalletSummary(BaseModel):
+    """One recorded machine budget, expressed in node-hours.
+
+    enabled (bool) controls future reservations; available_node_hours (float)
+    excludes reserved funds. reserved_node_hours (float) sums unsettled full
+    reservations. updated_at (int) is Unix seconds for the last wallet mutation.
+    """
+
+    enabled: bool = Field(description='Whether new compute admissions require funds; missing wallets are unrestricted.')
+    available_node_hours: float = Field(description='Unreserved machine balance, in node-hours.')
+    reserved_node_hours: float = Field(description='Full unsettled compute reservations, in node-hours.')
+    updated_at: int = Field(description='Last wallet mutation as Unix time in whole seconds.')
+
+
+class ComputeWalletListing(BaseModel):
+    """Wallets keyed by case-insensitive machine name; missing means unrestricted.
+
+    result (dict[str, ComputeWalletSummary]) is empty when no wallets match.
+    """
+
+    result: dict[str, ComputeWalletSummary]
 
 
 class ComputeActions(AsyncActionManager):
@@ -48,6 +89,51 @@ class ComputeActions(AsyncActionManager):
                 provider_status TEXT,
                 settled INTEGER NOT NULL DEFAULT 0 CHECK(settled IN (0, 1))
             )''')
+
+    def getMCPFunctions(self) -> tuple[FunctionDefinition, ...]:
+        """Describe the compute manager's read-only wallet inspection.
+
+        Take no arguments; return tuple[FunctionDefinition, ...] without querying state.
+        """
+        def _list_wallets(manager: ComputeActions, args: WalletFilter) -> ComputeWalletListing:
+            """Read manager's wallets selected by validated args.machine; return the listing model."""
+            return ComputeWalletListing(result=manager.getWallets(args.machine))
+
+        return (FunctionDefinition(
+            'list_compute_wallets',
+            'List persistent compute wallet balances for all machines or one selected machine. Missing wallets impose no limit.',
+            _list_wallets, read_only=True, idempotent=True,
+        ),)
+
+    def getAdminFunctions(self) -> tuple[FunctionDefinition, ...]:
+        """Describe password-protected wallet administration commands.
+
+        Take no arguments; return definitions whose local callables accept a
+        ComputeActions instance and validated input, without capturing self.
+        """
+        def _enable_wallet(manager: ComputeActions, args: ConfiguredMachineArguments) -> EmptyFunctionResult:
+            """Enable manager's wallet for args.machine; return an empty acknowledgment model."""
+            manager.setWalletEnabled(args.machine, True)
+            return EmptyFunctionResult()
+
+        def _disable_wallet(manager: ComputeActions, args: ConfiguredMachineArguments) -> EmptyFunctionResult:
+            """Disable manager's wallet for args.machine; return an empty acknowledgment model."""
+            manager.setWalletEnabled(args.machine, False)
+            return EmptyFunctionResult()
+
+        def _recharge_wallet(manager: ComputeActions, args: WalletRechargeArguments) -> EmptyFunctionResult:
+            """Grant args.node_hours to manager's args.machine wallet; return an empty result model."""
+            manager.rechargeWallet(args.machine, args.node_hours)
+            return EmptyFunctionResult()
+
+        return (
+            FunctionDefinition('enable_wallet', 'Enable compute budgeting for a machine; a new wallet starts at zero.',
+                               _enable_wallet, idempotent=True, success_message='Compute wallet enabled.'),
+            FunctionDefinition('disable_wallet', 'Disable compute budgeting for new submissions while retaining existing reservations.',
+                               _disable_wallet, idempotent=True, success_message='Compute wallet disabled.'),
+            FunctionDefinition('recharge_wallet', 'Add node-hours to a persistent compute wallet without changing whether it is enabled.',
+                               _recharge_wallet, success_message='Compute wallet recharged.'),
+        )
 
     def setWalletEnabled(self, machine: str, enabled: bool) -> None:
         """Enable or disable submission budgeting for one machine, without changing funds.

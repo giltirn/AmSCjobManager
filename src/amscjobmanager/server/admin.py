@@ -11,72 +11,66 @@ import secrets
 import socket
 import stat
 import sys
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, StrictStr, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, SecretStr, StrictStr, ValidationError
 
-from .. import globals as sandbox
-from ..actions_base import ActionClass
+from ..manager_functions import FunctionDescription
+from .functions import FunctionError
 from ..logging import wfmanLog
 from ..workers import Workers, WorkerInterrupted, checkForThreadCurrentWorkerInterruption
 from .runtime import ServerRuntime
 
 
+# Bound execution inputs independently of the larger schema-discovery response.
 _MAX_MESSAGE_BYTES = 16384
+_MAX_RESPONSE_BYTES = 1024 * 1024
 _READ_TIMEOUT = 10
 _MAX_CONNECTIONS = 4
 
 
-class AdminRequest(BaseModel):
-    """One authenticated operation; no field represents Python code or a method name.
-
-    password (SecretStr) is the per-request credential, never returned or logged.
-    command selects sandbox addition/removal or wallet enabling/disabling/recharge.
-    node_hours (float | None) is a positive node-hour grant, required only for recharge. machine (str) is a configured
-    target, and path (str) is a sandbox root; removal matches its registered text
-    exactly. Requests reject extra fields. Credentials are not persisted.
-    """
+class AdminDiscoveryRequest(BaseModel):
+    """Unauthenticated metadata-only request; type is always 'discover'."""
 
     model_config = ConfigDict(extra='forbid', hide_input_in_errors=True)
+    type: Literal['discover'] = 'discover'
+
+
+class AdminCallRequest(BaseModel):
+    """One password-checked command; its arguments are validated by the registry.
+
+    type is 'call'; command (nonempty str) is an advertised name, arguments
+    (dict[str, JSON value]) supplies inputs, and password (SecretStr) is used
+    for this connection only. Unknown envelope fields are rejected.
+    """
+
+    model_config = ConfigDict(extra='forbid', hide_input_in_errors=True, strict=True)
+    type: Literal['call'] = 'call'
+    command: StrictStr = Field(min_length=1)
+    arguments: dict[str, JsonValue] = Field(default_factory=dict)
     password: SecretStr
-    command: Literal['add_sandbox', 'remove_sandbox', 'enable_wallet', 'disable_wallet', 'recharge_wallet']
-    machine: StrictStr = Field(min_length=1)
-    path: StrictStr | None = Field(default=None, min_length=1)
-    node_hours: float | None = Field(default=None, gt=0, allow_inf_nan=False, strict=True)
 
-    @model_validator(mode='after')
-    def validateCommandArguments(self):
-        """Check command-specific fields on this AdminRequest; return self unchanged.
 
-        Sandbox commands require path (str) only; recharge_wallet requires
-        node_hours (positive float) only; enable/disable take neither field.
-        """
-        if self.command in ('add_sandbox', 'remove_sandbox'):
-            if self.path is None or self.node_hours is not None:
-                raise ValueError('Sandbox commands require path only')
-        elif self.command == 'recharge_wallet':
-            if self.node_hours is None or self.path is not None:
-                raise ValueError('Recharge requires node_hours only')
-        elif self.path is not None or self.node_hours is not None:
-            raise ValueError('Enable/disable require only a machine')
-        return self
+AdminRequest = Annotated[AdminDiscoveryRequest | AdminCallRequest, Field(discriminator='type')]
 
 
 class AdminResponse(BaseModel):
-    """Result of one operation, excluding the request and its credentials.
+    """Credential-free result or metadata response for a local request.
 
-    success (bool) means the command finished successfully. code (str) is 'ok'
-    or a stable error category; message (str) is safe frontend text. A transport
-    error after dispatch can leave an uncertain outcome. Sandbox and wallet-enable
-    operations are idempotent; recharge is additive and must not be blindly retried.
-    Wallet changes persist; sandbox registration changes last for this session.
+    success (bool), code (str), and message (str) report completion or failure.
+    functions (list[FunctionDescription] | None) is populated by discovery;
+    result (JSON value | None) holds an operation return value. Recharge is
+    additive: an uncertain transport outcome must never trigger automatic retry.
+    Wallet state persists; sandbox registration changes last for this session.
     """
 
     model_config = ConfigDict(extra='forbid')
     success: bool
     code: Literal['ok', 'authentication_failed', 'invalid_request', 'manager_unavailable',
-                  'operation_failed', 'busy', 'server_stopping']
+                  'server_initializing', 'operation_failed', 'busy', 'server_stopping']
     message: str
+    functions: list[FunctionDescription] | None = None
+    result: JsonValue = None
 
 
 class AdminServer:
@@ -210,75 +204,58 @@ class AdminServer:
                     if not line.endswith(b'\n') or len(line) > _MAX_MESSAGE_BYTES:
                         raise ValueError('Invalid message boundary')
                     document = json.loads(line)
-                    password = document.get('password') if isinstance(document, dict) else None
-                    if not isinstance(password, str) or not 1 <= len(password.encode('utf-8')) <= 4096:
-                        response = AdminResponse(success=False, code='authentication_failed', message='Admin authentication failed.')
+                    if isinstance(document, dict) and document.get('type') == 'discover':
+                        AdminDiscoveryRequest.model_validate(document)
+                        command, arguments = None, None
                     else:
+                        # Authenticate execution before interpreting command data.
+                        password = document.get('password') if isinstance(document, dict) else None
+                        if not isinstance(password, str) or not 1 <= len(password.encode('utf-8')) <= 4096:
+                            raise PermissionError('Admin authentication failed.')
                         verifier = await asyncio.to_thread(
                             hashlib.scrypt, password.encode('utf-8'), salt=self._salt, n=16384, r=8, p=1)
                         if not hmac.compare_digest(verifier, self._verifier):
-                            response = AdminResponse(success=False, code='authentication_failed', message='Admin authentication failed.')
-                        else:
-                            request = AdminRequest.model_validate(document)
-                            command, machine, path = request.command, request.machine.lower(), request.path
-                            node_hours = request.node_hours
-                            del request
+                            raise PermissionError('Admin authentication failed.')
+                        request = AdminCallRequest.model_validate(document)
+                        command, arguments = request.command, request.arguments
+                        del request, password
 
-                            def apply() -> AdminResponse:
-                                """Apply the captured authenticated command; return a credential-free result.
+                    def apply() -> AdminResponse:
+                        """Dispatch captured discovery or authenticated inputs; return AdminResponse.
 
-                                Take no arguments; command/machine (str), path
-                                (str | None), and node_hours (float | None,
-                                node-hour grant) are captured from the validated request. Check
-                                readiness and use the state owner's API. The
-                                worker can wait for existing API/user queries
-                                without blocking MCP or manager progression.
-                                """
-                                checkForThreadCurrentWorkerInterruption()
-                                manager = self.runtime.manager
-                                if manager is None or not manager.isAlive() or self._closed:
-                                    return AdminResponse(success=False, code='manager_unavailable', message='Workflow manager is not running.')
-                                from ..api_general import getKnownMachines
-                                if machine not in getKnownMachines():
-                                    return AdminResponse(success=False, code='invalid_request', message='Machine is not configured.')
-                                try:
-                                    if command == 'add_sandbox':
-                                        sandbox.addSandboxDirs({machine: path})
-                                        message = 'Sandbox directory added.'
-                                    elif command == 'remove_sandbox':
-                                        sandbox.removeSandboxDirs({machine: path})
-                                        message = 'Sandbox directory removed.'
-                                    else:
-                                        # Wallet state is owned by the compute manager,
-                                        # reached through JobData under the manager lock.
-                                        with manager as jobs:
-                                            if not manager.isAlive():
-                                                return AdminResponse(success=False, code='manager_unavailable', message='Workflow manager is not running.')
-                                            compute_manager = jobs.getManager(ActionClass.COMPUTE)
-                                            if command == 'recharge_wallet':
-                                                compute_manager.rechargeWallet(machine, node_hours)
-                                                message = 'Compute wallet recharged.'
-                                            else:
-                                                compute_manager.setWalletEnabled(machine, command == 'enable_wallet')
-                                                message = 'Compute wallet enabled.' if command == 'enable_wallet' else 'Compute wallet disabled.'
-                                except WorkerInterrupted:
-                                    raise
-                                except Exception as exc:
-                                    # Only state-owner operations enter this block;
-                                    # they receive no password or wire document.
-                                    wfmanLog(f'Admin {command} failed: {type(exc).__name__}: {exc}')
-                                    return AdminResponse(success=False,
-                                                         code='invalid_request' if isinstance(exc, ValueError) else 'operation_failed',
-                                                         message=str(exc))
-                                wfmanLog(f'Admin {command} completed for {machine}:{path}')
-                                return AdminResponse(success=True, code='ok', message=message)
+                        Take no arguments. command (str | None) is None for
+                        discovery; arguments (dict | None) contains no password.
+                        Metadata/operations use the runtime registry off the event
+                        loop. No connection or password is retained by managers.
+                        """
+                        checkForThreadCurrentWorkerInterruption()
+                        if command is None:
+                            functions = self.runtime.describeFunctions('admin')
+                            return AdminResponse(success=True, code='ok', message='Available admin commands.', functions=functions)
+                        result, message = self.runtime.invokeFunction('admin', command, arguments)
+                        wfmanLog(f'Admin {command} completed')
+                        return AdminResponse(success=True, code='ok', message=message, result=result['result'] if set(result) == {'result'} else result)
 
-                            # Forget the credential-bearing document before API
-                            # work. Authorization belongs only to this operation.
-                            document.clear()
-                            del password
-                            worker = self._workers.start(context, apply)
-                            response = await asyncio.wrap_future(worker.future)
+                    # Forget the credential-bearing envelope before dispatch.
+                    document.clear()
+                    worker = self._workers.start(context, apply)
+                    try:
+                        response = await asyncio.wrap_future(worker.future)
+                    except FunctionError as exc:
+                        response = AdminResponse(success=False,
+                                                 code='invalid_request' if exc.code == 'invalid_input' else exc.code,
+                                                 message=str(exc))
+                    except ValidationError:
+                        response = AdminResponse(success=False, code='invalid_request', message='Invalid command arguments.')
+                    except WorkerInterrupted:
+                        raise
+                    except ValueError as exc:
+                        response = AdminResponse(success=False, code='invalid_request', message=str(exc))
+                    except Exception as exc:
+                        wfmanLog(f'Admin operation failed: {type(exc).__name__}: {exc}')
+                        response = AdminResponse(success=False, code='operation_failed', message='Admin operation failed; check the server log.')
+                except PermissionError:
+                    response = AdminResponse(success=False, code='authentication_failed', message='Admin authentication failed.')
                 except (ValueError, TimeoutError):
                     response = AdminResponse(success=False, code='invalid_request', message='Invalid or incomplete admin request.')
                 except Exception as exc:
@@ -288,7 +265,10 @@ class AdminServer:
                     response = AdminResponse(success=False, code='operation_failed', message='Admin operation failed; check server logs or pending user queries.')
             if self._closed:
                 return
-            writer.write(response.model_dump_json().encode('utf-8') + b'\n')
+            payload = response.model_dump_json(exclude_none=True).encode('utf-8') + b'\n'
+            if len(payload) > _MAX_RESPONSE_BYTES:
+                payload = AdminResponse(success=False, code='operation_failed', message='Admin response is too large.').model_dump_json().encode() + b'\n'
+            writer.write(payload)
             await writer.drain()
         except (ConnectionError, OSError):
             pass
@@ -303,29 +283,23 @@ class AdminServer:
                 pass
 
 
-def execute_admin_command(socket_path: str | Path, command: str, machine: str, path: str | None,
-                          password: str, *, node_hours: float | None = None, timeout: float = 120) -> AdminResponse:
-    """Send one authenticated local command and return its AdminResponse.
+def execute_admin_request(socket_path: str | Path, request: AdminRequest, *, timeout: float = 120) -> AdminResponse:
+    """Send one typed discovery or execution request from the client to the server over the owner's Unix socket.
 
-    socket_path (str | Path) selects a private Unix socket owned by this OS user.
-    Relative paths use the current working directory; '~' is rejected, not expanded.
-    Shared or other-owned parent directories produce advice on stderr, not errors.
-    command (str) selects add_sandbox/remove_sandbox or enable_wallet,
-    disable_wallet, recharge_wallet. machine (str) selects the target; path
-    (str | None) is required only for sandbox commands. node_hours (float | None)
-    is the positive grant in node-hours, required only for recharge. password
-    (str) is used for this request only.
-    timeout (finite positive float) bounds socket operations in seconds, default
-    120. Transport errors propagate; the operation may already have taken effect.
-    No credentials are printed or persisted. Run on the server host.
+    socket_path (str | Path) may be relative but contains no '~'. request is
+    AdminDiscoveryRequest or AdminCallRequest, never a raw dictionary. timeout
+    (finite positive float) bounds socket operations in seconds, default 120.
+    Return AdminResponse. Retain ownership/mode checks, warn about shared parent
+    directories, reveal SecretStr only on the wire, and never retry a request.
+    Transport errors propagate and may leave an uncertain execution outcome.
     """
     if not math.isfinite(timeout) or timeout <= 0:
         raise ValueError('Admin timeout must be finite and positive')
-    request = AdminRequest(password=password, command=command, machine=machine, path=path, node_hours=node_hours)
-    # SecretStr deliberately redacts ordinary serialization; reveal it only for
-    # the local wire message. Never return this document as part of an error.
+    if not isinstance(request, (AdminDiscoveryRequest, AdminCallRequest)):
+        raise TypeError('request must be a typed admin request')
     document = request.model_dump(mode='json')
-    document['password'] = request.password.get_secret_value()
+    if isinstance(request, AdminCallRequest):
+        document['password'] = request.password.get_secret_value()
     message = json.dumps(document, ensure_ascii=True).encode('utf-8') + b'\n'
     if len(message) > _MAX_MESSAGE_BYTES:
         raise ValueError('Admin request is too large')
@@ -346,8 +320,8 @@ def execute_admin_command(socket_path: str | Path, command: str, machine: str, p
         connection.connect(str(address))
         connection.sendall(message)
         with connection.makefile('rb') as stream:
-            response = stream.readline(_MAX_MESSAGE_BYTES + 1)
-    if len(response) > _MAX_MESSAGE_BYTES or not response.endswith(b'\n'):
+            response = stream.readline(_MAX_RESPONSE_BYTES + 1)
+    if len(response) > _MAX_RESPONSE_BYTES or not response.endswith(b'\n'):
         raise ValueError('Invalid admin response')
     try:
         return AdminResponse.model_validate_json(response)

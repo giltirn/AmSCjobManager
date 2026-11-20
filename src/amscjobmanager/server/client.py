@@ -9,6 +9,7 @@ from mcp import Client
 from mcp.client.streamable_http import streamable_http_client
 from mcp.types import Tool
 from pydantic import BaseModel, ConfigDict, Field
+from ..manager_functions import FunctionDescription
 
 
 class ToolRequest(BaseModel):
@@ -54,21 +55,26 @@ def _exception_message(error: Exception) -> str:
     return '; '.join(messages)
 
 
-async def _list_tools(client: Client) -> list[Tool]:
+async def _list_tools(client: Client) -> tuple[list[Tool], dict | None]:
     """Return all discovered SDK Tool models from an already-connected client.
 
     client (mcp.Client) owns the connection and timeouts. Follow zero or more
     next_cursor tokens until all pages are read; propagate discovery errors.
-    Return list[Tool] in server order without closing or replacing the client.
+    Return (list[Tool], dict | None): tools in server order and optional readiness
+    error metadata (code/message str), without closing or replacing the client.
     """
     tools = []
     cursor = None
+    error = None
     while True:
         page = await client.list_tools(cursor=cursor)
+        metadata = getattr(page, 'meta', None)
+        if isinstance(metadata, dict) and 'initialization_error' in metadata:
+            error = metadata['initialization_error']
         tools.extend(page.tools)
         cursor = page.next_cursor
         if cursor is None:
-            return tools
+            return tools, error
 
 
 async def _execute_on_client(
@@ -99,9 +105,10 @@ async def _execute_on_client(
         try:
             async with asyncio.timeout(timeout):
                 if list_tools:
-                    tools = await _list_tools(client)
+                    tools, discovery_error = await _list_tools(client)
                     tools = [tool.model_dump(mode="json", by_alias=True) for tool in tools]
-                    results.append({**entry, "status": "succeeded", "result": tools})
+                    results.append({**entry, "status": "failed" if discovery_error else "succeeded", "result": tools,
+                                    **({'error': discovery_error} if discovery_error else {})})
                     continue
                 response = await client.call_tool(request.tool, request.arguments)
             if response.is_error:
@@ -227,7 +234,7 @@ async def execute_command(url: str, tool_name: str | None, arguments: list[str],
             frontend prints that text instead of a JSON envelope. Discovery and
             execution share one connection; no call occurs on a parsing error.
     """
-    from .cli import parse_tool_arguments
+    from .cli import format_function_list, parse_function_arguments
 
     if not math.isfinite(timeout) or timeout <= 0:
         return {'success': False, 'results': [], 'error': {
@@ -240,28 +247,27 @@ async def execute_command(url: str, tool_name: str | None, arguments: list[str],
             read_timeout_seconds=timeout, cache=None,
         ) as client:
             async with asyncio.timeout(timeout):
-                tools = await _list_tools(client)
+                tools, discovery_error = await _list_tools(client)
+            functions = [FunctionDescription(name=tool.name, description=tool.description or '',
+                                             input_schema=tool.input_schema, output_schema=tool.output_schema or {},
+                                             parameter_order=list(tool.input_schema.get('properties', {})))
+                         for tool in tools]
             if tool_name is None:
-                lines = ['Commands (from server):']
-                width = max((len(tool.name) for tool in tools), default=0)
-                for tool in tools:
-                    brief = (tool.description or tool.title or 'No description provided.').splitlines()[0]
-                    lines.append(f'  {tool.name:<{width}}  {brief}')
-                if not tools:
-                    lines.append('  No commands are advertised by this server.')
-                return {'success': True, 'results': [], 'help': '\n'.join(lines) + '\n'}
-            tool = next((tool for tool in tools if tool.name == tool_name), None)
+                return {'success': discovery_error is None, 'results': [],
+                        'help': format_function_list(functions) + ('\n' + discovery_error['message'] + '\n' if discovery_error else ''),
+                        **({'error': discovery_error} if discovery_error else {})}
+            tool = next((function for function in functions if function.name == tool_name), None)
             if tool is None:
                 return {'success': False, 'results': [], 'error': {
-                    'code': 'invalid_input', 'message': f'Unknown tool {tool_name!r}; use --list-tools to discover available commands',
+                    **(discovery_error or {'code': 'invalid_input', 'message': f'Unknown tool {tool_name!r}; use --list-tools to discover available commands'}),
                 }}
             try:
-                request = parse_tool_arguments(tool, arguments)
+                request = parse_function_arguments(tool, arguments)
             except ValueError as exc:
                 return {'success': False, 'results': [], 'error': {'code': 'invalid_input', 'message': str(exc)}}
             if isinstance(request, str):
                 return {'success': True, 'results': [], 'help': request}
-            response = await _execute_on_client(client, [request], timeout=timeout)
+            response = await _execute_on_client(client, [ToolRequest(tool=tool_name, arguments=request)], timeout=timeout)
     except Exception as exc:
         return {'success': False, 'results': response['results'], 'error': {
             'code': 'connection_error', 'message': _exception_message(exc),

@@ -655,11 +655,15 @@ dependencies into that same interpreter:
 source ~/miniconda3/bin/activate
 conda activate ai
 python -m pip install -e '.[server]'
-python -m unittest discover -s test -p test_mcp_server.py -v
+python test/run_tests.py integration --pattern test_mcp_server.py -v
 ```
 
-You can also run `python test/test_mcp_server.py -v`. To select only the local
-workflow/HTTP test, append `-k local_workflow_status` to the unittest discovery command.
+To select only the local workflow/HTTP case:
+
+```bash
+PYTHONPATH=test python -m unittest \
+    integration.server.test_mcp_server.MCPSubprocessTests.test_local_workflow_status_through_json_cli -v
+```
 
 The test prints each MCP request and response to stderr. Subprocess checks also
 show the full CLI command, the JSON payload (including file/stdin contents),
@@ -679,7 +683,7 @@ different interpreter associated with a standalone `pip` or `uvicorn` executable
 
 Missing or incompatible MCP/Uvicorn dependencies produce a startup diagnostic
 with the original import error, active Python interpreter, and an installation
-command for that interpreter. Direct execution exits with status 1 instead of
+command for that interpreter. Direct module execution exits with status 1 instead of
 reporting an all-skipped success. Under unittest discovery, optional-dependency
 skips remain, accompanied by that diagnostic. Install `.[server]` in the active
 environment. Tests require permission to bind/connect to loopback
@@ -699,7 +703,7 @@ validation. Cleanup cancels the local job and stops the test server.
 `test_mcp_workflows.py` exercises submission/cancellation through the real SDK and
 HTTP CLI, including both compute forms, API operations, a simulated asynchronous
 Globus provider, pending/active cancellation, generated nested-schema help and
-submission-key reuse after server restart. `test_workflow_schema.py` verifies
+submission-key reuse after server restart. `test/unit/test_workflow_schema.py` verifies
 native JSON/pickle round trips and rejects invalid schemas before execution.
 
 `test_server_admin.py` tests the private Unix protocol, password checks, metadata discovery, framing,
@@ -709,5 +713,5 @@ then checks real local writes through MCP before addition and after removal.
 It requires local Unix/loopback socket access and the server extra for that test:
 
 ```bash
-PYTHONPATH=test python -m unittest test_server_admin -v
+python test/run_tests.py integration --pattern test_server_admin.py -v
 ```

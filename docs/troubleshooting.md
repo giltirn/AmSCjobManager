@@ -29,7 +29,7 @@ files do not replace the transfer token file.
 The manual authorization script:
 
 ```bash
-python test/test_iri_authorization.py manager-config.json
+python test/live/iri/test_iri_authorization.py manager-config.json
 ```
 
 sets up credentials for configured providers. It does not prove that a PAT is

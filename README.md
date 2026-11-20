@@ -110,6 +110,7 @@ facility. Creating a `WorkflowManager` does not initialize API configuration.
 | [Private MCP server and clients](docs/server.md) | Agent connections, CLI commands, user queries, and protected local administration |
 | [API reference](docs/api.md) | Public entry points, arguments, and return values |
 | [Troubleshooting](docs/troubleshooting.md) | Common errors and current limitations |
+| [Test guide](test/README.md) | Unit, local integration, and explicitly invoked live tests |
 | [Development](docs/development.md) | Source layout, tests, and adding action types |
 
 Start with the runnable example, then read the workflow and transfer guides.

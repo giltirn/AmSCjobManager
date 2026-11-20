@@ -175,7 +175,7 @@ privileged-operation controls discussed for arbitrary local execution.
 Run the local operation, checkpoint recovery and mixed-workflow tests with:
 
 ```bash
-python -m unittest discover -s test -p test_api_actions.py -v
+python test/run_tests.py integration --pattern test_api_actions.py -v
 ```
 
 They use temporary files and real local processes, and mock remote transfers.

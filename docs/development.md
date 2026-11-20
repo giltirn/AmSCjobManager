@@ -16,54 +16,50 @@
 | `local_api.py`, `spoof_api.py` | Local execution and simulated service behavior |
 | `manager_config_models.py`, `manager_config.py` | Configuration schema and setup |
 | `examples/` | Runnable usage examples |
-| `test/` | Offline suites and manual live scripts |
+| `test/` | Unit tests, local integration suites, explicit live scripts, and shared fixtures |
 
 Install in editable mode as described in [installation](installation.md).
 
 ## Offline tests
 
-Run individual suites using discovery from `test/`. This avoids a possible
-collision with Python's own `test` package:
+The test tree separates isolated unit checks, local component integration, and
+explicit live checks. See the [test guide](../test/README.md) for the directory
+layout, required capabilities, and live-script commands.
+
+From the repository root:
 
 ```bash
-python -m unittest discover -s test -p test_compute_resource_scheduling.py
-python -m unittest discover -s test -p test_scheduling_reconciliation.py
-python -m unittest discover -s test -p test_spoof_workflows.py
+python test/run_tests.py unit
+python test/run_tests.py integration
+python test/run_tests.py all
+
+# Select a filename, or inspect the selection without importing tests.
+python test/run_tests.py integration --pattern test_scheduling_reconciliation.py -v
+python test/run_tests.py all --list
 ```
 
-Each command starts a separate process. SPOOF suites select their backend before
-package imports; combining backend-dependent suites in one process can make
-their import order affect behavior.
+The runner defaults to unit tests and launches every selected module in a fresh
+process using the active Python interpreter. This isolates backend selection and
+mutable library state: SPOOF modules can select their backend without affecting
+IRI tests. It runs from the repository root, adds `test/` to child `PYTHONPATH`,
+and starts children with the IRI backend unless a SPOOF module overrides it.
+It returns nonzero if any selected module fails. Live scripts are never selected.
 
-Additional offline suites can be run explicitly:
+Ordinary unittest discovery remains available for unit tests:
 
 ```bash
-for suite in \
-    test_path_validation.py \
-    test_local_write_sandbox.py \
-    test_local_filesystem.py \
-    test_local_cancellation.py \
-    test_local_compute.py \
-    test_globus_path_namespaces.py \
-    test_globus_filesystem.py \
-    test_globus_authorization.py \
-    test_iri_discovery.py \
-    test_iri_lazy_setup.py \
-    test_iri_public_api.py \
-    test_iri_queries.py \
-    test_iri_accounts.py \
-    test_iri_configuration.py \
-    test_iri_storage_paths.py \
-    test_local_username.py \
-    test_spoof_filesystem.py
-do
-    python -m unittest discover -s test -p "$suite" || exit 1
-done
+python -m unittest discover -s test/unit -t test -v
 ```
 
-Do not use a broad `test_*.py` discovery command: this directory also contains
-scripts that execute real operations or expect command-line arguments at
-import time.
+For a specific integration case, use its package-qualified name:
+
+```bash
+PYTHONPATH=test python -m unittest integration.workflows.test_submission_keys -v
+```
+
+`test/live/` has no package initializer, so ordinary discovery from `test/`
+does not descend into it. Use the runner for combined offline runs rather than
+combining backend-dependent modules in one interpreter.
 
 The scheduling tests inject crashes around persisted workflow/action intents,
 remote submission, cancellation, and resource pre-checks. Resource tests verify
@@ -87,10 +83,10 @@ state, allow other workflows to finish, and recover without duplicate
 submission. They also run the actual background loop to check thread and lock
 availability, and confirm that simulated crashes are not swallowed as API errors.
 
-## Manual live checks
+## Local server integration
 
-The optional MCP prototype has a local subprocess integration test:
-`python -m unittest discover -s test -p test_mcp_server.py -v`.
+The optional MCP server has a local subprocess integration test:
+`python test/run_tests.py integration --pattern test_mcp_server.py -v`.
 Install `.[server]` with `python -m pip install -e '.[server]'` first. No separate
 Uvicorn command is required: the test starts its own HTTP listener. It needs
 loopback socket access and runs a real local sleep job, canceled in cleanup.
@@ -101,6 +97,8 @@ verify unavailable-manager errors, continued tool discovery, and rejection of
 restart after failure. Constructor-recovery tests create a new manager against
 the same database and verify that existing work resumes without resubmission.
 
+## Manual live checks
+
 Read each script before running it. These commands can authenticate, create
 remote files, or submit real jobs/transfers, and some intentionally leave
 artifacts for inspection. Supply a configuration with the necessary sandbox
@@ -108,14 +106,16 @@ roots, credentials, accounts, collections, and personal staging.
 
 | Script | Invocation and effect |
 | --- | --- |
-| `test_iri_authorization.py` | `python test/test_iri_authorization.py manager-config.json`; sets up credentials. PAT validation is local and does not prove server acceptance. Unknown provider definitions must already be cached. |
-| `test_iri_api_smoke.py` | `python test/test_iri_api_smoke.py manager-config.json MACHINE`; real resource/filesystem queries and a short compute submission followed by cancellation. |
-| `test_iri_file_roundtrip.py` | `python test/test_iri_file_roundtrip.py manager-config.json`; real upload/list/download across configured mounted filesystems. |
-| `test_globus_file_roundtrip.py` | `python test/test_globus_file_roundtrip.py manager-config.json`; real blocking transfers through the personal collection. |
-| `test_globus_transfer_lookup.py` | `python test/test_globus_transfer_lookup.py manager-config.json`; submits a labeled IRI transfer and compares its ID with direct Globus label discovery. Requires the configured Perlmutter/DTN route. |
-| `test_globus_operations_live.py` | `python test/test_globus_operations_live.py manager-config.json frontier`; verifies the first sandbox's Globus mapping, then tests all implemented Globus filesystem/transfer operations in a unique child directory. Requires transfer credentials and a reachable personal endpoint. |
-| `test_iri_compute_execution.py` | `python test/test_iri_compute_execution.py manager-config.json perlmutter ACCOUNT`; submits native and compatibility jobs. Also supports Aurora. |
-| `test_local.py` | `python test/test_local.py manager-config.json`; launches real local commands. |
+| `test_iri_discovery.py` | `python test/live/iri/test_iri_discovery.py manager-config.json IMPLEMENTATION --refresh`; authenticates the selected provider, prompts for mappings, and updates its configuration cache. |
+| `test_aurora_job_names_live.py` | `python test/live/iri/test_aurora_job_names_live.py manager-config.json --account PROJECT`; compares rejected/accepted names using real Aurora submissions and requests cancellation. |
+| `test_iri_authorization.py` | `python test/live/iri/test_iri_authorization.py manager-config.json`; sets up credentials. PAT validation is local and does not prove server acceptance. Unknown provider definitions must already be cached. |
+| `test_iri_api_smoke.py` | `python test/live/iri/test_iri_api_smoke.py manager-config.json MACHINE`; real resource/filesystem queries and a short compute submission followed by cancellation. |
+| `test_iri_file_roundtrip.py` | `python test/live/iri/test_iri_file_roundtrip.py manager-config.json`; real upload/list/download across configured mounted filesystems. |
+| `test_globus_file_roundtrip.py` | `python test/live/globus/test_globus_file_roundtrip.py manager-config.json`; real blocking transfers through the personal collection. |
+| `test_globus_transfer_lookup.py` | `python test/live/globus/test_globus_transfer_lookup.py manager-config.json`; submits a labeled IRI transfer and compares its ID with direct Globus label discovery. Requires the configured Perlmutter/DTN route. |
+| `test_globus_operations_live.py` | `python test/live/globus/test_globus_operations_live.py manager-config.json frontier`; verifies the first sandbox's Globus mapping, then tests all implemented Globus filesystem/transfer operations in a unique child directory. Requires transfer credentials and a reachable personal endpoint. |
+| `test_iri_compute_execution.py` | `python test/live/iri/test_iri_compute_execution.py manager-config.json perlmutter ACCOUNT`; submits native and compatibility jobs. Also supports Aurora. |
+| `test_local.py` | `python test/live/iri/test_local.py manager-config.json`; launches real local commands. |
 | `examples/mpi_workflow.py` | `python examples/mpi_workflow.py manager-config.json local --ranks-per-node 4`; compiles and executes the bundled MPI reduction and verifies the downloaded result. See [example configuration and remote usage](../examples/README.md). |
 
 The comprehensive Globus check exercises mkdir (with and without parents),
@@ -269,7 +269,7 @@ with the hook disabled and reconcile against the simulated remote service.
 Hooks inside a supervisor are captured by its Future; `waitForAction` surfaces
 them to tests. `test_action_workers.py` also kills real child processes and
 checks autonomous polling and restart recovery. Existing reconciliation unit
-tests use the direct adapters in `action_manager_helpers.py` to exercise the
+tests use the direct adapters in `test/support/action_manager_helpers.py` to exercise the
 same sequential production methods with deterministic crash boundaries.
 
 | Area | Hook names |

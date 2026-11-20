@@ -488,6 +488,39 @@ status `ACTIVE` includes provider states `new`, `queued`, and `active`, so inspe
 `ACTIVE` between steps; `head_action_status` can be `SCHEDULING`, `PROVIDER_HELD`,
 or `COMPLETED`. A held head remains monitored and can be canceled normally.
 
+## Inspecting compute actions
+
+`list_active_and_past_compute_actions` queries the compute manager's records,
+including scheduling attempts, wallet waits, provider-queued/running/held jobs,
+and terminal history. It excludes future workflow stages that have not started
+scheduling. The query reads cached state without polling providers or advancing
+workflows.
+
+```bash
+python utilities/manager_client.py list_active_and_past_compute_actions
+python utilities/manager_client.py list_active_and_past_compute_actions --job-id 1
+python utilities/manager_client.py list_active_and_past_compute_actions \
+    --machine frontier --api-status INSUFFICIENT_WALLET_BALANCE
+python utilities/manager_client.py -h list_active_and_past_compute_actions
+```
+
+Optional filters are `action_id`, `job_id`, `machine`, `statuses`, and
+`api_status` (CLI flags replace underscores with hyphens). Filters combine using
+AND; multiple `statuses` combine using OR. Omitted or null filters impose no
+restriction; `statuses=[]` matches nothing. Machine names match case-insensitively,
+while API statuses match exactly, including casing. Unknown IDs or unmatched
+values return an empty list.
+
+Results are ordered by `action_id`. Each record includes independent action and
+workflow database IDs, machine and compute definition class, recorded action and
+API statuses, provider job identifier (`api_key`, not an authentication token),
+requested nodes/walltime/account/queue, manager timestamps, and submission
+diagnostics. Executable arguments and script contents are excluded. Detailed
+field descriptions are available through generated command help.
+
+For the full wallet-blocked inspection and recharge procedure, see
+[finding actions waiting for funds](compute_wallets.md#finding-actions-waiting-for-funds).
+
 ## Compute wallets
 
 Optional persistent machine wallets reserve requested node-hours before compute

@@ -67,6 +67,49 @@ with manager as jobs:
 The direct Python interface trusts its caller. Password enforcement belongs to
 the server's separate admin route.
 
+## Finding actions waiting for funds
+
+Query compute actions directly to find wallet-blocked submissions across workflows:
+
+```bash
+python utilities/manager_client.py list_active_and_past_compute_actions \
+    --api-status INSUFFICIENT_WALLET_BALANCE
+
+# Optionally restrict the target machine and recorded action status.
+python utilities/manager_client.py list_active_and_past_compute_actions \
+    --machine frontier --statuses SCHEDULING \
+    --api-status INSUFFICIENT_WALLET_BALANCE
+```
+
+MCP clients call `list_active_and_past_compute_actions` with
+`{"api_status": "INSUFFICIENT_WALLET_BALANCE"}`. Each matching action includes
+its `action_id`, owning `job_id`, `machine`, `action_status`, `api_status`,
+requested `nodes` and `time` (walltime in seconds), and submission diagnostics.
+The IDs are database identifiers, not stage positions. The action remains
+`SCHEDULING` while its overall workflow is `ACTIVE`.
+
+This reads recorded state without contacting the compute provider. It includes
+actions whose scheduling has started, including wallet waits, and past actions;
+future workflow stages that have not reached the compute manager are excluded.
+An empty result means no matching recorded actions. Inspect the machine balance
+with `list_compute_wallets`, then use the separate admin utility to recharge or
+disable the wallet. The waiting reason clears when the worker next checks its
+wallet and can proceed.
+
+For direct Python inspection under the manager lock:
+
+```python
+from amscjobmanager.compute_action_manager import ComputeActionFilter
+
+with manager as jobs:
+    computes = jobs.getManager(ActionClass.COMPUTE)
+    waiting = computes.listActiveAndPastComputeActions(
+        ComputeActionFilter(api_status="INSUFFICIENT_WALLET_BALANCE")
+    )
+    for action in waiting.result:
+        print(action.action_id, action.job_id, action.machine)
+```
+
 ## Reservations, waits, and refunds
 
 Before a submission attempt, the manager reserves

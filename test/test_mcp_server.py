@@ -593,6 +593,24 @@ class MCPToolTests(unittest.IsolatedAsyncioTestCase):
             record = listing.structured_content['result'][0]
             self.assertEqual(record['api_status'], 'INSUFFICIENT_WALLET_BALANCE')
             self.assertEqual(record['head_action_status'], 'SCHEDULING')
+
+            # Find the waiting action directly using the schema-derived CLI
+            # arguments, without refreshing the provider or resubmitting work.
+            tool = next(tool for tool in tools.tools if tool.name == 'list_active_and_past_compute_actions')
+            self.assertTrue(tool.annotations.read_only_hint)
+            request = parse_function_arguments(tool, [
+                '--machine', 'LOCAL', '--statuses', 'SCHEDULING',
+                '--api-status', 'INSUFFICIENT_WALLET_BALANCE',
+            ])
+            waiting = await call_mcp(client, tool.name, request)
+            actions = waiting.structured_content['result']
+            self.assertEqual(len(actions), 1)
+            self.assertEqual(actions[0]['job_id'], job)
+            self.assertEqual(actions[0]['machine'], 'local')
+            self.assertEqual(actions[0]['action_status'], 'SCHEDULING')
+            self.assertEqual(actions[0]['api_status'], 'INSUFFICIENT_WALLET_BALANCE')
+            self.assertIsNone(actions[0]['api_key'])
+            self.assertNotIn('list_pending_compute_actions', {tool.name for tool in tools.tools})
             self.assertFalse(any(tool.name in ('enable_wallet', 'disable_wallet', 'recharge_wallet') for tool in tools.tools))
         submit.assert_not_called()
 
@@ -696,7 +714,7 @@ class MCPToolTests(unittest.IsolatedAsyncioTestCase):
         async with Client(server.mcp_server, cache=None) as client:
             tools = await call_mcp(client)
             self.assertEqual({tool.name for tool in tools.tools},
-                             {'list_workflows', 'list_sandbox_directories', 'list_compute_wallets', 'list_user_queries', 'respond_to_user_query', 'submit_workflow', 'cancel_workflow'})
+                             {'list_workflows', 'list_sandbox_directories', 'list_compute_wallets', 'list_active_and_past_compute_actions', 'list_user_queries', 'respond_to_user_query', 'submit_workflow', 'cancel_workflow'})
             result = await call_mcp(client, 'list_workflows', {})
             self.assertEqual(result.structured_content, {'result': []})
             action = ExecuteJobComputeAction(
@@ -1010,6 +1028,21 @@ class MCPSubprocessTests(unittest.TestCase):
                                        capture_output=True, text=True, timeout=15)
                 self.assertEqual(completed.returncode, 0, completed.stderr)
                 self.assertEqual(len(json.loads(completed.stdout)['results'][0]['result']), 2)
+
+                # The manager-owned action query is discovered automatically;
+                # its CLI returns the same independent workflow identifier.
+                completed = run_client(base + ['list_active_and_past_compute_actions',
+                                              '--job-id', str(job_id), '--machine', 'LOCAL'],
+                                       capture_output=True, text=True, timeout=15)
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                actions = json.loads(completed.stdout)['results'][0]['result']
+                self.assertEqual(len(actions), 1)
+                self.assertEqual(actions[0]['job_id'], job_id)
+                completed = run_client(base + ['-h', 'list_active_and_past_compute_actions'],
+                                       capture_output=True, text=True, timeout=15)
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                self.assertIn('--api-status', completed.stdout)
+                self.assertIn('INSUFFICIENT_WALLET_BALANCE', completed.stdout)
                 completed = run_client(base + ['list_workflows', '--help'], capture_output=True, text=True, timeout=15)
                 self.assertEqual(completed.returncode, 0, completed.stderr)
                 self.assertIn('--workflow-id', completed.stdout)
@@ -1048,7 +1081,7 @@ class MCPSubprocessTests(unittest.TestCase):
                 self.assertEqual(completed.returncode, 0, completed.stderr)
                 tools = json.loads(completed.stdout)['results'][0]['result']
                 self.assertEqual({tool['name'] for tool in tools},
-                                 {'list_workflows', 'list_sandbox_directories', 'list_compute_wallets', 'list_user_queries', 'respond_to_user_query', 'submit_workflow', 'cancel_workflow'})
+                                 {'list_workflows', 'list_sandbox_directories', 'list_compute_wallets', 'list_active_and_past_compute_actions', 'list_user_queries', 'respond_to_user_query', 'submit_workflow', 'cancel_workflow'})
 
                 # stdin accepts the same request format as an inline string
                 # or file. Broken JSON must instead return a JSON error envelope.

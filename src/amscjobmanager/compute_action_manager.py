@@ -3,10 +3,11 @@
 import math
 import sqlite3
 import time
+from typing import Literal
 
 from pydantic import BaseModel, Field, StrictStr
 
-from .action_manager import ActionStatus
+from .action_manager import ActionStatus, _unser
 from .async_action_manager import AsyncActionManager
 from .api_general import cancelJob, getJobState, findJobByName
 from .logging import wfmanLog
@@ -51,6 +52,69 @@ class ComputeWalletListing(BaseModel):
     result: dict[str, ComputeWalletSummary]
 
 
+# Use ActionStatus names on the wire; its enum values are internal integers.
+ComputeActionStatusName = Literal[tuple(status.name for status in ActionStatus)]
+
+
+class ComputeActionFilter(FunctionArguments):
+    """Optional AND-combined filters for records owned by the compute manager.
+
+    action_id/job_id (positive int | None) are database IDs, not list/stage
+    positions. machine (str | None) matches case-insensitively; api_status
+    (str | None) matches exactly, preserving provider casing or manager reasons.
+    statuses (list[ActionStatus name] | None) uses OR; None means all and [] none.
+    No filter causes provider polling. Missing/unmatched records yield an empty list.
+    """
+
+    action_id: int | None = Field(default=None, gt=0, strict=True, description='Optional positive action database ID, not a stage/list index; unmatched IDs return an empty list.')
+    job_id: int | None = Field(default=None, gt=0, strict=True, description='Optional positive owning workflow database ID; independent of action IDs.')
+    machine: StrictStr | None = Field(default=None, description='Optional case-insensitive machine name; unknown machines return an empty list.')
+    statuses: list[ComputeActionStatusName] | None = Field(default=None, description='Recorded action-status names, combined using OR; omit for all, [] for none. Includes SCHEDULING and PROVIDER_HELD. Combined with other filters using AND.')
+    api_status: StrictStr | None = Field(default=None, description='Exact, case-sensitive provider status or manager reason, for example active or INSUFFICIENT_WALLET_BALANCE. Omit for all, including unknown/null statuses.')
+
+
+class ComputeActionSummary(BaseModel):
+    """Recorded compute identity, request, and execution state, without executable/script contents.
+
+    action_id/job_id (int) are independent positive database IDs. machine,
+    action_type, action_status (str) identify target, definition class, and stored
+    ActionStatus name. api_key/api_status (str | None) are a provider job ID (not
+    a credential) and provider status or manager reason; None means not recorded.
+    nodes (int), time (str, requested walltime seconds), account/queue (str) are
+    common request fields; empty account/queue may be valid for local execution.
+    last_update/last_submission_attempt (int Unix seconds; latter nullable) are
+    manager timestamps. submission_attempts (int) counts attempted API submissions;
+    last_submission_error (str | None) is its most recent recorded diagnostic.
+    """
+
+    action_id: int = Field(description='Positive global action database ID; not a workflow ID or stage/list position.')
+    job_id: int = Field(description='Positive database ID of the owning workflow.')
+    machine: str = Field(description='Target machine as recorded on the action.')
+    action_type: str = Field(description='Stored compute definition class name, for example ExecuteJobComputeAction.')
+    action_status: ComputeActionStatusName = Field(description='Recorded ActionStatus name; SCHEDULING includes wallet waits, ACTIVE includes provider-queued work.')
+    api_key: str | None = Field(description='Recorded provider job identifier, not an authentication token; null before an ID is recovered or accepted.')
+    api_status: str | None = Field(description='Recorded provider status with original casing, or manager reason such as INSUFFICIENT_WALLET_BALANCE; null if unknown.')
+    nodes: int = Field(description='Requested number of compute nodes.')
+    time: str = Field(description='Requested walltime in seconds, retained as the supplied string.')
+    account: str = Field(description='Requested project/account; may be empty for local execution.')
+    queue: str = Field(description='Requested scheduler queue; may be empty for local execution.')
+    last_update: int = Field(description='Recorded manager timestamp as whole Unix seconds; not a provider execution-start time.')
+    submission_attempts: int = Field(description='Number of attempted API submissions. Wallet waits do not consume attempts.')
+    last_submission_attempt: int | None = Field(description='Last recorded submission-attempt time as whole Unix seconds, or null before any attempt.')
+    last_submission_error: str | None = Field(description='Most recent recorded submission/status diagnostic, or null if none is retained.')
+
+
+class ComputeActionListing(BaseModel):
+    """result (list[ComputeActionSummary]) contains matching records ordered by action_id.
+
+    Includes SCHEDULING, running/provider-queued/held, canceling and terminal
+    manager records. Future workflow stages that have not reached this manager
+    are absent. An empty result means no matches. No API calls or state changes occur.
+    """
+
+    result: list[ComputeActionSummary]
+
+
 class ComputeActions(AsyncActionManager):
     """Manage compute jobs and optionally reserve their cost against machine wallets."""
 
@@ -91,7 +155,7 @@ class ComputeActions(AsyncActionManager):
             )''')
 
     def getMCPFunctions(self) -> tuple[FunctionDefinition, ...]:
-        """Describe the compute manager's read-only wallet inspection.
+        """Describe read-only compute action and wallet inspection.
 
         Take no arguments; return tuple[FunctionDefinition, ...] without querying state.
         """
@@ -99,11 +163,73 @@ class ComputeActions(AsyncActionManager):
             """Read manager's wallets selected by validated args.machine; return the listing model."""
             return ComputeWalletListing(result=manager.getWallets(args.machine))
 
-        return (FunctionDefinition(
-            'list_compute_wallets',
-            'List persistent compute wallet balances for all machines or one selected machine. Missing wallets impose no limit.',
-            _list_wallets, read_only=True, idempotent=True,
-        ),)
+        def _list_actions(manager: ComputeActions, args: ComputeActionFilter) -> ComputeActionListing:
+            """Query manager-owned compute records using validated args; return their summaries."""
+            return manager.listActiveAndPastComputeActions(args)
+
+        return (
+            FunctionDefinition(
+                'list_compute_wallets',
+                'List persistent compute wallet balances for all machines or one selected machine. Missing wallets impose no limit.',
+                _list_wallets, read_only=True, idempotent=True,
+            ),
+            FunctionDefinition(
+                'list_active_and_past_compute_actions',
+                'List recorded compute actions, including scheduling/wallet waits, provider-queued or running work, and terminal history. Excludes future unstarted workflow stages; reads cached state without polling.',
+                _list_actions, read_only=True, idempotent=True,
+            ),
+        )
+
+    def listActiveAndPastComputeActions(self, filters: ComputeActionFilter | None = None) -> ComputeActionListing:
+        """Read matching compute-manager records without polling or progressing work.
+
+        filters (ComputeActionFilter | None) supplies optional ID, machine,
+        action-status and API-status filters; None selects all records. Return
+        ComputeActionListing with result ordered by action_id, as documented by
+        ComputeActionSummary. Unknown IDs/machines or unmatched API-status values yield no matches.
+        Read this manager's table only; unstarted future stages are excluded.
+        Call under JobManager's lock while it runs. No state or provider changes occur.
+        """
+        if filters is None:
+            filters = ComputeActionFilter()
+        if filters.statuses == []:
+            return ComputeActionListing(result=[])
+
+        # Filter the owned execution table before deserializing any definitions.
+        conditions, parameters = [], []
+        for column, value in (('action_id', filters.action_id), ('job_id', filters.job_id),
+                              ('api_status', filters.api_status)):
+            if value is not None:
+                conditions.append(f'{column} = ?')
+                parameters.append(value)
+        if filters.machine is not None:
+            conditions.append('LOWER(machine) = ?')
+            parameters.append(filters.machine.lower())
+        if filters.statuses is not None:
+            conditions.append('action_status IN (' + ','.join('?' for _ in filters.statuses) + ')')
+            parameters.extend(filters.statuses)
+        query = 'SELECT * FROM computes'
+        if conditions:
+            query += ' WHERE ' + ' AND '.join(conditions)
+        query += ' ORDER BY action_id'
+        with self.conn as conn:
+            rows = conn.execute(query, parameters).fetchall()
+
+        # Expose common compute metadata and diagnostics, rather than serialized
+        # definitions or executable, shell-script, and argument contents.
+        summaries = []
+        for row in rows:
+            action = _unser(row['details'])
+            summaries.append(ComputeActionSummary(
+                action_id=row['action_id'], job_id=row['job_id'], machine=row['machine'],
+                action_type=type(action).__name__, action_status=row['action_status'],
+                api_key=row['api_key'], api_status=row['api_status'], nodes=action.nodes,
+                time=action.time, account=action.account, queue=action.queue,
+                last_update=row['last_update'], submission_attempts=row['submission_attempts'],
+                last_submission_attempt=row['last_submission_attempt'],
+                last_submission_error=row['last_submission_error'],
+            ))
+        return ComputeActionListing(result=summaries)
 
     def getAdminFunctions(self) -> tuple[FunctionDefinition, ...]:
         """Describe password-protected wallet administration commands.

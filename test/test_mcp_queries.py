@@ -21,7 +21,7 @@ from unittest.mock import Mock, patch
 from amscjobmanager import logging as manager_logging
 from amscjobmanager.api_actions import APIAction, WriteFile
 from amscjobmanager.compute_actions import ExecuteJobComputeAction
-from amscjobmanager.manager import JobManager
+from amscjobmanager.manager import WorkflowManager
 from test_mcp_server import Client, call_mcp
 
 
@@ -43,20 +43,20 @@ def serve_question_workflow(directory, ready, stop):
     config.write_text(json.dumps({'iri_implementations': {}, 'sandbox_directories': {'local': [directory]}}))
     original = WriteFile.execute
 
-    def write(operation, job_id):
-        """Ask before the recoverable blocked write, then execute it for job_id."""
+    def write(operation, workflow_id):
+        """Ask before the recoverable blocked write, then execute it for workflow_id."""
         if operation.path == str(root / 'blocked'):
             manager_logging.wfapiUserQuery('Workflow question', 'Authorize this write')
-        original(operation, job_id)
+        original(operation, workflow_id)
 
     def initialize():
         """Ask during bootstrap, configure local API and create/recover the manager."""
         manager_logging.wfapiUserQuery('Startup question', 'Confirm initialization')
         setupManager(readManagerConfigFile(config))
-        manager = JobManager(root / 'workflow.sqlite', poll_freq=.05)
-        if not manager.job_data.listWorkflows():
-            manager.job_data.enqueueJob(APIAction([WriteFile('local', str(root / 'blocked'), 'done')]), job_group='blocked')
-            manager.job_data.enqueueJob(APIAction([WriteFile('local', str(root / 'independent'), 'done')]), job_group='independent')
+        manager = WorkflowManager(root / 'workflow.sqlite', poll_freq=.05)
+        if not manager.workflow_data.listWorkflows():
+            manager.workflow_data.enqueueWorkflow(APIAction([WriteFile('local', str(root / 'blocked'), 'done')]), workflow_group='blocked')
+            manager.workflow_data.enqueueWorkflow(APIAction([WriteFile('local', str(root / 'independent'), 'done')]), workflow_group='independent')
         return manager
 
     server = ManagerHTTPServer(initialize, port=0, log_path=root / 'server.log')
@@ -117,21 +117,21 @@ class MCPQueryTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(.01)
         self.fail('No pending MCP query')
 
-    async def _workflow(self, client, job_id, status):
-        """Wait for job_id (int) to reach workflow status (str); return its record.
+    async def _workflow(self, client, workflow_id, status):
+        """Wait for workflow_id (int) to reach workflow status (str); return its record.
 
         client (mcp.Client) is connected. Bound waiting to five seconds, keeping
         reads independent of provider polling and response delivery.
         """
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
-            response = await asyncio.wait_for(client.call_tool('list_workflows', {'workflow_id': job_id}), timeout=2)
+            response = await asyncio.wait_for(client.call_tool('list_workflows', {'workflow_id': workflow_id}), timeout=2)
             self.assertFalse(response.is_error)
             record = response.structured_content['result'][0]
             if record['workflow_status'] == status:
                 return record
             await asyncio.sleep(.02)
-        self.fail(f'Workflow {job_id} did not reach {status}')
+        self.fail(f'Workflow {workflow_id} did not reach {status}')
 
     async def test_startup_questions_can_be_answered_before_manager_readiness(self):
         """Inspect/reply through MCP while initialization has no manager to query.
@@ -143,9 +143,9 @@ class MCPQueryTests(unittest.IsolatedAsyncioTestCase):
         from amscjobmanager.server.runner import ManagerHTTPServer
 
         def initialize():
-            """Ask during initialization, then return a memory-only JobManager."""
+            """Ask during initialization, then return a memory-only WorkflowManager."""
             self.assertEqual(manager_logging.wfapiUserQuery('startup', 'Approve setup'), 'private-code')
-            return JobManager(max_workflows_active=0)
+            return WorkflowManager(max_workflows_active=0)
 
         server = ManagerHTTPServer(initialize, port=0, log_path=self.root / 'server.log')
         runtime = server.runtime
@@ -191,11 +191,11 @@ class MCPQueryTests(unittest.IsolatedAsyncioTestCase):
                 ids = {}
                 original = WriteFile.execute
 
-                def write(operation, job_id):
+                def write(operation, workflow_id):
                     """Ask for this variant's selected file write, then execute normally."""
                     if operation.path == str(blocked):
                         manager_logging.wfapiUserQuery('API operation', 'Authorize file write')
-                    original(operation, job_id)
+                    original(operation, workflow_id)
 
                 def submit(*args, **kwargs):
                     """Ask during fake compute submission, returning a provider ID string."""
@@ -203,12 +203,12 @@ class MCPQueryTests(unittest.IsolatedAsyncioTestCase):
                     return 'remote-1'
 
                 def initialize():
-                    """Prepare a queried workflow and independent API work; return JobManager."""
-                    manager = JobManager(self.root / f'{kind}.sqlite', poll_freq=.01)
+                    """Prepare a queried workflow and independent API work; return WorkflowManager."""
+                    manager = WorkflowManager(self.root / f'{kind}.sqlite', poll_freq=.01)
                     action = (APIAction([WriteFile('local', str(blocked), 'done')]) if kind == 'api' else
                               ExecuteJobComputeAction('local', '', '', '60', '/bin/true', [], str(self.root), 1, 0, nodes=1))
-                    ids['waiting'] = manager.job_data.enqueueJob(action)
-                    ids['other'] = manager.job_data.enqueueJob(APIAction([WriteFile('local', str(other), 'done')]))
+                    ids['waiting'] = manager.workflow_data.enqueueWorkflow(action)
+                    ids['other'] = manager.workflow_data.enqueueWorkflow(APIAction([WriteFile('local', str(other), 'done')]))
                     return manager
 
                 server = ManagerHTTPServer(initialize, port=0, log_path=self.root / 'server.log')
@@ -240,15 +240,15 @@ class MCPQueryTests(unittest.IsolatedAsyncioTestCase):
         original = WriteFile.execute
         ids = {}
 
-        def write(operation, job_id):
+        def write(operation, workflow_id):
             """Wait for authorization before performing the file write."""
             manager_logging.wfapiUserQuery('write', 'Allow write?')
-            original(operation, job_id)
+            original(operation, workflow_id)
 
         def initialize():
-            """Prepare the queried API workflow and return its JobManager."""
-            manager = JobManager()
-            ids['job'] = manager.job_data.enqueueJob(APIAction([WriteFile('local', str(self.root / 'never'), 'never')]))
+            """Prepare the queried API workflow and return its WorkflowManager."""
+            manager = WorkflowManager()
+            ids['workflow'] = manager.workflow_data.enqueueWorkflow(APIAction([WriteFile('local', str(self.root / 'never'), 'never')]))
             return manager
 
         server = ManagerHTTPServer(initialize, port=0, log_path=self.root / 'server.log')
@@ -259,11 +259,11 @@ class MCPQueryTests(unittest.IsolatedAsyncioTestCase):
                 runtime.start()
                 async with Client(server.mcp_server, cache=None) as client:
                     question = await self._pending(client)
-                    runtime.manager(lambda jobs: jobs.cancelJob(ids['job']))
+                    runtime.manager(lambda workflows: workflows.cancelWorkflow(ids['workflow']))
                     response = await client.call_tool('respond_to_user_query',
                         {'session_id': question['session_id'], 'query_id': question['query_id'], 'response': 'too late'})
                     self.assertEqual(response.structured_content['error']['code'], 'query_not_pending')
-                    await self._workflow(client, ids['job'], 'CANCELED')
+                    await self._workflow(client, ids['workflow'], 'CANCELED')
                     self.assertFalse((self.root / 'never').exists())
         finally:
             runtime.stop()

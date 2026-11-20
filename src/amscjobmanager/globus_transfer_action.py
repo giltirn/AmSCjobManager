@@ -2,7 +2,7 @@ from dataclasses import field
 from pydantic import ConfigDict, StrictStr
 from pydantic.dataclasses import dataclass
 from typing import Literal
-from .actions_base import replaceJobIdSubstring, TransferActionBase
+from .actions_base import replaceWorkflowIdSubstring, TransferActionBase
 from .api_general import (
     cancelGlobusTransfer, findGlobusTransferByLabel, globusCopy,
     globusTransferStatus,
@@ -19,9 +19,9 @@ class GlobusTransfer(TransferActionBase):
     a directory in the destination collection. Set either path type to
     "filesystem" to translate a configured machine path to a Globus path.
     Endpoint strings identify configured tags or UUIDs. Both path types default
-    to 'globus'; paths support <JOBID>. type is always 'globus_transfer'.
+    to 'globus'; paths support <WORKFLOWID>. type is always 'globus_transfer'.
     """
-    #The <JOBID> substring will be replaced by the job index if present in the path strings
+    #The <WORKFLOWID> substring will be replaced by the workflow ID if present in the path strings
     dest_endpoint: StrictStr
     dest_path: StrictStr
     source_endpoint: StrictStr
@@ -30,9 +30,15 @@ class GlobusTransfer(TransferActionBase):
     dest_path_type: Literal["filesystem", "globus"] = "globus"
     type: Literal["globus_transfer"] = field(default="globus_transfer", kw_only=True)
 
-    def initiateAction(self, job_id, name: str | None = None)-> str:
-        source_path = replaceJobIdSubstring(self.source_path, job_id)
-        dest_path = replaceJobIdSubstring(self.dest_path, job_id)
+    def initiateAction(self, workflow_id, name: str | None = None)-> str:
+        """Expand workflow paths and submit an asynchronous Globus transfer.
+
+        workflow_id (positive int) is the owning workflow database ID used for
+        <WORKFLOWID> expansion. name (str | None) is the optional transfer label.
+        Return str, the provider transfer ID; completion is monitored separately.
+        """
+        source_path = replaceWorkflowIdSubstring(self.source_path, workflow_id)
+        dest_path = replaceWorkflowIdSubstring(self.dest_path, workflow_id)
         if not dest_path.endswith("/"):
             dest_path += "/"
         

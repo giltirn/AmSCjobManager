@@ -56,7 +56,7 @@ def initializeActionStatusViews(connection: LockedConnection) -> None:
     one row per membership. action_status_mapping has action_status/workflow_status
     (str enum names), one row per ActionStatus. EXECUTING and COMPLETED heads
     map to ACTIVE workflows; other statuses map to themselves. Final workflow
-    completion and cancellation intent remain explicit JobData transitions.
+    completion and cancellation intent remain explicit WorkflowData transitions.
     Existing views are retained; no action or workflow records are changed.
     """
     # Generate SQL literals exclusively from library enum names. The same group
@@ -88,14 +88,14 @@ class SimulatedCrash(RuntimeError):
 class ActionManager(ABC):
     """Workflow-facing action-manager interface, independent of storage schema.
 
-    JobData uses the public methods to start/cancel actions and observe their
+    WorkflowData uses the public methods to start/cancel actions and observe their
     recorded state. It allocates every action ID and supplies the same ID during
     recovery; action managers never allocate or replace IDs.
 
     The base supplies worker lifecycle handling. Subclasses own storage and
     explicitly pass execution/cancellation callables to the worker starters.
     _recordWorkerFailure remains an internal subclass hook for storing unexpected
-    errors; JobData does not call the underscored methods.
+    errors; WorkflowData does not call the underscored methods.
     """
 
     def __init__(self, *, workers: Workers | None = None):
@@ -131,7 +131,7 @@ class ActionManager(ABC):
                               complete_cancellation: Callable[[int], None]):
         """Start supplied execution work and hand off to cancellation when requested.
 
-        action_id (int) is a positive, JobData-issued ID with intent already
+        action_id (int) is a positive, WorkflowData-issued ID with intent already
         recorded. execute_action (callable) takes that ID, recovers/executes work
         and persists progress until terminal or CANCELING. complete_cancellation
         (callable) takes the same ID and resolves persisted cancellation intent.
@@ -260,18 +260,18 @@ class ActionManager(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def startOrResumeAction(self, action, job_id: int, action_id: int) -> None:
+    def startOrResumeAction(self, action, workflow_id: int, action_id: int) -> None:
         """Start or recover an action's execution in the background.
 
-        Called by JobData when selecting a workflow stage or recovering its head.
+        Called by WorkflowData when selecting a workflow stage or recovering its head.
         "Resume" means restoring supervision from persisted state after the
         previous worker stopped, using a newly constructed manager after shutdown
-        or process failure. A stopped JobManager instance cannot be restarted.
+        or process failure. A stopped WorkflowManager instance cannot be restarted.
         Normal execution progresses independently; repeated calls while its worker
         is live simply reuse it. This is not a workflow pause/resume operation.
         action (object) is the serializable action definition, used only if its
-        record is missing. job_id (int) is the positive owning workflow ID;
-        action_id (int) is the positive global action ID allocated by JobData,
+        record is missing. workflow_id (int) is the positive owning workflow ID;
+        action_id (int) is the positive global action ID allocated by WorkflowData,
         not a workflow-stage index. Use that same ID during recovery.
 
         Return None after persisting intent and starting/reusing its worker;
@@ -285,7 +285,7 @@ class ActionManager(ABC):
     def cancelOrResumeCancelingAction(self, action_id: int, *, recovery: tuple[object, int] | None = None) -> None:
         """Request cancellation or recover a previously recorded cancellation.
 
-        Called by JobData for its current workflow stage, including recovery of
+        Called by WorkflowData for its current workflow stage, including recovery of
         interrupted cancellation. action_id (int) is the positive global action
         ID. recovery (tuple[object, int] | None) optionally supplies its stored
         definition at index 0 and positive workflow ID at index 1, allowing a
@@ -295,7 +295,7 @@ class ActionManager(ABC):
         cancellation directly when no work needs to stop. Repeated calls must be
         safe. Do not submit new remote work or undo earlier file effects. The
         worker completes any necessary remote cancellation; queryRecordedStatus reports
-        its outcome. JobData separately updates the workflow's cancellation."""
+        its outcome. WorkflowData separately updates the workflow's cancellation."""
         raise NotImplementedError
 
     @abstractmethod
@@ -313,7 +313,7 @@ class ActionManager(ABC):
 
         Take no arguments. Return int for the highest global action ID in this
         manager's records, including terminal actions, or None if there are no
-        records. Queued stages may have higher IDs in JobData's actions table;
+        records. Queued stages may have higher IDs in WorkflowData's actions table;
         execution-manager records are only created when a stage is started.
         Do not allocate a new ID or change any record."""
         raise NotImplementedError
@@ -322,7 +322,7 @@ class ActionManager(ABC):
     def queryRecordedStatus(self, action_id: int, *, force_update=False) -> tuple[ActionStatus, str | None]:
         """Read an action's recorded status and optionally request a provider poll.
 
-        Used by JobData to copy action state into its workflow head and by
+        Used by WorkflowData to copy action state into its workflow head and by
         callers inspecting progress. action_id (int) is the positive global
         action ID. force_update (bool, default False) requests an earlier API
         poll from an existing worker without waiting for its result. Managers
@@ -373,7 +373,7 @@ class ActionManager(ABC):
 
         Take no arguments. Return list[dict], one entry per recorded action
         whose status is ACTIVE or PROVIDER_HELD (the LIVE group). Each entry has
-        job_id (positive workflow ID, int), api_key (provider identifier, str or
+        workflow_id (positive workflow ID, int), api_key (provider identifier, str or
         None), api_status (latest provider state, str or None), plus action-type
         details described by the implementation. List positions are not action
         IDs. API sequences remain SCHEDULING while running, so they are omitted."""
@@ -384,7 +384,7 @@ class ActionManager(ABC):
         """Retrieve a stored action's details and execution progress.
 
         action_id (int) is its positive global action ID; an unknown ID is an
-        error. Return dict containing job_id (positive workflow ID, int), api_key
+        error. Return dict containing workflow_id (positive workflow ID, int), api_key
         (provider identifier, str or None), api_status (latest provider state,
         str or None), and implementation-specific details/checkpoints. None
         denotes an unavailable or inapplicable provider field. This is a cached

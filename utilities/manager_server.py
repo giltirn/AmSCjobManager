@@ -1,4 +1,4 @@
-"""Run MCP workflow management and user-query routing for a persistent JobManager."""
+"""Run MCP workflow management and user-query routing for a persistent WorkflowManager."""
 
 import argparse
 import getpass
@@ -32,7 +32,7 @@ def main(argv=None) -> int:
             with manager_unavailable responses and query tools.
 
     The runtime initializes its manager after listener startup and closes its
-    database when the listener exits; shutdown does not cancel remote jobs.
+    database when the listener exits; shutdown does not cancel remote workflows.
     Restore the original logging and query hooks before closing the log file. Only one server should own this database.
     Readiness and termination notices are also written to stdout for the admin;
     routine request logging stays in the configured log destinations.
@@ -87,18 +87,18 @@ def main(argv=None) -> int:
         try:
             manager_logging.wfmanLog('Starting AmSC Job Manager MCP server')
             from amscjobmanager.manager_config import readManagerConfigFile, setupManager
-            from amscjobmanager.manager import JobManager
+            from amscjobmanager.manager import WorkflowManager
             from amscjobmanager.server.runner import ManagerHTTPServer
 
-            def initialize_manager() -> JobManager:
+            def initialize_manager() -> WorkflowManager:
                 """Configure the API and construct a manager on the startup worker.
 
                 Take no arguments; use the parsed config/database/poll settings.
-                Return JobManager. Configuration and constructor recovery can
+                Return WorkflowManager. Configuration and constructor recovery can
                 ask questions while the already-running listener serves replies.
                 """
                 setupManager(readManagerConfigFile(args.config))
-                return JobManager(args.database, poll_freq=args.poll_interval)
+                return WorkflowManager(args.database, poll_freq=args.poll_interval)
 
             server = ManagerHTTPServer(initialize_manager, port=args.port, log_path=log_path,
                                        admin_socket=args.admin_socket, admin_password=password)

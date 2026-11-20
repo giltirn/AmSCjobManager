@@ -11,10 +11,10 @@ import time
 import json
 from typing import Tuple
 
-class JobData:
+class WorkflowData:
     """Submit, track and progress workflows backed by a database.
 
-    Use one live JobData instance per database. Its connection lock serializes
+    Use one live WorkflowData instance per database. Its connection lock serializes
     threads sharing this instance; separate instances/processes are not
     coordinated. Close the previous instance before reopening for recovery.
     """
@@ -60,9 +60,9 @@ class JobData:
             # Workflow records identify the sequential head and retain durable
             # overall workflow status independently of action history.
             conn.execute("""
-                CREATE TABLE IF NOT EXISTS jobs (
-                    job_id INTEGER PRIMARY KEY,
-                    job_group TEXT,
+                CREATE TABLE IF NOT EXISTS workflows (
+                    workflow_id INTEGER PRIMARY KEY,
+                    workflow_group TEXT,
                     submission_key TEXT UNIQUE,
                     workflow_stage INTEGER NOT NULL,
                     workflow_status TEXT NOT NULL CHECK (workflow_status IN (
@@ -73,7 +73,7 @@ class JobData:
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS actions (
                     action_id INTEGER PRIMARY KEY,
-                    job_id INTEGER NOT NULL REFERENCES jobs(job_id),
+                    workflow_id INTEGER NOT NULL REFERENCES workflows(workflow_id),
                     workflow_stage INTEGER NOT NULL CHECK (workflow_stage >= 0),
                     action_class TEXT NOT NULL,
                     action_type TEXT NOT NULL,
@@ -82,18 +82,18 @@ class JobData:
                     producer_key TEXT,
                     details BLOB NOT NULL,
                     last_status_change INTEGER NOT NULL,
-                    UNIQUE (job_id, workflow_stage)
+                    UNIQUE (workflow_id, workflow_stage)
                 )
             """)
             conn.execute('CREATE INDEX IF NOT EXISTS actions_by_producer_key ON actions(producer_key)')
-            conn.execute('CREATE INDEX IF NOT EXISTS jobs_by_workflow_status ON jobs(workflow_status)')
+            conn.execute('CREATE INDEX IF NOT EXISTS workflows_by_workflow_status ON workflows(workflow_status)')
 
             # This read-only projection keeps all head lookups consistent without
-            # duplicating action metadata or execution status in the jobs table.
+            # duplicating action metadata or execution status in the workflows table.
             # Stage -1 retains the public convention for a workflow not yet started.
             conn.execute("""
                 CREATE VIEW IF NOT EXISTS workflow_heads AS
-                SELECT j.job_id, j.job_group, j.submission_key, j.workflow_stage,
+                SELECT j.workflow_id, j.workflow_group, j.submission_key, j.workflow_stage,
                        j.workflow_status,
                        MAX(j.last_status_change, COALESCE(a.last_status_change, 0)) AS last_status_change,
                        a.action_id AS head_action_id,
@@ -101,7 +101,7 @@ class JobData:
                        COALESCE(a.action_type, 'NoneType') AS head_action_type,
                        COALESCE(a.action_status, 'COMPLETED') AS head_action_status,
                        a.details AS action_details
-                FROM jobs j LEFT JOIN actions a ON a.job_id = j.job_id
+                FROM workflows j LEFT JOIN actions a ON a.workflow_id = j.workflow_id
                     AND a.workflow_stage = CASE WHEN j.workflow_stage = -1 THEN 0 ELSE j.workflow_stage END
             """)
 
@@ -124,7 +124,7 @@ class JobData:
 
         Take no arguments. Return tuple[ActionClass, ...] in registration order;
         use getManager to retrieve each existing instance. No state changes or
-        provider requests occur. Use JobManager's lock while it is running.
+        provider requests occur. Use WorkflowManager's lock while it is running.
         """
         return tuple(self.action_man)
 
@@ -134,7 +134,7 @@ class JobData:
         action_class (ActionClass) selects COMPUTE, TRANSFER, or API. Return
         that category's concrete ActionManager instance, without creating one,
         polling providers, or changing state. An unregistered category is an
-        error. Call its public methods under JobManager's lock while running;
+        error. Call its public methods under WorkflowManager's lock while running;
         each manager owns its persistence and implementation-specific operations.
         """
         try:
@@ -142,11 +142,11 @@ class JobData:
         except KeyError:
             raise ValueError(f'No action manager registered for {action_class!r}') from None
 
-    def enqueueJob(self, workflow, job_group=None, *, submission_key: str | None = None) -> int:
+    def enqueueWorkflow(self, workflow, workflow_group=None, *, submission_key: str | None = None) -> int:
         """Persist a sequential workflow and assign all its action IDs without starting it.
 
         workflow (action | nonempty list[action]) supplies ordered definitions;
-        job_group (str | None) is optional nonunique metadata. submission_key
+        workflow_group (str | None) is optional nonunique metadata. submission_key
         (str | None) is an exact, database-unique retry key. An existing key returns
         its original positive workflow ID without changing any records; None
         always creates a workflow. Return int, the workflow ID, not a stage index.
@@ -154,7 +154,7 @@ class JobData:
         Dependency keys must already exist in earlier submissions or earlier
         stages of this workflow. Required canceled producers are rejected, while
         successful producers and noncanceled OR alternatives remain valid. A failed
-        validation rolls back the whole chain. Use JobManager's lock while running.
+        validation rolls back the whole chain. Use WorkflowManager's lock while running.
         """
         if submission_key is not None and not isinstance(submission_key, str):
             raise TypeError('submission_key must be a string or None')
@@ -163,18 +163,18 @@ class JobData:
             # Keep retry handling ahead of payload validation and insert the whole
             # chain atomically, including IDs for stages that may never execute.
             if submission_key is not None:
-                existing = conn.execute('SELECT job_id FROM jobs WHERE submission_key = ?',
+                existing = conn.execute('SELECT workflow_id FROM workflows WHERE submission_key = ?',
                                         (submission_key,)).fetchone()
                 if existing is not None:
-                    return existing['job_id']
+                    return existing['workflow_id']
             if not isinstance(workflow, list):
                 workflow = [workflow]
             assert len(workflow) > 0
             now = int(time.time())
-            job_id = conn.execute(
-                'INSERT INTO jobs(job_group, submission_key, workflow_stage, workflow_status, last_status_change) '
+            workflow_id = conn.execute(
+                'INSERT INTO workflows(workflow_group, submission_key, workflow_stage, workflow_status, last_status_change) '
                 'VALUES (?, ?, -1, ?, ?)',
-                (job_group, submission_key, ActionStatus.PENDING.name, now),
+                (workflow_group, submission_key, ActionStatus.PENDING.name, now),
             ).lastrowid
             def knownProducerNotCanceled(key: str) -> bool:
                 """Validate key (str) and return the inverse cancellation-specific flag.
@@ -195,18 +195,18 @@ class JobData:
                 if depends_on_canceled_action:
                     raise ValueError(f'Workflow stage {stage} requires canceled dependency producers')
                 conn.execute(
-                    'INSERT INTO actions(job_id, workflow_stage, action_class, action_type, action_status, '
+                    'INSERT INTO actions(workflow_id, workflow_stage, action_class, action_type, action_status, '
                     'depends_on, producer_key, details, last_status_change) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-                    (job_id, stage, actionClass(action).name, type(action).__name__, ActionStatus.PENDING.name,
+                    (workflow_id, stage, actionClass(action).name, type(action).__name__, ActionStatus.PENDING.name,
                      None if condition is None else json.dumps(condition), getattr(action, 'producer_key', None),
                      _ser(action), now),
                 )
-            return job_id
+            return workflow_id
 
     def _dependencyKeyState(self, conn: sqlite3.Connection, key: str) -> dict[str, bool]:
         """Read producer existence, successful completion, and cancellation-specific blockage.
 
-        conn (sqlite3.Connection) must be used inside this JobData's connection
+        conn (sqlite3.Connection) must be used inside this WorkflowData's connection
         context. key (str) is a nonunique producer label in this database.
         Return dict[str, bool]: producer_is_known means at least one registered
         action publishes this key; producer_has_completed means at least one
@@ -222,50 +222,50 @@ class JobData:
                    COUNT(*) > 0 AND NOT COALESCE(MAX(a.action_status = 'COMPLETED' OR (
                        a.action_status NOT IN ('CANCELING', 'CANCELED') AND
                        j.workflow_status NOT IN ('CANCELING', 'CANCELED'))), 0) AS depends_on_canceled_action
-            FROM actions a JOIN jobs j ON j.job_id = a.job_id
+            FROM actions a JOIN workflows j ON j.workflow_id = a.workflow_id
             WHERE a.producer_key = ?
         """, (key,)).fetchone()
         return {field: bool(row[field]) for field in
                 ('producer_is_known', 'producer_has_completed', 'depends_on_canceled_action')}
 
-    def _recordCancellationIntents(self, conn: sqlite3.Connection, job_ids: list[int]) -> list[int]:
+    def _recordCancellationIntents(self, conn: sqlite3.Connection, workflow_ids: list[int]) -> list[int]:
         """Persist requested cancellations and their dependency closure without provider calls.
 
-        conn (sqlite3.Connection) is inside this JobData's transaction. job_ids
+        conn (sqlite3.Connection) is inside this WorkflowData's transaction. workflow_ids
         (list[int]) supplies positive workflow IDs to cancel. Return sorted list[int] of affected
         CANCELING workflow IDs, not stage positions. All heads enter pending
         cancellation processing, including pending and completed ones. Action
         rows remain unchanged until that processing. All new intents commit with
         the caller's transaction; failed producers alone do not cascade.
         """
-        pending = set(job_ids)
+        pending = set(workflow_ids)
         canceling = set()
         while True:
             # Persist one wave of workflow intents before evaluating consumers.
             # Their unfinished producers can no longer satisfy dependencies.
-            for job_id in sorted(pending):
-                job = conn.execute('SELECT workflow_status FROM jobs WHERE job_id = ?', (job_id,)).fetchone()
-                if job is None:
-                    raise ValueError(f'Unknown job_id: {job_id}')
-                if job['workflow_status'] != ActionStatus.CANCELED.name:
+            for workflow_id in sorted(pending):
+                workflow = conn.execute('SELECT workflow_status FROM workflows WHERE workflow_id = ?', (workflow_id,)).fetchone()
+                if workflow is None:
+                    raise ValueError(f'Unknown workflow_id: {workflow_id}')
+                if workflow['workflow_status'] != ActionStatus.CANCELED.name:
                     # Keep retries idempotent. Action status and submission
                     # history are left for pending cancellation processing.
-                    conn.execute('UPDATE jobs SET workflow_status = ?, last_status_change = ? '
-                                 'WHERE job_id = ? AND workflow_status != ?',
+                    conn.execute('UPDATE workflows SET workflow_status = ?, last_status_change = ? '
+                                 'WHERE workflow_id = ? AND workflow_status != ?',
                                  (ActionStatus.CANCELING.name, int(time.time()),
-                                  job_id, ActionStatus.CANCELING.name))
-                    canceling.add(job_id)
+                                  workflow_id, ActionStatus.CANCELING.name))
+                    canceling.add(workflow_id)
 
             # Ordinary passes without canceled producers need no graph scan.
             conditions = conn.execute("""
-                SELECT a.job_id, a.depends_on FROM actions a JOIN jobs j ON j.job_id = a.job_id
+                SELECT a.workflow_id, a.depends_on FROM actions a JOIN workflows j ON j.workflow_id = a.workflow_id
                 WHERE j.workflow_status IN ('PENDING', 'ACTIVE')
                   AND a.action_status != 'COMPLETED' AND a.depends_on IS NOT NULL
             """).fetchall()
             if not conditions:
                 return sorted(canceling)
             canceled_producer = conn.execute("""
-                SELECT 1 FROM actions a JOIN jobs j ON j.job_id = a.job_id
+                SELECT 1 FROM actions a JOIN workflows j ON j.workflow_id = a.workflow_id
                 WHERE a.producer_key IS NOT NULL AND a.action_status != 'COMPLETED'
                   AND (a.action_status IN ('CANCELING', 'CANCELED') OR
                        j.workflow_status IN ('CANCELING', 'CANCELED')) LIMIT 1
@@ -279,8 +279,8 @@ class JobData:
             # matches are insufficient: repeated keys can otherwise make a
             # consumer count itself, or a circular pair, as its own alternative.
             actions = conn.execute("""
-                SELECT a.job_id, a.workflow_stage, a.action_status, a.depends_on, a.producer_key
-                FROM actions a JOIN jobs j ON j.job_id = a.job_id
+                SELECT a.workflow_id, a.workflow_stage, a.action_status, a.depends_on, a.producer_key
+                FROM actions a JOIN workflows j ON j.workflow_id = a.workflow_id
                 WHERE a.action_status = 'COMPLETED' OR (
                     a.action_status NOT IN ('CANCELING', 'CANCELED') AND
                     j.workflow_status NOT IN ('CANCELING', 'CANCELED'))
@@ -288,17 +288,17 @@ class JobData:
             """).fetchall()
             noncanceled_keys = {action['producer_key'] for action in actions
                          if action['action_status'] == ActionStatus.COMPLETED.name and action['producer_key'] is not None}
-            reachable = {(action['job_id'], action['workflow_stage']) for action in actions
+            reachable = {(action['workflow_id'], action['workflow_stage']) for action in actions
                          if action['action_status'] == ActionStatus.COMPLETED.name}
             unresolved = [action for action in actions if action['action_status'] != ActionStatus.COMPLETED.name]
             while unresolved:
                 remaining = []
                 for action in unresolved:
-                    predecessor = (action['job_id'], action['workflow_stage'] - 1)
+                    predecessor = (action['workflow_id'], action['workflow_stage'] - 1)
                     condition = None if action['depends_on'] is None else json.loads(action['depends_on'])
                     if (action['workflow_stage'] == 0 or predecessor in reachable) and evaluateDependencies(
                             condition, noncanceled_keys.__contains__):
-                        reachable.add((action['job_id'], action['workflow_stage']))
+                        reachable.add((action['workflow_id'], action['workflow_stage']))
                         if action['producer_key'] is not None:
                             noncanceled_keys.add(action['producer_key'])
                     else:
@@ -314,33 +314,33 @@ class JobData:
                 depends_on_canceled_action = not evaluateDependencies(
                     json.loads(action['depends_on']), noncanceled_keys.__contains__)
                 if depends_on_canceled_action:
-                    pending.add(action['job_id'])
+                    pending.add(action['workflow_id'])
             if not pending:
                 return sorted(canceling)
 
-    def cancelJob(self, job_id: int) -> None:
+    def cancelWorkflow(self, workflow_id: int) -> None:
         """Cancel a workflow and consumers requiring its unfinished producers.
 
-        job_id (positive int) is a workflow database ID. Stop executing heads
+        workflow_id (positive int) is a workflow database ID. Stop executing heads
         throughout the cancellation cascade. Return None. Preserve successful
         action history and OR alternatives with another noncanceled producer. Persist
         the entire cascade before external calls; failures retain retryable intent
         across retries and recovery.
-        Unknown IDs raise ValueError. Use JobManager's lock while running.
+        Unknown IDs raise ValueError. Use WorkflowManager's lock while running.
         """
-        if type(job_id) is not int or job_id < 1:
-            raise ValueError('job_id must be a positive integer')
+        if type(workflow_id) is not int or workflow_id < 1:
+            raise ValueError('workflow_id must be a positive integer')
         with self.conn as conn:
-            canceling = self._recordCancellationIntents(conn, [job_id])
+            canceling = self._recordCancellationIntents(conn, [workflow_id])
         self._maybeSimulateCrash('workflow_cancellation_cascade_persisted')
         if canceling:
-            self._maybeSimulateCrash('job_head_canceling_persisted')
+            self._maybeSimulateCrash('workflow_head_canceling_persisted')
             self.performPendingCancellations(canceling, raise_errors=True)
 
-    def performPendingCancellations(self, job_ids=None, *, raise_errors=False):
+    def performPendingCancellations(self, workflow_ids=None, *, raise_errors=False):
         """Perform pending workflow cancellations locally or through their action managers.
 
-        job_ids (list[int] | None) restricts positive workflow IDs; None selects
+        workflow_ids (list[int] | None) restricts positive workflow IDs; None selects
         every CANCELING workflow. raise_errors (bool, default False) propagates
         API errors instead of logging and retrying later. Return None. Completed
         historical actions remain unchanged; pending stages are canceled locally.
@@ -350,24 +350,24 @@ class JobData:
         with self.conn as conn:
             query = 'SELECT * FROM workflow_heads WHERE workflow_status = ?'
             params = [ActionStatus.CANCELING.name]
-            if job_ids is not None:
-                query += ' AND job_id IN (' + ','.join('?' for _ in job_ids) + ')'
-                params.extend(job_ids)
-            jobs = conn.execute(query, params).fetchall()
+            if workflow_ids is not None:
+                query += ' AND workflow_id IN (' + ','.join('?' for _ in workflow_ids) + ')'
+                params.extend(workflow_ids)
+            workflows = conn.execute(query, params).fetchall()
 
-        for job in jobs:
+        for workflow in workflows:
             try:
                 # Only executing heads need an action-manager request. PENDING
                 # means no scheduling intent was issued, while completed/failed
                 # history must retain its actual outcome.
-                action_id = job['head_action_id']
-                head_status = ActionStatus[job['head_action_status']]
+                action_id = workflow['head_action_id']
+                head_status = ActionStatus[workflow['head_action_status']]
                 executing = head_status in ActionStatusGroup.EXECUTING.value or head_status == ActionStatus.CANCELING
                 resolved_status = head_status
                 if executing:
-                    manager = self.action_man[ActionClass[job['head_action_class']]]
+                    manager = self.action_man[ActionClass[workflow['head_action_class']]]
                     manager.cancelOrResumeCancelingAction(
-                        action_id, recovery=(_unser(job['action_details']), job['job_id']))
+                        action_id, recovery=(_unser(workflow['action_details']), workflow['workflow_id']))
                     resolved_status, _ = manager.queryRecordedStatus(action_id)
                     if resolved_status in ActionStatusGroup.EXECUTING.value or resolved_status == ActionStatus.CANCELING:
                         # Copy observed progress only after the action manager
@@ -379,7 +379,7 @@ class JobData:
                                              (resolved_status.name, int(time.time()), action_id))
                         continue
 
-                self._maybeSimulateCrash('action_canceled_before_job_head_update')
+                self._maybeSimulateCrash('action_canceled_before_workflow_head_update')
                 with self.conn as conn:
                     # Finish local bookkeeping atomically after the remote request
                     # resolves (or immediately when no provider work is required).
@@ -387,57 +387,57 @@ class JobData:
                         conn.execute('UPDATE actions SET action_status = ?, last_status_change = ? WHERE action_id = ?',
                                      (resolved_status.name, int(time.time()), action_id))
                     conn.execute('UPDATE actions SET action_status = ?, last_status_change = ? '
-                                 'WHERE job_id = ? AND action_status = ?',
-                                 (ActionStatus.CANCELED.name, int(time.time()), job['job_id'], ActionStatus.PENDING.name))
-                    conn.execute('UPDATE jobs SET workflow_status = ?, last_status_change = ? WHERE job_id = ?',
-                                 (ActionStatus.CANCELED.name, int(time.time()), job['job_id']))
+                                 'WHERE workflow_id = ? AND action_status = ?',
+                                 (ActionStatus.CANCELED.name, int(time.time()), workflow['workflow_id'], ActionStatus.PENDING.name))
+                    conn.execute('UPDATE workflows SET workflow_status = ?, last_status_change = ? WHERE workflow_id = ?',
+                                 (ActionStatus.CANCELED.name, int(time.time()), workflow['workflow_id']))
             except SimulatedCrash:
                 raise
             except Exception as exc:
                 if raise_errors:
                     raise
-                wfmanLog(f"Could not perform pending cancellation for job {job['job_id']}: {exc}")
+                wfmanLog(f"Could not perform pending cancellation for workflow {workflow['workflow_id']}: {exc}")
 
-    def jobState(self, job_id):
+    def workflowState(self, workflow_id):
         """Read a workflow and derive its head fields from the ordered action rows.
 
-        job_id (int) is a positive workflow database ID. Return dict with the
+        workflow_id (int) is a positive workflow database ID. Return dict with the
         fields documented by listWorkflows; unknown IDs raise ValueError. Return
         only workflow/head metadata, without loading serialized action definitions.
         No execution or API poll occurs.
         """
         with self.conn as conn:
-            result = conn.execute('SELECT job_id, job_group, submission_key, workflow_stage, workflow_status, '
+            result = conn.execute('SELECT workflow_id, workflow_group, submission_key, workflow_stage, workflow_status, '
                                   'last_status_change, head_action_id, head_action_class, head_action_type, '
-                                  'head_action_status FROM workflow_heads WHERE job_id = ?', (job_id,)).fetchone()
+                                  'head_action_status FROM workflow_heads WHERE workflow_id = ?', (workflow_id,)).fetchone()
             if result is None:
-                raise ValueError(f'Workflow {job_id} does not exist')
+                raise ValueError(f'Workflow {workflow_id} does not exist')
             row = dict(result)
             row['workflow_status'] = ActionStatus[row['workflow_status']]
             row['head_action_status'] = ActionStatus[row['head_action_status']]
             row['head_action_class'] = ActionClass[row['head_action_class']]
             return row
 
-    def listWorkflows(self, job_id: int | None = None,
+    def listWorkflows(self, workflow_id: int | None = None,
                       statuses: ActionStatus | list[ActionStatus] | None = None) -> list[dict]:
-        """Return workflow state dictionaries, ordered by job ID.
+        """Return workflow state dictionaries, ordered by workflow ID.
 
         Args:
-            job_id (int | None): Positive database workflow ID, not a list
+            workflow_id (int | None): Positive database workflow ID, not a list
                 index. None selects all recorded workflows, including terminal
                 records. An existing ID excluded by statuses returns no rows.
             statuses (ActionStatus | list[ActionStatus] | None): Allowed overall
-                workflow statuses, as returned by jobStatus. List entries are
+                workflow statuses, as returned by workflowStatus. List entries are
                 combined with OR and the ID/status filters with AND. None
                 permits all statuses; [] matches none. COMPLETED means every
                 step finished, not intermediate head-action completion.
 
         Returns:
-            list[dict]: Matching jobState dictionaries in ascending job_id
+            list[dict]: Matching workflowState dictionaries in ascending workflow_id
             order, or [] if nothing matches. The list positions are zero-based
             and are independent of workflow/action IDs. Each dictionary has:
-                job_id (int): Positive workflow database key.
-                job_group (str | None): Group supplied when enqueuing.
+                workflow_id (int): Positive workflow database key.
+                workflow_group (str | None): Group supplied when enqueuing.
                 submission_key (str | None): Optional database-unique submission
                     identifier, retained after completion/cancellation.
                 workflow_status (ActionStatus): Persisted overall status; ACTIVE
@@ -445,7 +445,7 @@ class JobData:
                 workflow_stage (int): Zero-based action position, -1 before
                     the first action, or the action count after full completion.
                 head_action_id (int | None): Positive action database key,
-                    assigned at enqueue, independent of job_id; None after full completion.
+                    assigned at enqueue, independent of workflow_id; None after full completion.
                 head_action_type (str | None): Action class name; 'NoneType'
                     after normal workflow completion.
                 head_action_class (ActionClass): COMPUTE, TRANSFER, API, or NONE.
@@ -455,14 +455,14 @@ class JobData:
                     whole seconds, not a guarantee of the last API poll time.
 
         Raises:
-            ValueError: job_id is invalid or an explicit ID does not exist.
+            ValueError: workflow_id is invalid or an explicit ID does not exist.
             TypeError: statuses is not an ActionStatus or a list of them.
 
         This reads recorded state without polling or progressing workflows.
-        Use the JobManager lock when its background thread is running.
+        Use the WorkflowManager lock when its background thread is running.
         """
-        if job_id is not None and (type(job_id) is not int or job_id < 1):
-            raise ValueError("job_id must be a positive integer")
+        if workflow_id is not None and (type(workflow_id) is not int or workflow_id < 1):
+            raise ValueError("workflow_id must be a positive integer")
         if isinstance(statuses, ActionStatus):
             statuses = [statuses]
         elif statuses is not None and (
@@ -472,25 +472,25 @@ class JobData:
         with self.conn as conn:
             # Filter by the persisted overall status in SQL, retaining the error
             # for an unknown explicit ID even when a status filter is supplied.
-            if job_id is not None and conn.execute('SELECT 1 FROM jobs WHERE job_id = ?', (job_id,)).fetchone() is None:
-                raise ValueError(f'Workflow {job_id} does not exist')
-            query = 'SELECT job_id FROM jobs'
+            if workflow_id is not None and conn.execute('SELECT 1 FROM workflows WHERE workflow_id = ?', (workflow_id,)).fetchone() is None:
+                raise ValueError(f'Workflow {workflow_id} does not exist')
+            query = 'SELECT workflow_id FROM workflows'
             has_where = False
             params = []
-            if job_id is not None:
-                query += (' AND ' if has_where else ' WHERE ') + 'job_id = ?'
+            if workflow_id is not None:
+                query += (' AND ' if has_where else ' WHERE ') + 'workflow_id = ?'
                 has_where = True
-                params.append(job_id)
+                params.append(workflow_id)
             if statuses is not None:
                 query += (' AND ' if has_where else ' WHERE ') + 'workflow_status IN (' + ','.join('?' for _ in statuses) + ')'
                 params.extend(status.name for status in statuses)
-            rows = conn.execute(query + ' ORDER BY job_id', params).fetchall()
-            return [self.jobState(row['job_id']) for row in rows]
+            rows = conn.execute(query + ' ORDER BY workflow_id', params).fetchall()
+            return [self.workflowState(row['workflow_id']) for row in rows]
 
-    def headActionStatus(self, job_id, *, force_poll=False, return_api_status=False):
+    def headActionStatus(self, workflow_id, *, force_poll=False, return_api_status=False):
         """Return the head action's ActionStatus, optionally with its API status.
 
-        job_id (int) identifies a workflow database row. force_poll (bool,
+        workflow_id (int) identifies a workflow database row. force_poll (bool,
         default False) requests earlier API polls for all ACTIVE/PROVIDER_HELD heads and copies
         their currently recorded statuses without waiting for provider replies.
         This does not submit actions or advance workflow steps. Poll failures
@@ -503,13 +503,13 @@ class JobData:
         string (for example 'queued') or manager-side submission reason
         ('INSUFFICIENT_WALLET_BALANCE'), or None before execution begins, before a remote status is known
         or when no head action exists. This is not the full API response body.
-        Use jobStatus to distinguish intermediate completion from a finished
-        workflow. Access through JobManager's lock while its thread is running.
+        Use workflowStatus to distinguish intermediate completion from a finished
+        workflow. Access through WorkflowManager's lock while its thread is running.
         """
-        state = self.jobState(job_id)
+        state = self.workflowState(workflow_id)
         if force_poll:
             self.progressActiveActions(force_poll=True)
-            state = self.jobState(job_id)
+            state = self.workflowState(workflow_id)
         action_status = state['head_action_status']
         if not return_api_status:
             return action_status
@@ -523,18 +523,18 @@ class JobData:
             )
         return action_status, api_status
 
-    def jobStatus(self, job_id: int) -> ActionStatus:
+    def workflowStatus(self, workflow_id: int) -> ActionStatus:
         """Read the persisted overall status of a workflow without polling its head.
 
-        job_id (int) is a positive workflow database ID, not a stage position.
+        workflow_id (int) is a positive workflow database ID, not a stage position.
         Return ActionStatus; unknown IDs raise ValueError. ACTIVE includes
         scheduling, provider-held, and completed intermediate heads. No workflow advancement,
         action deserialization, or API request occurs.
         """
         with self.conn as conn:
-            row = conn.execute('SELECT workflow_status FROM jobs WHERE job_id = ?', (job_id,)).fetchone()
+            row = conn.execute('SELECT workflow_status FROM workflows WHERE workflow_id = ?', (workflow_id,)).fetchone()
             if row is None:
-                raise ValueError(f'Workflow {job_id} does not exist')
+                raise ValueError(f'Workflow {workflow_id} does not exist')
             return ActionStatus[row['workflow_status']]
 
     def _recordActionStatuses(self, updates: list[tuple[str, int, int]],
@@ -561,18 +561,18 @@ class JobData:
                     continue
 
                 if status in (ActionStatus.CANCELING.name, ActionStatus.CANCELED.name):
-                    observed_cancellation.add(conn.execute('SELECT job_id FROM actions WHERE action_id = ?',
+                    observed_cancellation.add(conn.execute('SELECT workflow_id FROM actions WHERE action_id = ?',
                                                            (action_id,)).fetchone()[0])
 
                 # Keep the execution projection and overall outcome in one
                 # transaction. A late poll must never clear cancellation intent.
                 # A canceled head still needs workflow reconciliation to close
                 # queued stages, so its workflow first records CANCELING.
-                conn.execute("UPDATE jobs SET workflow_status = CASE WHEN ? = 'CANCELED' THEN 'CANCELING' ELSE "
+                conn.execute("UPDATE workflows SET workflow_status = CASE WHEN ? = 'CANCELED' THEN 'CANCELING' ELSE "
                              '(SELECT workflow_status FROM action_status_mapping WHERE action_status = ?) END, '
                              'last_status_change = ? '
-                             'WHERE (job_id, workflow_stage) = '
-                             '(SELECT job_id, workflow_stage FROM actions WHERE action_id = ?) '
+                             'WHERE (workflow_id, workflow_stage) = '
+                             '(SELECT workflow_id, workflow_stage FROM actions WHERE action_id = ?) '
                              'AND workflow_status IN (?, ?)',
                              (status, status, timestamp, action_id, ActionStatus.PENDING.name, ActionStatus.ACTIVE.name))
 
@@ -592,7 +592,7 @@ class JobData:
         pending_actions = []
         with self.conn as conn:
             # Select current heads without consulting any action-manager tables.
-            query = ('SELECT job_id, workflow_stage, head_action_status FROM workflow_heads '
+            query = ('SELECT workflow_id, workflow_stage, head_action_status FROM workflow_heads '
                      'WHERE head_action_class != ? AND workflow_status IN (?, ?)')
             params = [ActionClass.NONE.name, ActionStatus.PENDING.name, ActionStatus.ACTIVE.name]
             if condition == ('PENDING', None):
@@ -602,12 +602,12 @@ class JobData:
                 query += ' AND head_action_status = ?'
                 params.append(ActionStatus.COMPLETED.name)
             elif condition[0] == 'VALID_IN' and isinstance(condition[1], list):
-                query += ' AND job_id IN (' + ','.join('?' for _ in condition[1]) + ')'
+                query += ' AND workflow_id IN (' + ','.join('?' for _ in condition[1]) + ')'
                 query += ' AND head_action_status IN (?, ?)'
                 params.extend([*condition[1], ActionStatus.PENDING.name, ActionStatus.COMPLETED.name])
             else:
                 raise ValueError(f'Unknown condition {condition}')
-            jobs = conn.execute(query + ' ORDER BY job_id', params).fetchall()
+            workflows = conn.execute(query + ' ORDER BY workflow_id', params).fetchall()
             completed = {}
 
             def completedProducer(key: str) -> bool:
@@ -616,25 +616,25 @@ class JobData:
                     completed[key] = self._dependencyKeyState(conn, key)['producer_has_completed']
                 return completed[key]
 
-            for job in jobs:
+            for workflow in workflows:
                 if max_starts is not None and len(pending_actions) >= max_starts:
                     break
                 # PENDING selects its current action; COMPLETED advances once.
                 # The -1 pre-start convention becomes stage zero on first start.
-                stage = max(job['workflow_stage'], 0)
-                if job['head_action_status'] == ActionStatus.COMPLETED.name:
+                stage = max(workflow['workflow_stage'], 0)
+                if workflow['head_action_status'] == ActionStatus.COMPLETED.name:
                     stage += 1
-                action = conn.execute('SELECT action_id, action_class, depends_on FROM actions WHERE job_id = ? AND workflow_stage = ?',
-                                      (job['job_id'], stage)).fetchone()
+                action = conn.execute('SELECT action_id, action_class, depends_on FROM actions WHERE workflow_id = ? AND workflow_stage = ?',
+                                      (workflow['workflow_id'], stage)).fetchone()
                 now = int(time.time())
                 ready = action is None or evaluateDependencies(
                     None if action['depends_on'] is None else json.loads(action['depends_on']), completedProducer)
                 workflow_status = (ActionStatus.COMPLETED if action is None else
                                    ActionStatus.ACTIVE if ready else ActionStatus.PENDING)
-                head_stage = -1 if not ready and job['workflow_stage'] == -1 else stage
-                conn.execute('UPDATE jobs SET workflow_stage = ?, workflow_status = ?, last_status_change = ? '
-                             'WHERE job_id = ? AND (workflow_stage != ? OR workflow_status != ?)',
-                             (head_stage, workflow_status.name, now, job['job_id'], head_stage, workflow_status.name))
+                head_stage = -1 if not ready and workflow['workflow_stage'] == -1 else stage
+                conn.execute('UPDATE workflows SET workflow_stage = ?, workflow_status = ?, last_status_change = ? '
+                             'WHERE workflow_id = ? AND (workflow_stage != ? OR workflow_status != ?)',
+                             (head_stage, workflow_status.name, now, workflow['workflow_id'], head_stage, workflow_status.name))
                 if action is None or not ready:
                     continue
                 conn.execute('UPDATE actions SET action_status = ?, last_status_change = ? WHERE action_id = ?',
@@ -643,44 +643,44 @@ class JobData:
                 # definitions after eligibility and capacity have been checked.
                 details = conn.execute('SELECT details FROM actions WHERE action_id = ?', (action['action_id'],)).fetchone()[0]
                 pending_actions.append((ActionClass[action['action_class']], _unser(details),
-                                        job['job_id'], action['action_id']))
+                                        workflow['workflow_id'], action['action_id']))
 
-        self._maybeSimulateCrash('job_head_scheduling_persisted')
+        self._maybeSimulateCrash('workflow_head_scheduling_persisted')
 
         # Hand off the same durable IDs on initial submission and crash recovery.
         updates = []
-        for action_class, action, job_id, action_id in pending_actions:
-            wfmanLog(f'Initiating action of type {action_class.name} for {job_id}')
+        for action_class, action, workflow_id, action_id in pending_actions:
+            wfmanLog(f'Initiating action of type {action_class.name} for {workflow_id}')
             manager = self.action_man[action_class]
-            manager.startOrResumeAction(action, job_id, action_id)
+            manager.startOrResumeAction(action, workflow_id, action_id)
             try:
                 status, _ = manager.queryRecordedStatus(action_id)
             except SimulatedCrash:
                 raise
             except Exception as exc:
-                wfmanLog(f'Could not poll action {action_id} for job {job_id}: {exc}')
+                wfmanLog(f'Could not poll action {action_id} for workflow {workflow_id}: {exc}')
                 continue
             updates.append((status.name, int(time.time()), action_id))
-        self._maybeSimulateCrash('action_state_persisted_before_job_head_update')
+        self._maybeSimulateCrash('action_state_persisted_before_workflow_head_update')
         self._recordActionStatuses(updates, ActionStatus.SCHEDULING)
 
-    def startWorkflows(self, job_ids: list | None = None):
+    def startWorkflows(self, workflow_ids: list | None = None):
         """Start dependency-ready pending workflows or automatically fill capacity.
 
-        job_ids (list[int] | None) contains workflow database IDs. None considers
+        workflow_ids (list[int] | None) contains workflow database IDs. None considers
         all pending workflows in ID order, counting only eligible starts toward
         max_workflows_active. An explicit list bypasses that cap but still checks
         dependencies. Return None. Recover scheduling heads first; blocked work
         cannot hide ready workflows behind the automatic scheduling limit.
         """
         self.submitSchedulingActions()
-        if job_ids is None:
+        if workflow_ids is None:
             with self.conn as conn:
-                count = conn.execute('SELECT COUNT(*) FROM jobs WHERE workflow_status IN (?, ?)',
+                count = conn.execute('SELECT COUNT(*) FROM workflows WHERE workflow_status IN (?, ?)',
                                      (ActionStatus.ACTIVE.name, ActionStatus.CANCELING.name)).fetchone()[0]
             self.progressWorkflows(('PENDING', None), max_starts=max(0, self.max_workflows_active - count))
-        elif job_ids:
-            self.progressWorkflows(('VALID_IN', job_ids))
+        elif workflow_ids:
+            self.progressWorkflows(('VALID_IN', workflow_ids))
 
     def progressActiveWorkflows(self):
         """Advance successfully completed heads to their next stage or workflow completion.
@@ -699,19 +699,19 @@ class JobData:
         and definition; action managers recover previously accepted submissions.
         """
         with self.conn as conn:
-            jobs = conn.execute('SELECT * FROM workflow_heads WHERE head_action_status = ? AND workflow_status = ?',
+            workflows = conn.execute('SELECT * FROM workflow_heads WHERE head_action_status = ? AND workflow_status = ?',
                                 (ActionStatus.SCHEDULING.name, ActionStatus.ACTIVE.name)).fetchall()
         updates = []
-        for job in jobs:
-            manager = self.action_man[ActionClass[job['head_action_class']]]
-            action_id = job['head_action_id']
-            manager.startOrResumeAction(_unser(job['action_details']), job['job_id'], action_id)
+        for workflow in workflows:
+            manager = self.action_man[ActionClass[workflow['head_action_class']]]
+            action_id = workflow['head_action_id']
+            manager.startOrResumeAction(_unser(workflow['action_details']), workflow['workflow_id'], action_id)
             try:
                 status, _ = manager.queryRecordedStatus(action_id)
             except SimulatedCrash:
                 raise
             except Exception as exc:
-                wfmanLog(f"Could not read action {action_id} for job {job['job_id']}: {exc}")
+                wfmanLog(f"Could not read action {action_id} for workflow {workflow['workflow_id']}: {exc}")
                 continue
             updates.append((status.name, int(time.time()), action_id))
         self._recordActionStatuses(updates, ActionStatus.SCHEDULING)
@@ -724,24 +724,24 @@ class JobData:
         IDs to their new head statuses. Log read failures and retain cached state.
         """
         with self.conn as conn:
-            jobs = conn.execute('SELECT * FROM workflow_heads WHERE head_action_status IN '
+            workflows = conn.execute('SELECT * FROM workflow_heads WHERE head_action_status IN '
                                 "(SELECT action_status FROM action_status_groups WHERE group_name = 'LIVE') "
                                 'AND workflow_status = ?', (ActionStatus.ACTIVE.name,)).fetchall()
         updates = {}
         recorded = []
-        for job in jobs:
-            manager = self.action_man[ActionClass[job['head_action_class']]]
+        for workflow in workflows:
+            manager = self.action_man[ActionClass[workflow['head_action_class']]]
             try:
-                status, _ = manager.queryRecordedStatus(job['head_action_id'], force_update=force_poll)
+                status, _ = manager.queryRecordedStatus(workflow['head_action_id'], force_update=force_poll)
             except SimulatedCrash:
                 raise
             except Exception as exc:
-                wfmanLog(f"Could not poll action {job['head_action_id']} for job {job['job_id']}: {exc}")
+                wfmanLog(f"Could not poll action {workflow['head_action_id']} for workflow {workflow['workflow_id']}: {exc}")
                 continue
-            if status.name != job['head_action_status']:
-                updates[job['job_id']] = status
-                recorded.append((status.name, int(time.time()), job['head_action_id']))
-                wfmanLog(f"Progressed job {job['job_id']} action {job['head_action_type']} to {status.name}")
+            if status.name != workflow['head_action_status']:
+                updates[workflow['workflow_id']] = status
+                recorded.append((status.name, int(time.time()), workflow['head_action_id']))
+                wfmanLog(f"Progressed workflow {workflow['workflow_id']} action {workflow['head_action_type']} to {status.name}")
         self._recordActionStatuses(recorded, ActionStatusGroup.LIVE.value)
         return updates
 
@@ -768,7 +768,7 @@ class JobData:
         elif not isinstance(statuses, list):
             raise TypeError('statuses must be an ActionStatus or list of ActionStatus')
         with self.conn as conn:
-            return conn.execute('SELECT COUNT(*) FROM jobs WHERE workflow_status IN (' +
+            return conn.execute('SELECT COUNT(*) FROM workflows WHERE workflow_status IN (' +
                                 ','.join('?' for _ in statuses) + ')',
                                 tuple(status.name for status in statuses)).fetchone()[0]
 
@@ -783,22 +783,22 @@ class JobData:
     def resumeActions(self) -> None:
         """Recover workflow cancellations before restoring ordinary execution supervision.
 
-        Take no arguments; return None. CANCELING workflows use the same JobData
+        Take no arguments; return None. CANCELING workflows use the same WorkflowData
         cancellation processing as initial cancellation, including heads that
         never started or have completed. Restore workers only for unfinished ACTIVE
         workflows. Do not submit pending stages or restart terminal workflows.
         """
         self.performPendingCancellations()
         with self.conn as conn:
-            jobs = conn.execute('SELECT * FROM workflow_heads WHERE workflow_status = ? AND '
+            workflows = conn.execute('SELECT * FROM workflow_heads WHERE workflow_status = ? AND '
                                 '(head_action_status IN '
                                 "(SELECT action_status FROM action_status_groups WHERE group_name = 'EXECUTING') "
                                 'OR head_action_status = ?)',
                                 (ActionStatus.ACTIVE.name, ActionStatus.CANCELING.name)).fetchall()
-        for job in jobs:
-            action = _unser(job['action_details'])
-            manager = self.action_man[ActionClass[job['head_action_class']]]
-            if job['head_action_status'] == ActionStatus.CANCELING.name:
-                manager.cancelOrResumeCancelingAction(job['head_action_id'], recovery=(action, job['job_id']))
+        for workflow in workflows:
+            action = _unser(workflow['action_details'])
+            manager = self.action_man[ActionClass[workflow['head_action_class']]]
+            if workflow['head_action_status'] == ActionStatus.CANCELING.name:
+                manager.cancelOrResumeCancelingAction(workflow['head_action_id'], recovery=(action, workflow['workflow_id']))
             else:
-                manager.startOrResumeAction(action, job['job_id'], job['head_action_id'])
+                manager.startOrResumeAction(action, workflow['workflow_id'], workflow['head_action_id'])

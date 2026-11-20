@@ -16,16 +16,16 @@ from amscjobmanager.globus_transfer_action import GlobusDataTransfers
 class DirectAsyncActions:
     """Execute asynchronous-manager reconciliation on the unit-test caller thread."""
 
-    def startOrResumeAction(self, action, job_id, action_id):
-        """Record action/job_id/action_id and run one production reconciliation; return None."""
-        self._recordSchedulingIntentIfNew(action, job_id, action_id)
+    def startOrResumeAction(self, action, workflow_id, action_id):
+        """Record action/workflow_id/action_id and run one production reconciliation; return None."""
+        self._recordSchedulingIntentIfNew(action, workflow_id, action_id)
         self._reconcileScheduledAction(action_id)
 
     def cancelOrResumeCancelingAction(self, action_id, *, recovery=None):
-        """Record/cancel positive action_id with optional (action, job_id) recovery; return None."""
+        """Record/cancel positive action_id with optional (action, workflow_id) recovery; return None."""
         if recovery is not None:
-            action, job_id = recovery
-            self._recordSchedulingIntentIfNew(action, job_id, action_id)
+            action, workflow_id = recovery
+            self._recordSchedulingIntentIfNew(action, workflow_id, action_id)
         self._recordCancelingIntentIfNotAlready(action_id)
         if self.queryRecordedStatus(action_id)[0] != ActionStatus.CANCELED:
             self._reconcileCancelingAction(action_id)
@@ -58,8 +58,8 @@ class DirectGlobusActions(DirectAsyncActions, GlobusDataTransfers):
 class DirectAPIActions(APIActions):
     """Production API sequence execution without background scheduling in unit tests."""
 
-    def startOrResumeAction(self, action, job_id, action_id):
-        """Record action/job_id/action_id and execute its saved sequence; return None."""
-        if self._recordAction(action, job_id, action_id, ActionStatus.SCHEDULING):
+    def startOrResumeAction(self, action, workflow_id, action_id):
+        """Record action/workflow_id/action_id and execute its saved sequence; return None."""
+        if self._recordAction(action, workflow_id, action_id, ActionStatus.SCHEDULING):
             self._maybeSimulateCrash('action_intent_persisted')
         self._executeAction(action_id)

@@ -1,4 +1,4 @@
-"""Transport-independent input/output models for JobManager operations."""
+"""Transport-independent input/output models for WorkflowManager operations."""
 
 from typing import Literal
 from pydantic import BaseModel, Field, StrictBool, StrictStr
@@ -11,7 +11,7 @@ class SubmitWorkflowArguments(FunctionArguments):
     """Ordered stages (Workflow), optional group label and exact submission retry key."""
 
     stages: Workflow = Field(description='Ordered nonempty list of execute_job, batch_script, globus_transfer or api stages, with type tags.')
-    job_group: StrictStr | None = Field(default=None, description='Optional nonunique campaign/group label.')
+    workflow_group: StrictStr | None = Field(default=None, description='Optional nonunique campaign/group label.')
     submission_key: StrictStr | None = Field(default=None, description='Optional exact-string idempotency key; reuse after an uncertain response to retrieve the original workflow.')
 
 
@@ -51,7 +51,7 @@ class WorkflowSummary(BaseModel):
 
     Fields:
         workflow_id (int): Positive database ID, not the response-list index.
-        job_group (str | None): Optional group supplied at submission.
+        workflow_group (str | None): Optional group supplied at submission.
         workflow_status (str): Overall ActionStatus name. ACTIVE includes
             scheduling and completed intermediate steps; COMPLETED means done.
         workflow_stage (int): Zero-based action position, -1 before starting,
@@ -72,7 +72,7 @@ class WorkflowSummary(BaseModel):
     """
 
     workflow_id: int = Field(description='Positive workflow database ID, not a response-list index.')
-    job_group: str | None = Field(description='Optional group supplied when the workflow was enqueued.')
+    workflow_group: str | None = Field(description='Optional group supplied when the workflow was enqueued.')
     workflow_status: str = Field(description='Overall status. COMPLETED means every step finished; ACTIVE includes provider-queued work and intermediate completion; dependency waits are PENDING.')
     workflow_stage: int = Field(description='Zero-based action position; -1 before starting, or the action count after full completion.')
     head_action_id: int | None = Field(description='Current positive action ID, assigned at enqueue and independent of workflow ID; null after full workflow completion.')

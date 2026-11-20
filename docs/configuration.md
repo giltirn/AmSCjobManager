@@ -117,7 +117,7 @@ namespace and one accessible to the manager's OS. The configured staging root
 grants permission to write there; it need not be a sandbox directory.
 
 The workflow database filename, polling frequency, and workflow concurrency limit
-are arguments to `JobManager`, not fields in this JSON file.
+are arguments to `WorkflowManager`, not fields in this JSON file.
 
 ## Authentication
 

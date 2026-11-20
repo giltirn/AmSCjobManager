@@ -12,14 +12,14 @@ from action_manager_helpers import DirectComputeActions
 from amscjobmanager.action_manager import ActionStatus, SimulatedCrash
 from amscjobmanager.actions_base import ActionClass
 from amscjobmanager.compute_actions import ExecuteBatchScriptComputeAction
-from amscjobmanager.job_data import JobData
+from amscjobmanager.workflow_data import WorkflowData
 
 
 class ComputeResourceSchedulingTests(unittest.TestCase):
     def setUp(self):
         # These tests isolate the checked-in reconciliation bodies; real
         # asynchronous lifecycles and crash recovery have separate integration tests.
-        adapter = patch('amscjobmanager.job_data.ComputeActions', DirectComputeActions)
+        adapter = patch('amscjobmanager.workflow_data.ComputeActions', DirectComputeActions)
         adapter.start()
         self.addCleanup(adapter.stop)
         self.tmpdir = tempfile.TemporaryDirectory()
@@ -50,13 +50,13 @@ class ComputeResourceSchedulingTests(unittest.TestCase):
         for active_patch in (resource_patch, submission_patch, lookup_patch, status_patch):
             self.addCleanup(active_patch.stop)
 
-    def _new_job_data(self, crash_at=None, max_submission_attempts=3):
-        job_data = JobData(self.db_path, _test_crash_at=crash_at)
-        manager = job_data.action_man[ActionClass.COMPUTE]
+    def _new_workflow_data(self, crash_at=None, max_submission_attempts=3):
+        workflow_data = WorkflowData(self.db_path, _test_crash_at=crash_at)
+        manager = workflow_data.action_man[ActionClass.COMPUTE]
         manager.scheduling_retry_delay = 0
         manager.max_submission_attempts = max_submission_attempts
-        self.addCleanup(job_data.conn.close)
-        return job_data
+        self.addCleanup(workflow_data.conn.close)
+        return workflow_data
 
     @staticmethod
     def _action():
@@ -66,9 +66,9 @@ class ComputeResourceSchedulingTests(unittest.TestCase):
             gpus_per_rank=0,
         )
 
-    def _assert_scheduling_without_attempt(self, job_data, job_id):
-        self.assertEqual(job_data.jobState(job_id)["head_action_status"], ActionStatus.SCHEDULING)
-        with job_data.conn as conn:
+    def _assert_scheduling_without_attempt(self, workflow_data, workflow_id):
+        self.assertEqual(workflow_data.workflowState(workflow_id)["head_action_status"], ActionStatus.SCHEDULING)
+        with workflow_data.conn as conn:
             action = conn.execute(
                 "SELECT action_status, submission_attempts, api_key FROM computes"
             ).fetchone()
@@ -79,17 +79,17 @@ class ComputeResourceSchedulingTests(unittest.TestCase):
 
     def test_down_resource_defers_without_consuming_an_attempt(self):
         self.resource_status.return_value = False
-        job_data = self._new_job_data()
-        job_id = job_data.enqueueJob(self._action())
+        workflow_data = self._new_workflow_data()
+        workflow_id = workflow_data.enqueueWorkflow(self._action())
 
-        job_data.startWorkflows([job_id])
-        self._assert_scheduling_without_attempt(job_data, job_id)
+        workflow_data.startWorkflows([workflow_id])
+        self._assert_scheduling_without_attempt(workflow_data, workflow_id)
 
         self.resource_status.return_value = True
-        job_data.submitSchedulingActions()
+        workflow_data.submitSchedulingActions()
         self.assertEqual(self.submit.call_count, 1)
-        self.assertEqual(job_data.jobState(job_id)["head_action_status"], ActionStatus.ACTIVE)
-        with job_data.conn as conn:
+        self.assertEqual(workflow_data.workflowState(workflow_id)["head_action_status"], ActionStatus.ACTIVE)
+        with workflow_data.conn as conn:
             self.assertEqual(
                 conn.execute("SELECT submission_attempts FROM computes").fetchone()[0],
                 1,
@@ -97,17 +97,17 @@ class ComputeResourceSchedulingTests(unittest.TestCase):
 
     def test_status_query_error_defers_and_recovers_after_restart(self):
         self.resource_status.side_effect = RuntimeError("resource status unavailable")
-        job_data = self._new_job_data()
-        job_id = job_data.enqueueJob(self._action())
-        job_data.startWorkflows([job_id])
-        self._assert_scheduling_without_attempt(job_data, job_id)
-        job_data.conn.close()
+        workflow_data = self._new_workflow_data()
+        workflow_id = workflow_data.enqueueWorkflow(self._action())
+        workflow_data.startWorkflows([workflow_id])
+        self._assert_scheduling_without_attempt(workflow_data, workflow_id)
+        workflow_data.conn.close()
 
         self.resource_status.side_effect = None
-        recovered = self._new_job_data()
+        recovered = self._new_workflow_data()
         recovered.submitSchedulingActions()
         self.assertEqual(self.submit.call_count, 1)
-        self.assertEqual(recovered.jobState(job_id)["head_action_status"], ActionStatus.ACTIVE)
+        self.assertEqual(recovered.workflowState(workflow_id)["head_action_status"], ActionStatus.ACTIVE)
 
     def test_crash_around_resource_check_preserves_unattempted_intent(self):
         for point in ("before_resource_status_check", "resource_status_checked"):
@@ -115,74 +115,74 @@ class ComputeResourceSchedulingTests(unittest.TestCase):
                 self.db_path = Path(self.tmpdir.name) / f"{point}.sqlite"
                 self.submit.reset_mock()
                 self.resource_status.reset_mock()
-                job_data = self._new_job_data(crash_at=point)
-                job_id = job_data.enqueueJob(self._action())
+                workflow_data = self._new_workflow_data(crash_at=point)
+                workflow_id = workflow_data.enqueueWorkflow(self._action())
 
                 with self.assertRaises(SimulatedCrash) as crash:
-                    job_data.startWorkflows([job_id])
+                    workflow_data.startWorkflows([workflow_id])
                 self.assertEqual(crash.exception.point, point)
-                self._assert_scheduling_without_attempt(job_data, job_id)
-                job_data.conn.close()
+                self._assert_scheduling_without_attempt(workflow_data, workflow_id)
+                workflow_data.conn.close()
 
-                recovered = self._new_job_data()
+                recovered = self._new_workflow_data()
                 recovered.submitSchedulingActions()
                 self.assertEqual(self.submit.call_count, 1)
                 self.assertEqual(
-                    recovered.jobState(job_id)["head_action_status"], ActionStatus.ACTIVE
+                    recovered.workflowState(workflow_id)["head_action_status"], ActionStatus.ACTIVE
                 )
                 recovered.conn.close()
 
     def test_recovery_finds_remote_job_before_checking_resource(self):
-        job_data = self._new_job_data(crash_at="remote_submission_completed")
-        job_id = job_data.enqueueJob(self._action())
+        workflow_data = self._new_workflow_data(crash_at="remote_submission_completed")
+        workflow_id = workflow_data.enqueueWorkflow(self._action())
         with self.assertRaises(SimulatedCrash):
-            job_data.startWorkflows([job_id])
+            workflow_data.startWorkflows([workflow_id])
         self.assertEqual(self.submit.call_count, 1)
-        job_data.conn.close()
+        workflow_data.conn.close()
 
         self.resource_status.reset_mock(side_effect=True)
         self.resource_status.side_effect = AssertionError("availability check must be skipped")
-        recovered = self._new_job_data()
+        recovered = self._new_workflow_data()
         recovered.submitSchedulingActions()
         self.resource_status.assert_not_called()
         self.assertEqual(self.submit.call_count, 1)
-        self.assertEqual(recovered.jobState(job_id)["head_action_status"], ActionStatus.ACTIVE)
+        self.assertEqual(recovered.workflowState(workflow_id)["head_action_status"], ActionStatus.ACTIVE)
 
     def test_down_resource_does_not_finalize_exhausted_submission(self):
         self.submit.side_effect = RuntimeError("remote submission failure")
-        job_data = self._new_job_data(max_submission_attempts=1)
-        job_id = job_data.enqueueJob(self._action())
-        job_data.startWorkflows([job_id])
+        workflow_data = self._new_workflow_data(max_submission_attempts=1)
+        workflow_id = workflow_data.enqueueWorkflow(self._action())
+        workflow_data.startWorkflows([workflow_id])
         self.assertEqual(self.submit.call_count, 1)
-        self.assertEqual(job_data.jobState(job_id)["head_action_status"], ActionStatus.SCHEDULING)
+        self.assertEqual(workflow_data.workflowState(workflow_id)["head_action_status"], ActionStatus.SCHEDULING)
 
         self.resource_status.return_value = False
-        job_data.submitSchedulingActions()
-        self.assertEqual(job_data.jobState(job_id)["head_action_status"], ActionStatus.SCHEDULING)
+        workflow_data.submitSchedulingActions()
+        self.assertEqual(workflow_data.workflowState(workflow_id)["head_action_status"], ActionStatus.SCHEDULING)
         self.assertEqual(self.submit.call_count, 1)
 
         self.resource_status.return_value = True
-        job_data.submitSchedulingActions()
-        self.assertEqual(job_data.jobState(job_id)["head_action_status"], ActionStatus.FAILED)
+        workflow_data.submitSchedulingActions()
+        self.assertEqual(workflow_data.workflowState(workflow_id)["head_action_status"], ActionStatus.FAILED)
         self.assertEqual(self.submit.call_count, 1)
 
     def test_crash_after_recording_attempt_keeps_name_recovery(self):
-        job_data = self._new_job_data(crash_at="before_remote_submission")
-        job_id = job_data.enqueueJob(self._action())
+        workflow_data = self._new_workflow_data(crash_at="before_remote_submission")
+        workflow_id = workflow_data.enqueueWorkflow(self._action())
         with self.assertRaises(SimulatedCrash):
-            job_data.startWorkflows([job_id])
-        with job_data.conn as conn:
+            workflow_data.startWorkflows([workflow_id])
+        with workflow_data.conn as conn:
             self.assertEqual(
                 conn.execute("SELECT submission_attempts FROM computes").fetchone()[0],
                 1,
             )
         self.submit.assert_not_called()
-        job_data.conn.close()
+        workflow_data.conn.close()
 
         self.resource_status.return_value = False
-        recovered = self._new_job_data()
+        recovered = self._new_workflow_data()
         recovered.submitSchedulingActions()
-        self.assertEqual(recovered.jobState(job_id)["head_action_status"], ActionStatus.SCHEDULING)
+        self.assertEqual(recovered.workflowState(workflow_id)["head_action_status"], ActionStatus.SCHEDULING)
         with recovered.conn as conn:
             self.assertEqual(
                 conn.execute("SELECT submission_attempts FROM computes").fetchone()[0],
@@ -192,7 +192,7 @@ class ComputeResourceSchedulingTests(unittest.TestCase):
         self.resource_status.return_value = True
         recovered.submitSchedulingActions()
         self.assertEqual(self.submit.call_count, 1)
-        self.assertEqual(recovered.jobState(job_id)["head_action_status"], ActionStatus.ACTIVE)
+        self.assertEqual(recovered.workflowState(workflow_id)["head_action_status"], ActionStatus.ACTIVE)
 
 
 if __name__ == "__main__":

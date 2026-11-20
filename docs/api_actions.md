@@ -36,7 +36,7 @@ workflow = [
 ]
 ```
 
-Enqueue this list with `JobData.enqueueJob` under the `JobManager` lock, as in
+Enqueue this list with `WorkflowData.enqueueWorkflow` under the `WorkflowManager` lock, as in
 [the workflow guide](workflows.md). For remote execution, configure the target
 and sandbox paths first. You can insert a `GlobusTransfer` stage between remote
 compute and local processing; processing will wait until the transfer succeeds.
@@ -56,7 +56,7 @@ An API stage can then copy the staged result into a permitted local directory.
 
 Filesystem mutations use the existing sandbox checks, with no `allow_unsafe`
 option. Local `/tmp` writes follow the library's existing allowance. Paths
-containing `~` are rejected. Paths support `<JOBID>`, replaced by the owning
+containing `~` are rejected. Paths support `<WORKFLOWID>`, replaced by the owning
 workflow's positive integer ID. `RunLocal` also expands this placeholder in its
 executable and argument strings. File contents are not expanded.
 
@@ -66,7 +66,7 @@ MCP submission through their `type` tags.
 
 ## Application-defined Python operations
 
-Subclass `APIActionStageBase` and implement `execute(job_id)`. No registration
+Subclass `APIActionStageBase` and implement `execute(workflow_id)`. No registration
 or manager modification is required. For example, define this class in an
 importable application module:
 
@@ -79,8 +79,8 @@ class CollectResult(APIActionStageBase):
     source_path: str
     dest_path: str
 
-    def execute(self, job_id: int) -> None:
-        """Replay-safe copy for workflow database ID job_id."""
+    def execute(self, workflow_id: int) -> None:
+        """Replay-safe copy for workflow database ID workflow_id."""
         from amscjobmanager.api_general import downloadFile
         downloadFile("local", self.dest_path, self.source_path)
 
@@ -122,7 +122,7 @@ failure reason. There are no remote task IDs or submission-attempt fields.
 
 The manager commits the action's `SCHEDULING` intent before launching its
 worker. That thread runs all remaining operations sequentially, retaining
-its stack across API calls and user queries. `JobData` need not call it again
+its stack across API calls and user queries. `WorkflowData` need not call it again
 for execution to continue. Unfinished operations leave the cursor unchanged.
 After each successful operation the worker commits `next_operation`, the zero-based
 index of the next unfinished operation. A value equal to `operation_count`
@@ -147,14 +147,14 @@ operations, even when a forced poll is requested.
 
 `queryRecordedStatus` returns `(ActionStatus, None)`: these stages have no provider
 status. `getActionInfo` includes `next_operation`, `operation_count`, operation
-type names, and `error`, alongside the common `job_id`, `api_key=None` and
+type names, and `error`, alongside the common `workflow_id`, `api_key=None` and
 `api_status=None` fields.
 
 Cancellation with no live worker records `CANCELED` directly without replaying
 or undoing operations. If an operation is still running, cancellation retains
 `CANCELING` until the execution worker finishes or acknowledges interruption,
 after which a separate cancellation worker records `CANCELED`.
-Later operations are never started. Existing file effects remain; JobData retains
+Later operations are never started. Existing file effects remain; WorkflowData retains
 its separate workflow-level cancellation recovery.
 
 ## Keep API stages short

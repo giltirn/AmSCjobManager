@@ -57,7 +57,7 @@ not implement arbitrary file renaming; use the blocking file helpers below
 when moving individual files between the manager host and a remote machine.
 
 The `GlobusTransfer` action adds a trailing slash to its destination and replaces
-`<JOBID>` in its source/destination path strings with the workflow's integer ID.
+`<WORKFLOWID>` in its source/destination path strings with the workflow's integer ID.
 The compute actions do not substitute that placeholder in their run directories.
 
 The built-in `dtn` tag selects the NERSC DTN collection. `personal` is registered

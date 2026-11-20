@@ -32,7 +32,7 @@ def stopAuthenticationWorkers() -> None:
     workers without waiting for provider calls or terminal input. Late responses
     are rejected at interruption checks. Saved credentials remain available;
     subsequent authentication calls can create fresh workers. Stopping an
-    individual action or JobManager does not call this function.
+    individual action or WorkflowManager does not call this function.
     """
     _authentication_workers.stop()
 

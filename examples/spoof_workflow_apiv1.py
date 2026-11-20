@@ -1,4 +1,4 @@
-"""Account-free reference workflow using JobManager and the SPOOF backend.
+"""Account-free reference workflow using WorkflowManager and the SPOOF backend.
 
 Run from the repository root, with the package dependencies installed:
 
@@ -40,7 +40,7 @@ import tempfile
 import time
 import uuid
 
-from amscjobmanager import ActionStatus, JobManager, api_general as api
+from amscjobmanager import ActionStatus, WorkflowManager, api_general as api
 from amscjobmanager import globals as manager_globals
 from amscjobmanager import spoof_api
 from amscjobmanager.compute_actions import ExecuteJobComputeAction
@@ -64,7 +64,7 @@ if rank == 0:
 
 
 def main() -> None:
-    """Stage fake inputs, enqueue three actions, and watch JobManager run them."""
+    """Stage fake inputs, enqueue three actions, and watch WorkflowManager run them."""
     if manager_globals.api_impl != "SPOOF":
         raise RuntimeError("Run this example in a fresh Python process with the SPOOF backend")
 
@@ -145,7 +145,7 @@ def main() -> None:
         perlmutter_endpoint = "perlmutter"
         personal_collection = config.globus_personal_endpoint.endpoint_uuid
 
-        # 2. Build the sequential workflow. JobManager owns submission,
+        # 2. Build the sequential workflow. WorkflowManager owns submission,
         # polling, action ordering and durable state; no direct executeJob or
         # globusCopy calls are needed here. Transfer destinations are directories.
         workflow = [
@@ -170,35 +170,35 @@ def main() -> None:
             ),
         ]
 
-        # 3. Run the actual background JobManager. Its database is real and
+        # 3. Run the actual background WorkflowManager. Its database is real and
         # on disk here; use a persistent filename to retain state in an application.
-        manager = JobManager(filename=str(local_dir / "workflow.sqlite"), poll_freq=0,
+        manager = WorkflowManager(filename=str(local_dir / "workflow.sqlite"), poll_freq=0,
                              max_workflows_active=1)
         try:
-            with manager as jobs:
-                job_id = jobs.enqueueJob(workflow)
-            print(f"\nEnqueued workflow {job_id}: transfer -> jobspec compute -> transfer")
+            with manager as workflows:
+                workflow_id = workflows.enqueueWorkflow(workflow)
+            print(f"\nEnqueued workflow {workflow_id}: transfer -> jobspec compute -> transfer")
             manager.start()
             previous_state = None
             while True:
                 # Always access the manager's database under its lock.
-                with manager as jobs:
-                    status = jobs.jobStatus(job_id)
-                    state = jobs.jobState(job_id)
+                with manager as workflows:
+                    status = workflows.workflowStatus(workflow_id)
+                    state = workflows.workflowState(workflow_id)
                 summary = (status.name, state["workflow_stage"], state["head_action_type"])
                 if summary != previous_state:
-                    print(f"Workflow {job_id}: {summary}")
+                    print(f"Workflow {workflow_id}: {summary}")
                     previous_state = summary
                 if status == ActionStatus.COMPLETED:
                     break
                 if status == ActionStatus.FAILED:
-                    raise RuntimeError(f"Workflow {job_id} failed: {state}")
+                    raise RuntimeError(f"Workflow {workflow_id} failed: {state}")
                 if not manager.isAlive():
-                    raise RuntimeError("JobManager stopped before the workflow completed")
+                    raise RuntimeError("WorkflowManager stopped before the workflow completed")
                 time.sleep(0.2)
         finally:
             manager.stop(wait_until_done=False)
-            manager.job_data.conn.close()
+            manager.workflow_data.conn.close()
 
         # SPOOF records action events, allowing inspection without pretending
         # that the calculation ran or that result.txt was really generated.

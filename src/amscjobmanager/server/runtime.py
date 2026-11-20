@@ -5,7 +5,7 @@ from typing import Callable
 
 from ..logging import wfmanLog
 from .functions import FunctionError, FunctionRegistry
-from ..manager import JobManager
+from ..manager import WorkflowManager
 from ..workers import Workers, WorkerInterrupted, checkForThreadCurrentWorkerInterruption
 from ..user_queries import UserQueryQueue
 
@@ -13,11 +13,11 @@ from ..user_queries import UserQueryQueue
 class ServerRuntime:
     """Own server startup, its manager and an in-memory question/response queue."""
 
-    def __init__(self, initialize_manager: Callable[[], JobManager]):
+    def __init__(self, initialize_manager: Callable[[], WorkflowManager]):
         """Prepare startup without constructing a manager or starting threads.
 
         initialize_manager (callable) takes no arguments, configures the API and
-        returns a new JobManager. Return None. Its work runs later on a startup
+        returns a new WorkflowManager. Return None. Its work runs later on a startup
         worker so the listener can serve questions during configuration/recovery.
         queries (UserQueryQueue) belongs to this runtime's server session.
         """
@@ -32,7 +32,7 @@ class ServerRuntime:
         self._startup_worker = None
 
     @property
-    def manager(self) -> JobManager | None:
+    def manager(self) -> WorkflowManager | None:
         """Return the running manager, or None before readiness/after shutdown.
 
         Take no arguments. Readiness is publication after successful startup;
@@ -76,11 +76,11 @@ class ServerRuntime:
         channel (str) selects mcp/admin; name (str) is a registered name;
         arguments (dict) are validated against the registered model. Return
         (JSON result envelope dict, acknowledgment str). The admin transport must
-        authenticate before calling. Action operations acquire JobData here;
-        JobManager adapters own their locks, and query callbacks need no manager.
+        authenticate before calling. Action operations acquire WorkflowData here;
+        WorkflowManager adapters own their locks, and query callbacks need no manager.
         No retries or bound managers are retained.
         """
-        # Query-provider operations remain available without a JobManager.
+        # Query-provider operations remain available without a WorkflowManager.
         if self._query_functions.hasFunction(channel, name):
             return self._query_functions.invoke(None, channel, name, arguments, query_provider=self.queries)
         self.describeFunctions(channel)
@@ -109,8 +109,8 @@ class ServerRuntime:
                 checkForThreadCurrentWorkerInterruption()
                 manager = self._initialize_manager()
                 checkForThreadCurrentWorkerInterruption()
-                with manager as jobs:
-                    functions = FunctionRegistry(jobs, manager=manager, query_provider=self.queries)
+                with manager as workflows:
+                    functions = FunctionRegistry(workflows, manager=manager, query_provider=self.queries)
                 with self._lock:
                     if self._state != 'starting':
                         raise WorkerInterrupted('Server startup was stopped')
@@ -147,7 +147,7 @@ class ServerRuntime:
                 raise
 
     def stop(self) -> None:
-        """Shut down questions, startup and the manager without canceling remote jobs.
+        """Shut down questions, startup and the manager without canceling remote workflows.
 
         Take no arguments; return None. Close the queue before releasing waiting
         workers, and close manager storage. Repeated stop is safe. A slow API

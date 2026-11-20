@@ -11,7 +11,7 @@ from pydantic import ValidationError
 
 from amscjobmanager import api_general, globals as manager_globals, local_api
 from amscjobmanager.iri_api import auth, compute, discovery, filesystem, globus, resources, state
-from amscjobmanager.job_data import JobData
+from amscjobmanager.workflow_data import WorkflowData
 from amscjobmanager.manager_config import readManagerConfigFile
 from amscjobmanager.manager_config_models import ManagerConfig
 
@@ -163,7 +163,7 @@ class ExplicitPathTests(unittest.TestCase):
         # accidentally create credentials or a database in the user's home.
         bad = self.directory / "state~"
         operations = (
-            lambda: JobData(str(bad)),
+            lambda: WorkflowData(str(bad)),
             lambda: local_api.LocalJobStatus(str(bad)),
             lambda: ManagerConfig.write_template_json(bad),
             lambda: readManagerConfigFile(str(bad)),

@@ -6,7 +6,7 @@
 
 For real execution, see [the MPI workflow example](../examples/README.md).
 It uploads C++ source, compiles in pre-launch, runs an MPI reduction under
-`JobManager`, then downloads and verifies the result. It supports local MPI
+`WorkflowManager`, then downloads and verifies the result. It supports local MPI
 and configured IRI machines, with configurable build profiles.
 
 Run [spoof_workflow_apiv1.py](../examples/spoof_workflow_apiv1.py) from the
@@ -41,20 +41,20 @@ Join the branches with an AND/OR expression:
 ```python
 from amscjobmanager.api_actions import APIAction, WriteFile
 
-with manager as jobs:
-    setup = jobs.enqueueJob(APIAction(
+with manager as workflows:
+    setup = workflows.enqueueWorkflow(APIAction(
         [WriteFile("local", "/tmp/campaign-input", "prepared")],
         producer_key="campaign/prepared",
     ))
-    first = jobs.enqueueJob(APIAction(
+    first = workflows.enqueueWorkflow(APIAction(
         [WriteFile("local", "/tmp/campaign-first", "first")],
         depends_on="campaign/prepared", producer_key="campaign/first",
     ))
-    second = jobs.enqueueJob(APIAction(
+    second = workflows.enqueueWorkflow(APIAction(
         [WriteFile("local", "/tmp/campaign-second", "second")],
         depends_on="campaign/prepared", producer_key="campaign/second",
     ))
-    joined = jobs.enqueueJob(APIAction(
+    joined = workflows.enqueueWorkflow(APIAction(
         [WriteFile("local", "/tmp/campaign-joined", "both branches completed")],
         depends_on=["campaign/first", "AND", "campaign/second"],
     ))
@@ -128,12 +128,12 @@ The personal destination uses the Globus namespace, its default path type.
 Constructing this list does not make API calls. Enqueue it as one workflow:
 
 ```python
-from amscjobmanager import JobManager
+from amscjobmanager import WorkflowManager
 
-manager = JobManager(filename="workflow.sqlite", poll_freq=30,
+manager = WorkflowManager(filename="workflow.sqlite", poll_freq=30,
                      max_workflows_active=4)
-with manager as jobs:
-    job_id = jobs.enqueueJob(workflow, job_group="example-calculations")
+with manager as workflows:
+    workflow_id = workflows.enqueueWorkflow(workflow, workflow_group="example-calculations")
 manager.start()
 ```
 
@@ -142,11 +142,11 @@ the manager. Keep the application alive to monitor work and call `stop()` on
 shutdown. See [operations](operations.md) for a complete monitoring pattern.
 
 For retry-safe submission, supply an optional `submission_key` through either
-JobManager's locked context or its callable interface:
+WorkflowManager's locked context or its callable interface:
 
 ```python
-job_id = manager(lambda jobs: jobs.enqueueJob(
-    workflow, job_group="example-calculations", submission_key="campaign-42/run-7",
+workflow_id = manager(lambda workflows: workflows.enqueueWorkflow(
+    workflow, workflow_group="example-calculations", submission_key="campaign-42/run-7",
 ))
 ```
 
@@ -155,8 +155,8 @@ restarts, completion, and cancellation. Repeating a key returns the original
 workflow ID without comparing or replacing its actions, group, or recorded
 progress. Reuse the key when retrying after a lost response; choose a new key
 for changed work. Leaving it as `None` always creates a new workflow.
-Use one live JobData instance per database, including the instance owned by a
-JobManager. Its connection lock serializes concurrent submissions through that
+Use one live WorkflowData instance per database, including the instance owned by a
+WorkflowManager. Its connection lock serializes concurrent submissions through that
 instance; separate instances or processes are not coordinated.
 
 ## Compute parameters
@@ -220,7 +220,7 @@ from pathlib import Path
 import tempfile
 import time
 
-from amscjobmanager import ActionStatus, JobManager
+from amscjobmanager import ActionStatus, WorkflowManager
 from amscjobmanager.compute_actions import ExecuteBatchScriptComputeAction
 from amscjobmanager.local_api import setStatusManagerDatabasePath
 from amscjobmanager.manager_config import setupManager
@@ -237,16 +237,16 @@ with tempfile.TemporaryDirectory() as directory:
         script_body="#!/bin/bash\nprintf 'hello\\n' > result.txt\n",
         rundir=str(root), nodes=1, ranks_per_node=1, gpus_per_rank=0,
     )
-    manager = JobManager(filename=str(root / "workflows.sqlite"), poll_freq=0)
+    manager = WorkflowManager(filename=str(root / "workflows.sqlite"), poll_freq=0)
     try:
-        with manager as jobs:
-            job_id = jobs.enqueueJob(action)
+        with manager as workflows:
+            workflow_id = workflows.enqueueWorkflow(action)
         manager.start()
         while True:
             if not manager.isAlive():
                 raise RuntimeError("Manager stopped before completion")
-            with manager as jobs:
-                status = jobs.jobStatus(job_id)
+            with manager as workflows:
+                status = workflows.workflowStatus(workflow_id)
             if status == ActionStatus.COMPLETED:
                 break
             if status in (ActionStatus.FAILED, ActionStatus.CANCELED):

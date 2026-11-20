@@ -76,7 +76,7 @@ check final local output paths before performing their writes.
 
 ## Workflows that do not advance
 
-Inspect `jobState(job_id)["head_action_status"]`, not just `jobStatus(job_id)`:
+Inspect `workflowState(workflow_id)["head_action_status"]`, not just `workflowStatus(workflow_id)`:
 the latter reports a scheduling workflow as `ACTIVE`.
 
 - `PENDING`: confirm the manager was started and automatic slots are available.

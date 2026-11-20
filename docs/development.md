@@ -7,7 +7,7 @@
 | Location | Responsibility |
 | --- | --- |
 | `src/amscjobmanager/manager.py` | Background progression and application lock |
-| `job_data.py` | Workflow records and progression |
+| `workflow_data.py` | Workflow records and progression |
 | `action_manager.py` | Action records, durable intent, reconciliation, retry, and status mapping |
 | `actions_base.py`, `compute_actions.py`, `globus_transfer_action.py` | Action descriptions and API wrappers |
 | `api_general.py` | Implementation selection and shared convenience API |
@@ -145,7 +145,7 @@ Define a module-level, pickle-compatible dataclass inheriting
 `ComputeActionBase` or `TransferActionBase`. Keep its fields as the durable
 description of requested work, rather than open clients, threads, or connections.
 
-Implement `initiateAction(job_id, name=None)` to submit via the API and return
+Implement `initiateAction(workflow_id, name=None)` to submit via the API and return
 the remote identifier. Pass `name` through to the provider: recovery depends on
 the deterministic name/label supplied by AsyncActionManager. Submission should return
 after acceptance so the manager can monitor asynchronously. API errors currently
@@ -163,7 +163,7 @@ inherit machine/queue/time fields, while transfer actions must supply their own
 origin/destination description. The existing manager for that action class must
 support its remote ID, status query, name lookup, and cancellation semantics.
 If introducing a new action category, also extend `ActionClass`, `actionClass()`,
-and JobData's manager registry.
+and WorkflowData's manager registry.
 
 `ActionManager` is the abstract workflow-facing interface in `action_manager.py`.
 Implementations own their database schemas and transitions. Its public methods
@@ -177,7 +177,7 @@ adds SCHEDULING and is used for execution supervision and recovery. These are
 mapping views from the same definitions, including for standalone action managers.
 `getMaxActionId` reports execution history, not IDs of stages that are still queued.
 Internal reconciliation hooks are not part of the interface.
-JobData allocates all action IDs as primary keys when the workflow is enqueued and supplies the
+WorkflowData allocates all action IDs as primary keys when the workflow is enqueued and supplies the
 same ID during recovery. "Resume" in `startOrResumeAction` specifically means
 recovering supervision from persisted state after a worker stopped, for example
 when constructing a new manager after shutdown or process failure. Normal execution needs no
@@ -210,14 +210,14 @@ directly without a periodic loop or polling interval. Remote cancellation has
 its own reconciliation/retry loop in `AsyncActionManager._completeCancellation`;
 API cancellation simply records CANCELED after the current operation has finished running.
 Keep ordinary API calls sequential inside these hooks, and use short database
-transactions through JobData's shared `LockedConnection` context manager.
+transactions through WorkflowData's shared `LockedConnection` context manager.
 Use `with self.conn as conn:` for every SQL operation and fetch results before
 leaving the block. It yields a normal SQLite connection; neither connections
 nor cursors require SQL-method wrappers. Never hold its lock across API I/O or
-user input. JobData construction calls `resumeActions` after its tables and head
+user input. WorkflowData construction calls `resumeActions` after its tables and head
 view are initialized, restoring workers for current unfinished heads,
 including ACTIVE actions. Workflow starting/progression does not trigger this
-recovery pass. JobManager is single-use; neither shutdown nor failure can be
+recovery pass. WorkflowManager is single-use; neither shutdown nor failure can be
 cleared by calling start() on the same instance.
 
 `AsyncActionManager` in `async_action_manager.py` supplies the existing compute
@@ -263,7 +263,7 @@ no live site is required. Query replies are omitted from diagnostic output.
 
 ## Crash hooks
 
-`JobData(..., _test_crash_at=POINT)` passes a test-only crash point to its action
+`WorkflowData(..., _test_crash_at=POINT)` passes a test-only crash point to its action
 managers. A matching hook raises `SimulatedCrash`; tests reopen the same database
 with the hook disabled and reconcile against the simulated remote service.
 Hooks inside a supervisor are captured by its Future; `waitForAction` surfaces
@@ -274,11 +274,11 @@ same sequential production methods with deterministic crash boundaries.
 
 | Area | Hook names |
 | --- | --- |
-| Workflow submission | `job_head_scheduling_persisted`, `action_state_persisted_before_job_head_update` |
+| Workflow submission | `workflow_head_scheduling_persisted`, `action_state_persisted_before_workflow_head_update` |
 | Action submission | `action_intent_persisted`, `before_remote_submission`, `remote_submission_completed`, `remote_id_persisted`, `remote_status_obtained`, `action_state_persisted` |
 | API sequences | `action_intent_persisted`, `api_operation_N_started`, `api_operation_N_completed`, `api_operation_N_checkpoint_persisted`, `api_action_completed` (N is the zero-based operation index) |
 | Resource pre-check | `before_resource_status_check`, `resource_status_checked` |
-| Cancellation | `job_head_canceling_persisted`, `action_canceling_persisted`, `remote_cancellation_completed`, `action_canceled_before_job_head_update` |
+| Cancellation | `workflow_head_canceling_persisted`, `action_canceling_persisted`, `remote_cancellation_completed`, `action_canceled_before_workflow_head_update` |
 
 Do not enable these hooks in real applications. They simulate abrupt termination
 at explicit boundaries and should propagate through operational error handlers.
@@ -301,14 +301,14 @@ positional Python constructors. `workflow.Workflow` is a nonempty tagged stage
 list, and `workflow_adapter` validates/dumps this same representation for Python
 JSON use and the MCP submission tool. APIAction has its own tagged operation
 union. WriteFile serializes bytes as a Base64 object while keeping raw bytes in
-Python and pickle storage. Custom Python actions remain supported by JobData;
+Python and pickle storage. Custom Python actions remain supported by WorkflowData;
 only the built-in union is accepted from JSON/MCP.
 
 `submit_workflow` and `cancel_workflow` in `server/tools.py` use the public
-JobData methods under the JobManager lock, with health checks before/after lock
+WorkflowData methods under the WorkflowManager lock, with health checks before/after lock
 acquisition. They return a small workflow ID/status receipt without awaiting
 provider work. Cancellation always requests remote cancellation. Submission keys
-are delegated to JobData; tools do not maintain another deduplication store.
+are delegated to WorkflowData; tools do not maintain another deduplication store.
 The generic CLI discovers these tools and prints nested union schemas in help.
 Run `test_workflow_schema.py` and `test_mcp_workflows.py` for native JSON/pickle,
 malformed inputs, local execution, simulated Globus work, HTTP/CLI lifecycle and
@@ -317,7 +317,7 @@ submission-key recovery tests.
 
 ## Exposing action-manager functions
 
-`JobData.getManagerClasses()` enumerates registered `ActionClass` values;
+`WorkflowData.getManagerClasses()` enumerates registered `ActionClass` values;
 `getManager(action_class)` retrieves their existing instances. Managers advertise
 transport-independent `FunctionDefinition` tuples through `getMCPFunctions()`
 and `getAdminFunctions()`. The base implementation returns empty tuples.
@@ -335,7 +335,7 @@ layout; no mandatory `result` wrapper is imposed. Declaration order of input
 fields determines admin CLI positional ordering.
 
 Getters define local named `_functions` for their operations. `ComputeActions`
-provides wallet adapters, `JobManager` provides workflow and sandbox adapters,
+provides wallet adapters, `WorkflowManager` provides workflow and sandbox adapters,
 and `UserQueryQueue` provides authentication question/response adapters. Each
 callable receives its owner explicitly and must not capture the discovery-time
 instance. Enable/disable adapters pass their Boolean directly to the public
@@ -346,10 +346,10 @@ before publishing readiness. Duplicate names and invalid/missing model
 annotations fail initialization. MCP and admin maps remain separate. At dispatch
 the registry validates input, resolves the current provider, invokes once, and
 validates the returned model. Action-manager operations resolve through locked
-JobData; JobManager callbacks acquire their own locks; query operations remain
-available without JobManager. Registry code contains no operation definitions,
+WorkflowData; WorkflowManager callbacks acquire their own locks; query operations remain
+available without WorkflowManager. Registry code contains no operation definitions,
 and MCP code handles only transport/schema adaptation. Do not perform provider
-calls or user waits while holding the JobManager lock; existing workers handle
+calls or user waits while holding the WorkflowManager lock; existing workers handle
 such work.
 
 The admin wire format uses `AdminDiscoveryRequest`/`AdminCallRequest` and

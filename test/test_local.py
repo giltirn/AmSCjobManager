@@ -3,7 +3,7 @@ from amscjobmanager.manager_config_models import ManagerConfig
 from amscjobmanager.actions_base import ComputeActionBase
 from amscjobmanager.compute_actions import ExecuteBatchScriptComputeAction
 from amscjobmanager.api_general import executeBatchJobCompat
-from amscjobmanager.manager import JobManager
+from amscjobmanager.manager import WorkflowManager
 from amscjobmanager.action_manager import ActionStatus
 from amscjobmanager.local_api import setStatusManagerDatabasePath
 import sys
@@ -15,7 +15,7 @@ class TestComputeAction(ComputeActionBase):
     toprint: str
     rundir: str
 
-    def initiateAction(self, job_id, name: str | None = None)->str:
+    def initiateAction(self, workflow_id, name: str | None = None)->str:
         script_body = f"""
 echo "{self.toprint}"
 sleep 20
@@ -36,12 +36,12 @@ print(type(config))
 setupManager(config)
 setStatusManagerDatabasePath(None) #disable the local job database for this test
 
-man = JobManager(poll_freq=2)
+man = WorkflowManager(poll_freq=2)
 man.start()
 
 with man as jd:
-    #jobid = jd.enqueueJob([ TestComputeAction(machine="local", account="", queue="", time=600, rundir=config.sandbox_directories["local"][0], toprint="Hello world!") ])
-    jobid = jd.enqueueJob( ExecuteBatchScriptComputeAction(machine="local", account="", queue="", time=600, nodes=1, ranks_per_node=1, gpus_per_rank=0, rundir=config.sandbox_directories["local"][0], script_body = """
+    #workflow_id = jd.enqueueWorkflow([ TestComputeAction(machine="local", account="", queue="", time=600, rundir=config.sandbox_directories["local"][0], toprint="Hello world!") ])
+    workflow_id = jd.enqueueWorkflow( ExecuteBatchScriptComputeAction(machine="local", account="", queue="", time=600, nodes=1, ranks_per_node=1, gpus_per_rank=0, rundir=config.sandbox_directories["local"][0], script_body = """
 echo "Hello World!"
 sleep 20
 """) )
@@ -49,7 +49,7 @@ sleep 20
 status = None
 while status != ActionStatus.COMPLETED:
     with man as jd:
-        status = jd.jobStatus(jobid)
+        status = jd.workflowStatus(workflow_id)
     print("MAIN THREAD POLL", status)
     time.sleep(2)
 

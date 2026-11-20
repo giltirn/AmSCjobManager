@@ -18,7 +18,7 @@ from amscjobmanager.action_manager import ActionStatus
 from amscjobmanager.api_actions import APIAction, WriteFile
 from amscjobmanager.database import DatabaseClosed
 from amscjobmanager.iri_api import auth
-from amscjobmanager.manager import JobManager
+from amscjobmanager.manager import WorkflowManager
 from amscjobmanager.user_queries import QueryResponseError, UserQueryQueue
 from amscjobmanager.server.runtime import ServerRuntime
 from amscjobmanager.workers import Workers, WorkerInterrupted
@@ -275,7 +275,7 @@ class ServerQueryTests(unittest.TestCase):
         def initialize():
             """Authenticate normally and return a new memory-only workflow manager."""
             auth.setupIRIapiCompute('query-test', str(token_path))
-            return JobManager(max_workflows_active=0)
+            return WorkflowManager(max_workflows_active=0)
 
         runtime = ServerRuntime(initialize)
         self.addCleanup(runtime.stop)
@@ -328,9 +328,9 @@ class ServerQueryTests(unittest.TestCase):
     def test_startup_uses_installed_hook_and_python_prompts_resume_after_restore(self):
         """Serve startup through the installed hook, then restore terminal prompting."""
         def initialize():
-            """Wait for setup approval and return a new memory-only JobManager."""
+            """Wait for setup approval and return a new memory-only WorkflowManager."""
             self.assertEqual(manager_logging.wfapiUserQuery('setup', 'Authorize startup?'), 'approved')
-            return JobManager(max_workflows_active=0)
+            return WorkflowManager(max_workflows_active=0)
 
         runtime = ServerRuntime(initialize)
         self.addCleanup(runtime.stop)
@@ -362,17 +362,17 @@ class ServerQueryTests(unittest.TestCase):
         ids = {}
         original = WriteFile.execute
 
-        def execute(operation, job_id):
+        def execute(operation, workflow_id):
             """Ask for the blocked WriteFile operation, then perform its normal write."""
             if operation.path == str(blocked):
                 manager_logging.wfapiUserQuery('file write', 'Allow this write?')
-            original(operation, job_id)
+            original(operation, workflow_id)
 
         def initialize():
             """Prepare two API workflows and return a manager for normal progression."""
-            manager = JobManager(self.root / 'workflow.sqlite', poll_freq=.01)
-            ids['blocked'] = manager.job_data.enqueueJob(APIAction([WriteFile('local', str(blocked), 'done')]))
-            ids['other'] = manager.job_data.enqueueJob(APIAction([WriteFile('local', str(independent), 'done')]))
+            manager = WorkflowManager(self.root / 'workflow.sqlite', poll_freq=.01)
+            ids['blocked'] = manager.workflow_data.enqueueWorkflow(APIAction([WriteFile('local', str(blocked), 'done')]))
+            ids['other'] = manager.workflow_data.enqueueWorkflow(APIAction([WriteFile('local', str(independent), 'done')]))
             return manager
 
         runtime = ServerRuntime(initialize)
@@ -383,14 +383,14 @@ class ServerQueryTests(unittest.TestCase):
             runtime.start()
             question = self._waitPending(runtime.queries)[0]
             deadline = time.monotonic() + 4
-            while runtime.manager(lambda jobs: jobs.jobStatus(ids['other'])) != ActionStatus.COMPLETED:
+            while runtime.manager(lambda workflows: workflows.workflowStatus(ids['other'])) != ActionStatus.COMPLETED:
                 if time.monotonic() > deadline:
                     self.fail('Independent workflow did not finish')
                 time.sleep(.01)
             self.assertFalse(blocked.exists())
             runtime.queries.respond(question['session_id'], question['query_id'], 'yes')
             deadline = time.monotonic() + 4
-            while runtime.manager(lambda jobs: jobs.jobStatus(ids['blocked'])) != ActionStatus.COMPLETED:
+            while runtime.manager(lambda workflows: workflows.workflowStatus(ids['blocked'])) != ActionStatus.COMPLETED:
                 if time.monotonic() > deadline:
                     self.fail('Answered workflow did not finish')
                 time.sleep(.01)
@@ -405,7 +405,7 @@ class ServerQueryTests(unittest.TestCase):
         def ask_during_setup():
             """Ask during initialization and return a manager only if answered."""
             manager_logging.wfapiUserQuery('setup', 'Wait for approval')
-            return JobManager()
+            return WorkflowManager()
 
         runtime = ServerRuntime(ask_during_setup)
         self.enterContext(patch.object(manager_logging, 'api_query_user_func', runtime.queries.ask))
@@ -420,11 +420,11 @@ class ServerQueryTests(unittest.TestCase):
         constructed = []
 
         def slow_setup():
-            """Simulate an uninterruptible setup call and return a late JobManager."""
+            """Simulate an uninterruptible setup call and return a late WorkflowManager."""
             entered.set()
             if not release.wait(2):
                 raise TimeoutError('Test did not release initializer')
-            manager = JobManager()
+            manager = WorkflowManager()
             constructed.append(manager)
             return manager
 
@@ -440,7 +440,7 @@ class ServerQueryTests(unittest.TestCase):
         self.assertIsNone(runtime.manager)
         self.assertFalse(constructed[0].isAlive())
         with self.assertRaises(DatabaseClosed):
-            with constructed[0].job_data.conn:
+            with constructed[0].workflow_data.conn:
                 self.fail('Late manager storage remained open')
 
 

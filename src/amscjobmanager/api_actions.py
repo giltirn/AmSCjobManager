@@ -14,7 +14,7 @@ import subprocess
 import tempfile
 
 from . import api_general as api
-from .actions_base import ActionDefinition, replaceJobIdSubstring
+from .actions_base import ActionDefinition, replaceWorkflowIdSubstring
 from .globals import checkSafePath
 from .local_api import localCopyFile
 
@@ -28,8 +28,8 @@ class APIActionStageBase(ABC):
     """
 
     @abstractmethod
-    def execute(self, job_id: int) -> None:
-        """Perform work for workflow database ID job_id; tolerate replay."""
+    def execute(self, workflow_id: int) -> None:
+        """Perform work for workflow database ID workflow_id; tolerate replay."""
 
 
 class BinaryContent(BaseModel):
@@ -44,7 +44,7 @@ class MakeDirectory(APIActionStageBase):
     """Ensure a directory exists; successful replay leaves it unchanged.
 
     machine (str) is a configured target or 'local'; path (str) is the directory
-    path and supports <JOBID>. create_parents (bool) defaults to True.
+    path and supports <WORKFLOWID>. create_parents (bool) defaults to True.
     The JSON discriminator type is 'make_directory'.
     """
 
@@ -54,9 +54,9 @@ class MakeDirectory(APIActionStageBase):
 
     type: Literal["make_directory"] = field(default="make_directory", kw_only=True)
 
-    def execute(self, job_id: int) -> None:
-        """Ensure the directory for positive workflow job_id (int); return None."""
-        path = replaceJobIdSubstring(self.path, job_id)
+    def execute(self, workflow_id: int) -> None:
+        """Ensure the directory for positive workflow workflow_id (int); return None."""
+        path = replaceWorkflowIdSubstring(self.path, workflow_id)
         if not checkSafePath(self.machine, path):
             raise ValueError('Directory is outside the configured sandbox')
         if api.isDirectory(self.machine, path, check_exists=True):
@@ -70,7 +70,7 @@ class WriteFile(APIActionStageBase):
     """Write complete contents, overwriting a partial destination on replay.
 
     machine (str) selects a target or 'local'; path (str) is the complete
-    destination filename and supports <JOBID>. content (str | bytes) is stored
+    destination filename and supports <WORKFLOWID>. content (str | bytes) is stored
     verbatim, with str encoded as UTF-8. Content placeholders are not expanded.
     The target API's upload-size limit applies. JSON bytes use an object with
     a base64 string; Python callers may supply raw bytes. type is 'write_file'.
@@ -106,10 +106,10 @@ class WriteFile(APIActionStageBase):
             return BinaryContent(base64=base64.b64encode(value).decode('ascii'))
         return value
 
-    def execute(self, job_id: int) -> None:
-        """Write contents for positive workflow job_id (int); return None."""
+    def execute(self, workflow_id: int) -> None:
+        """Write contents for positive workflow workflow_id (int); return None."""
         content = self.content.encode('utf-8') if isinstance(self.content, str) else self.content
-        api.uploadBytes(self.machine, replaceJobIdSubstring(self.path, job_id),
+        api.uploadBytes(self.machine, replaceWorkflowIdSubstring(self.path, workflow_id),
                         io.BytesIO(content), allow_unsafe=False)
 
 
@@ -118,7 +118,7 @@ class UploadFile(APIActionStageBase):
     """Upload a small manager-host file, overwriting its destination on replay.
 
     machine (str) selects the destination target; dest_path (str) is its full
-    filename, source_path (str) is a manager-host filename. Both support <JOBID>.
+    filename, source_path (str) is a manager-host filename. Both support <WORKFLOWID>.
     The source must remain available and stable until the operation completes.
     The target API's upload-size limit applies; use a transfer stage for bulk data.
     The JSON discriminator type is 'upload_file'.
@@ -130,10 +130,10 @@ class UploadFile(APIActionStageBase):
 
     type: Literal["upload_file"] = field(default="upload_file", kw_only=True)
 
-    def execute(self, job_id: int) -> None:
-        """Upload the file for positive workflow job_id (int); return None."""
-        api.uploadSmallFile(self.machine, replaceJobIdSubstring(self.dest_path, job_id),
-                            replaceJobIdSubstring(self.source_path, job_id),
+    def execute(self, workflow_id: int) -> None:
+        """Upload the file for positive workflow workflow_id (int); return None."""
+        api.uploadSmallFile(self.machine, replaceWorkflowIdSubstring(self.dest_path, workflow_id),
+                            replaceWorkflowIdSubstring(self.source_path, workflow_id),
                             allow_unsafe=False, definitely_is_file=True)
 
 
@@ -143,7 +143,7 @@ class DownloadFile(APIActionStageBase):
 
     machine (str) selects the source target; dest_path (str) is a local filename
     or existing directory; source_path (str) is the source filename. Both support
-    <JOBID>. Replay overwrites the destination; use a separate asynchronous
+    <WORKFLOWID>. Replay overwrites the destination; use a separate asynchronous
     transfer stage for long-running or large transfers.
     The JSON discriminator type is 'download_file'.
     """
@@ -154,10 +154,10 @@ class DownloadFile(APIActionStageBase):
 
     type: Literal["download_file"] = field(default="download_file", kw_only=True)
 
-    def execute(self, job_id: int) -> None:
-        """Download the file for positive workflow job_id (int); return None."""
-        api.downloadFile(self.machine, replaceJobIdSubstring(self.dest_path, job_id),
-                         replaceJobIdSubstring(self.source_path, job_id), allow_unsafe=False)
+    def execute(self, workflow_id: int) -> None:
+        """Download the file for positive workflow workflow_id (int); return None."""
+        api.downloadFile(self.machine, replaceWorkflowIdSubstring(self.dest_path, workflow_id),
+                         replaceWorkflowIdSubstring(self.source_path, workflow_id), allow_unsafe=False)
 
 
 @dataclass(config=ConfigDict(extra="forbid"))
@@ -165,7 +165,7 @@ class CopyFile(APIActionStageBase):
     """Copy a file on the manager host using the local API's sandbox checks.
 
     dest_path (str) is a local filename or existing directory; source_path (str)
-    is a local filename. Both support <JOBID>. Replay overwrites the destination.
+    is a local filename. Both support <WORKFLOWID>. Replay overwrites the destination.
     Remote or cross-machine copies belong in a separate transfer stage.
     The JSON discriminator type is 'copy_file'.
     """
@@ -175,10 +175,10 @@ class CopyFile(APIActionStageBase):
 
     type: Literal["copy_file"] = field(default="copy_file", kw_only=True)
 
-    def execute(self, job_id: int) -> None:
-        """Copy the file for positive workflow job_id (int); return None."""
-        localCopyFile(replaceJobIdSubstring(self.dest_path, job_id),
-                      replaceJobIdSubstring(self.source_path, job_id), allow_unsafe=False)
+    def execute(self, workflow_id: int) -> None:
+        """Copy the file for positive workflow workflow_id (int); return None."""
+        localCopyFile(replaceWorkflowIdSubstring(self.dest_path, workflow_id),
+                      replaceWorkflowIdSubstring(self.source_path, workflow_id), allow_unsafe=False)
 
 
 @dataclass(config=ConfigDict(extra="forbid"))
@@ -187,7 +187,7 @@ class RunLocal(APIActionStageBase):
 
     executable (str) is a command name or path, arguments (list[str]) contains
     literal argv entries, and cwd (str) is an existing local working directory.
-    All support <JOBID>. timeout (float) is a positive maximum duration in
+    All support <WORKFLOWID>. timeout (float) is a positive maximum duration in
     seconds, default 60. Execution uses no shell. The cwd is checked against
     local sandboxes, but the child program's writes are NOT sandboxed. Use local
     compute actions for long-running work. Programs must tolerate replay after
@@ -202,8 +202,8 @@ class RunLocal(APIActionStageBase):
 
     type: Literal["run_local"] = field(default="run_local", kw_only=True)
 
-    def execute(self, job_id: int) -> None:
-        """Run for positive workflow job_id (int); return None on exit code zero.
+    def execute(self, workflow_id: int) -> None:
+        """Run for positive workflow workflow_id (int); return None on exit code zero.
 
         Nonzero exit raises RuntimeError with the last 4096 output bytes.
         Timeout raises subprocess.TimeoutExpired. No success checkpoint is
@@ -213,13 +213,13 @@ class RunLocal(APIActionStageBase):
 
         if not math.isfinite(self.timeout) or self.timeout <= 0:
             raise ValueError('RunLocal timeout must be finite and positive')
-        cwd = replaceJobIdSubstring(self.cwd, job_id)
+        cwd = replaceWorkflowIdSubstring(self.cwd, workflow_id)
         if not checkSafePath('local', cwd):
             raise ValueError('RunLocal working directory is outside the local sandbox')
-        executable = replaceJobIdSubstring(self.executable, job_id)
+        executable = replaceWorkflowIdSubstring(self.executable, workflow_id)
         if '~' in executable:
             raise ValueError("Executable paths containing '~' are not supported")
-        arguments = [replaceJobIdSubstring(value, job_id) for value in self.arguments]
+        arguments = [replaceWorkflowIdSubstring(value, workflow_id) for value in self.arguments]
         # Capture output on disk rather than retaining an unbounded stream in memory.
         with tempfile.TemporaryFile() as output:
             result = subprocess.run([executable, *arguments], cwd=Path(cwd).resolve(),

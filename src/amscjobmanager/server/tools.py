@@ -58,7 +58,7 @@ class ManagerMCPServer(MCPServer):
         name (str) and arguments (dict) are SDK-validated request fields;
         context is the SDK invocation context or None. Return CallToolResult
         when awaited. Manager methods run off the event loop, behind readiness,
-        input/output validation and the JobManager lock. Admin names are rejected.
+        input/output validation and the WorkflowManager lock. Admin names are rejected.
         """
         try:
             result, _ = await asyncio.to_thread(self.runtime.invokeFunction, 'mcp', name, arguments)

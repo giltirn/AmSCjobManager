@@ -19,8 +19,8 @@ from amscjobmanager.actions_base import ActionClass
 from amscjobmanager.api_actions import APIAction, WriteFile
 from amscjobmanager.compute_actions import ExecuteJobComputeAction
 from amscjobmanager.globus_transfer_action import GlobusTransfer
-from amscjobmanager.job_data import JobData
-from amscjobmanager.manager import JobManager
+from amscjobmanager.workflow_data import WorkflowData
+from amscjobmanager.manager import WorkflowManager
 from amscjobmanager.workflow import workflow_adapter
 
 
@@ -31,30 +31,47 @@ class WorkflowStorageTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
         self.database = self.root / 'workflows.sqlite'
-        adapter = patch('amscjobmanager.job_data.APIActions', DirectAPIActions)
+        adapter = patch('amscjobmanager.workflow_data.APIActions', DirectAPIActions)
         adapter.start()
         self.addCleanup(adapter.stop)
-        self.jobs = JobData(self.database)
-        self.addCleanup(self.jobs.conn.close)
-        self.addCleanup(self.jobs.stopWorkers)
+        self.workflows = WorkflowData(self.database)
+        self.addCleanup(self.workflows.conn.close)
+        self.addCleanup(self.workflows.stopWorkers)
 
     def test_every_stage_has_a_queryable_row_and_id_before_execution(self):
         """Queue mixed action types and inspect SQL rows before any worker starts.
 
         Definitions, dependency expressions, categories, and stable unique IDs
-        must exist for future stages. Job heads are derived rather than stored.
+        must exist for future stages. Workflow heads are derived rather than stored.
         """
         expression = ['prepared', 'AND', ['prepared', 'OR', 'prepared']]
         stages = [APIAction(producer_key='prepared'),
                   ExecuteJobComputeAction('local', '', '', '60', '/bin/true', [], '/tmp', 1, 0,
                                           depends_on=expression, producer_key='computed', nodes=1),
                   GlobusTransfer('dest', '/output', 'source', '/input', depends_on='computed')]
-        job_id = self.jobs.enqueueJob(stages)
-        with self.jobs.conn as conn:
-            rows = conn.execute('SELECT * FROM actions WHERE job_id = ? ORDER BY workflow_stage',
-                                (job_id,)).fetchall()
-            columns = {row['name'] for row in conn.execute('PRAGMA table_info(jobs)')}
+        workflow_id = self.workflows.enqueueWorkflow(stages)
+        with self.workflows.conn as conn:
+            rows = conn.execute('SELECT * FROM actions WHERE workflow_id = ? ORDER BY workflow_stage',
+                                (workflow_id,)).fetchall()
+            columns = {row['name'] for row in conn.execute('PRAGMA table_info(workflows)')}
             tables = {row['name'] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+            action_columns = {row['name'] for row in conn.execute('PRAGMA table_info(actions)')}
+            foreign_keys = conn.execute('PRAGMA foreign_key_list(actions)').fetchall()
+        # Workflow identity uses one name in workflow storage and every owned
+        # action record; local compute-job storage is a separate API contract.
+        self.assertIn('workflows', tables)
+        self.assertNotIn('jobs', tables)
+        self.assertTrue({'workflow_id', 'workflow_group'} <= columns)
+        self.assertTrue({'job_id', 'job_group'}.isdisjoint(columns))
+        self.assertIn('workflow_id', action_columns)
+        self.assertNotIn('job_id', action_columns)
+        self.assertTrue(any(row['table'] == 'workflows' and row['from'] == 'workflow_id'
+                            and row['to'] == 'workflow_id' for row in foreign_keys))
+        for table in ('computes', 'transfers', 'api_actions'):
+            with self.subTest(table=table), self.workflows.conn as conn:
+                owned_columns = {row['name'] for row in conn.execute(f'PRAGMA table_info({table})')}
+                self.assertIn('workflow_id', owned_columns)
+                self.assertNotIn('job_id', owned_columns)
         self.assertTrue({'workflow', 'head_action_id', 'head_action_type', 'head_action_class',
                          'head_action_status', 'cancellation_status'}.isdisjoint(columns))
         self.assertIn('workflow_status', columns)
@@ -69,14 +86,14 @@ class WorkflowStorageTests(unittest.TestCase):
         self.assertEqual([row['producer_key'] for row in rows], ['prepared', 'computed', None])
         self.assertEqual(len({row['action_id'] for row in rows}), 3)
         # Status summaries must not deserialize or rebuild action definitions.
-        with patch('amscjobmanager.job_data._unser', side_effect=AssertionError('Unexpected action read')), \
-             patch('amscjobmanager.job_data._ser', side_effect=AssertionError('Unexpected action serialization')):
-            summary = self.jobs.jobState(job_id)
-            self.assertEqual(self.jobs.listWorkflows(), [summary])
+        with patch('amscjobmanager.workflow_data._unser', side_effect=AssertionError('Unexpected action read')), \
+             patch('amscjobmanager.workflow_data._ser', side_effect=AssertionError('Unexpected action serialization')):
+            summary = self.workflows.workflowState(workflow_id)
+            self.assertEqual(self.workflows.listWorkflows(), [summary])
         self.assertNotIn('workflow', summary)
         self.assertNotIn('action_details', summary)
         self.assertEqual(summary['head_action_id'], rows[0]['action_id'])
-        self.assertTrue(all(manager.getMaxActionId() is None for manager in self.jobs.action_man.values()))
+        self.assertTrue(all(manager.getMaxActionId() is None for manager in self.workflows.action_man.values()))
 
     def test_history_and_earlier_stage_dependencies_survive_reopening(self):
         """Execute a dependent chain, retaining per-stage success and IDs.
@@ -85,24 +102,24 @@ class WorkflowStorageTests(unittest.TestCase):
         Reopen between stages and verify the completed stage is not replayed.
         """
         first, second = self.root / 'first', self.root / 'second'
-        job_id = self.jobs.enqueueJob([
+        workflow_id = self.workflows.enqueueWorkflow([
             APIAction([WriteFile('local', str(first), 'first')], producer_key='same'),
             APIAction([WriteFile('local', str(second), 'second')], depends_on='same', producer_key='same'),
         ])
-        with self.jobs.conn as conn:
+        with self.workflows.conn as conn:
             ids = [row[0] for row in conn.execute('SELECT action_id FROM actions ORDER BY workflow_stage')]
-        self.jobs.startWorkflows([job_id])
+        self.workflows.startWorkflows([workflow_id])
         self.assertTrue(first.exists())
         self.assertFalse(second.exists())
         first.write_text('preserve completed effect')
-        self.jobs.conn.close()
+        self.workflows.conn.close()
 
-        recovered = JobData(self.database)
+        recovered = WorkflowData(self.database)
         self.addCleanup(recovered.conn.close)
         self.addCleanup(recovered.stopWorkers)
         recovered.progressActiveState()
         recovered.progressActiveState()
-        self.assertEqual(recovered.jobStatus(job_id), ActionStatus.COMPLETED)
+        self.assertEqual(recovered.workflowStatus(workflow_id), ActionStatus.COMPLETED)
         self.assertEqual(first.read_text(), 'preserve completed effect')
         self.assertEqual(second.read_text(), 'second')
         with recovered.conn as conn:
@@ -112,16 +129,16 @@ class WorkflowStorageTests(unittest.TestCase):
 
     def test_submission_key_retry_and_failed_enqueue_are_atomic(self):
         """Reuse a whole chain on retry and roll back partially inserted invalid chains."""
-        job_id = self.jobs.enqueueJob([APIAction(), APIAction()], submission_key='request')
-        self.assertEqual(self.jobs.enqueueJob([APIAction()] * 3, submission_key='request'), job_id)
+        workflow_id = self.workflows.enqueueWorkflow([APIAction(), APIAction()], submission_key='request')
+        self.assertEqual(self.workflows.enqueueWorkflow([APIAction()] * 3, submission_key='request'), workflow_id)
         # The first stage is inserted before classifying the invalid second one;
         # failure must roll back its workflow, action row, and submission key.
         with self.assertRaises(Exception):
-            self.jobs.enqueueJob([APIAction(), object()], submission_key='invalid')
-        with self.jobs.conn as conn:
-            self.assertEqual(conn.execute('SELECT COUNT(*) FROM jobs').fetchone()[0], 1)
+            self.workflows.enqueueWorkflow([APIAction(), object()], submission_key='invalid')
+        with self.workflows.conn as conn:
+            self.assertEqual(conn.execute('SELECT COUNT(*) FROM workflows').fetchone()[0], 1)
             self.assertEqual(conn.execute('SELECT COUNT(*) FROM actions').fetchone()[0], 2)
-            self.assertIsNone(conn.execute('SELECT job_id FROM jobs WHERE submission_key = ?', ('invalid',)).fetchone())
+            self.assertIsNone(conn.execute('SELECT workflow_id FROM workflows WHERE submission_key = ?', ('invalid',)).fetchone())
 
     def test_cancel_preserves_success_and_cancels_remaining_queued_stages(self):
         """Cancel between stages and retain the successful producer's historical status.
@@ -130,32 +147,32 @@ class WorkflowStorageTests(unittest.TestCase):
         Canceling an already completed workflow must also preserve action success.
         """
         output = self.root / 'must-not-exist'
-        job_id = self.jobs.enqueueJob([APIAction(producer_key='done'),
+        workflow_id = self.workflows.enqueueWorkflow([APIAction(producer_key='done'),
                                       APIAction([WriteFile('local', str(output), 'unexpected')])])
-        self.jobs.startWorkflows([job_id])
-        self.jobs.cancelJob(job_id)
-        self.assertEqual(self.jobs.jobStatus(job_id), ActionStatus.CANCELED)
-        self.assertEqual(self.jobs.headActionStatus(job_id), ActionStatus.COMPLETED)
-        self.assertEqual(self.jobs.countWorkflowsWithStatus(
+        self.workflows.startWorkflows([workflow_id])
+        self.workflows.cancelWorkflow(workflow_id)
+        self.assertEqual(self.workflows.workflowStatus(workflow_id), ActionStatus.CANCELED)
+        self.assertEqual(self.workflows.headActionStatus(workflow_id), ActionStatus.COMPLETED)
+        self.assertEqual(self.workflows.countWorkflowsWithStatus(
             [ActionStatus.PENDING, ActionStatus.ACTIVE, ActionStatus.CANCELING]), 0)
-        self.assertEqual(self.jobs.countWorkflowsWithStatus(ActionStatus.CANCELED), 1)
-        with self.jobs.conn as conn:
+        self.assertEqual(self.workflows.countWorkflowsWithStatus(ActionStatus.CANCELED), 1)
+        with self.workflows.conn as conn:
             self.assertEqual([row[0] for row in conn.execute(
                 'SELECT action_status FROM actions ORDER BY workflow_stage')], ['COMPLETED', 'CANCELED'])
-        self.jobs.conn.close()
+        self.workflows.conn.close()
 
-        recovered = JobData(self.database)
+        recovered = WorkflowData(self.database)
         self.addCleanup(recovered.conn.close)
         self.addCleanup(recovered.stopWorkers)
         recovered.startWorkflows()
         recovered.progressActiveState()
         self.assertFalse(output.exists())
-        self.assertEqual(recovered.jobStatus(job_id), ActionStatus.CANCELED)
-        completed = recovered.enqueueJob(APIAction())
-        action_id = recovered.jobState(completed)['head_action_id']
+        self.assertEqual(recovered.workflowStatus(workflow_id), ActionStatus.CANCELED)
+        completed = recovered.enqueueWorkflow(APIAction())
+        action_id = recovered.workflowState(completed)['head_action_id']
         recovered.startWorkflows([completed])
         recovered.progressActiveState()
-        recovered.cancelJob(completed)
+        recovered.cancelWorkflow(completed)
         with recovered.conn as conn:
             self.assertEqual(conn.execute('SELECT action_status FROM actions WHERE action_id = ?',
                                           (action_id,)).fetchone()[0], 'COMPLETED')
@@ -167,38 +184,38 @@ class WorkflowStorageTests(unittest.TestCase):
         Normal progression then runs it and retains both successful records.
         """
         first, second = self.root / 'first', self.root / 'second'
-        job_id = self.jobs.enqueueJob([APIAction([WriteFile('local', str(first), 'first')]),
+        workflow_id = self.workflows.enqueueWorkflow([APIAction([WriteFile('local', str(first), 'first')]),
                                       APIAction([WriteFile('local', str(second), 'second')])])
-        with self.jobs.conn as conn:
+        with self.workflows.conn as conn:
             ids = [row[0] for row in conn.execute('SELECT action_id FROM actions ORDER BY workflow_stage')]
-        self.jobs._test_crash_at = 'job_head_scheduling_persisted'
+        self.workflows._test_crash_at = 'workflow_head_scheduling_persisted'
         with self.assertRaises(SimulatedCrash):
-            self.jobs.startWorkflows([job_id])
+            self.workflows.startWorkflows([workflow_id])
         self.assertFalse(first.exists())
-        self.jobs.conn.close()
+        self.workflows.conn.close()
 
-        recovered = JobData(self.database)
+        recovered = WorkflowData(self.database)
         self.addCleanup(recovered.conn.close)
         self.addCleanup(recovered.stopWorkers)
         self.assertTrue(first.exists())
         self.assertFalse(second.exists())
-        self.assertEqual(recovered.jobState(job_id)['head_action_id'], ids[0])
+        self.assertEqual(recovered.workflowState(workflow_id)['head_action_id'], ids[0])
         self.assertFalse(recovered.action_man[ActionClass.API].hasAction(ids[1]))
         recovered.progressActiveState()
         recovered.progressActiveState()
         self.assertTrue(second.exists())
-        self.assertEqual(recovered.jobStatus(job_id), ActionStatus.COMPLETED)
+        self.assertEqual(recovered.workflowStatus(workflow_id), ActionStatus.COMPLETED)
 
     def test_rows_enforce_stage_uniqueness_and_workflow_ownership(self):
         """Use real SQL writes to reject duplicate stage positions and orphan actions."""
-        job_id = self.jobs.enqueueJob(APIAction())
-        for replacement_job in (job_id, job_id + 99):
-            with self.subTest(job_id=replacement_job), self.assertRaises(sqlite3.IntegrityError):
-                with self.jobs.conn as conn:
-                    conn.execute('INSERT INTO actions(job_id, workflow_stage, action_class, action_type, '
+        workflow_id = self.workflows.enqueueWorkflow(APIAction())
+        for replacement_workflow in (workflow_id, workflow_id + 99):
+            with self.subTest(workflow_id=replacement_workflow), self.assertRaises(sqlite3.IntegrityError):
+                with self.workflows.conn as conn:
+                    conn.execute('INSERT INTO actions(workflow_id, workflow_stage, action_class, action_type, '
                                  'action_status, details, last_status_change) '
                                  'SELECT ?, workflow_stage, action_class, action_type, action_status, details, '
-                                 'last_status_change FROM actions WHERE job_id = ?', (replacement_job, job_id))
+                                 'last_status_change FROM actions WHERE workflow_id = ?', (replacement_workflow, workflow_id))
 
     def test_recover_cancellation_before_any_execution_record_exists(self):
         """Crash at scheduling and cancellation intents without running either stage.
@@ -207,23 +224,23 @@ class WorkflowStorageTests(unittest.TestCase):
         IDs, leave both action rows CANCELED, and create neither output file.
         """
         outputs = [self.root / 'first', self.root / 'second']
-        job_id = self.jobs.enqueueJob([APIAction([WriteFile('local', str(path), 'unexpected')])
+        workflow_id = self.workflows.enqueueWorkflow([APIAction([WriteFile('local', str(path), 'unexpected')])
                                        for path in outputs])
-        self.jobs._test_crash_at = 'job_head_scheduling_persisted'
+        self.workflows._test_crash_at = 'workflow_head_scheduling_persisted'
         with self.assertRaises(SimulatedCrash):
-            self.jobs.startWorkflows([job_id])
-        self.jobs._test_crash_at = 'job_head_canceling_persisted'
+            self.workflows.startWorkflows([workflow_id])
+        self.workflows._test_crash_at = 'workflow_head_canceling_persisted'
         with self.assertRaises(SimulatedCrash):
-            self.jobs.cancelJob(job_id)
-        self.assertEqual(self.jobs.jobStatus(job_id), ActionStatus.CANCELING)
-        self.jobs.conn.close()
+            self.workflows.cancelWorkflow(workflow_id)
+        self.assertEqual(self.workflows.workflowStatus(workflow_id), ActionStatus.CANCELING)
+        self.workflows.conn.close()
 
-        recovered = JobData(self.database)
+        recovered = WorkflowData(self.database)
         self.addCleanup(recovered.conn.close)
         self.addCleanup(recovered.stopWorkers)
         recovered.progressActiveState()
         recovered.startWorkflows()
-        self.assertEqual(recovered.jobStatus(job_id), ActionStatus.CANCELED)
+        self.assertEqual(recovered.workflowStatus(workflow_id), ActionStatus.CANCELED)
         with recovered.conn as conn:
             self.assertEqual([row[0] for row in conn.execute(
                 'SELECT action_status FROM actions ORDER BY workflow_stage')], ['CANCELED', 'CANCELED'])
@@ -251,32 +268,32 @@ class WorkflowStorageTests(unittest.TestCase):
         Overall status reads must not deserialize action definitions.
         """
         outputs = [self.root / 'first', self.root / 'second']
-        job_id = self.jobs.enqueueJob([APIAction([WriteFile('local', str(path), 'done')]) for path in outputs])
-        with patch('amscjobmanager.job_data._unser', side_effect=AssertionError('Unexpected definition read')):
-            self.assertEqual(self.jobs.jobStatus(job_id), ActionStatus.PENDING)
-        self.jobs.startWorkflows([job_id])
-        self.assertEqual(self.jobs.headActionStatus(job_id), ActionStatus.COMPLETED)
-        self.assertEqual(self.jobs.jobState(job_id)['workflow_status'], ActionStatus.ACTIVE)
-        self.assertEqual(self.jobs.countWorkflowsWithStatus(ActionStatus.ACTIVE), 1)
-        self.assertEqual(self.jobs.countWorkflowsWithStatus(ActionStatus.COMPLETED), 0)
-        self.assertEqual(self.jobs.listWorkflows(statuses=ActionStatus.COMPLETED), [])
-        self.assertEqual([row['job_id'] for row in self.jobs.listWorkflows(statuses=ActionStatus.ACTIVE)], [job_id])
-        self.jobs.progressActiveState()
-        self.assertEqual(self.jobs.headActionStatus(job_id), ActionStatus.COMPLETED)
-        self.assertEqual(self.jobs.jobStatus(job_id), ActionStatus.ACTIVE)
-        self.jobs.progressActiveState()
+        workflow_id = self.workflows.enqueueWorkflow([APIAction([WriteFile('local', str(path), 'done')]) for path in outputs])
+        with patch('amscjobmanager.workflow_data._unser', side_effect=AssertionError('Unexpected definition read')):
+            self.assertEqual(self.workflows.workflowStatus(workflow_id), ActionStatus.PENDING)
+        self.workflows.startWorkflows([workflow_id])
+        self.assertEqual(self.workflows.headActionStatus(workflow_id), ActionStatus.COMPLETED)
+        self.assertEqual(self.workflows.workflowState(workflow_id)['workflow_status'], ActionStatus.ACTIVE)
+        self.assertEqual(self.workflows.countWorkflowsWithStatus(ActionStatus.ACTIVE), 1)
+        self.assertEqual(self.workflows.countWorkflowsWithStatus(ActionStatus.COMPLETED), 0)
+        self.assertEqual(self.workflows.listWorkflows(statuses=ActionStatus.COMPLETED), [])
+        self.assertEqual([row['workflow_id'] for row in self.workflows.listWorkflows(statuses=ActionStatus.ACTIVE)], [workflow_id])
+        self.workflows.progressActiveState()
+        self.assertEqual(self.workflows.headActionStatus(workflow_id), ActionStatus.COMPLETED)
+        self.assertEqual(self.workflows.workflowStatus(workflow_id), ActionStatus.ACTIVE)
+        self.workflows.progressActiveState()
         self.assertTrue(all(path.read_text() == 'done' for path in outputs))
-        self.assertEqual(self.jobs.countWorkflowsWithStatus(ActionStatus.ACTIVE), 0)
-        self.assertEqual(self.jobs.countWorkflowsWithStatus(ActionStatus.COMPLETED), 1)
-        with self.jobs.conn as conn:
-            self.assertEqual(conn.execute('SELECT workflow_status FROM jobs WHERE job_id = ?',
-                                          (job_id,)).fetchone()[0], 'COMPLETED')
-        self.jobs.conn.close()
+        self.assertEqual(self.workflows.countWorkflowsWithStatus(ActionStatus.ACTIVE), 0)
+        self.assertEqual(self.workflows.countWorkflowsWithStatus(ActionStatus.COMPLETED), 1)
+        with self.workflows.conn as conn:
+            self.assertEqual(conn.execute('SELECT workflow_status FROM workflows WHERE workflow_id = ?',
+                                          (workflow_id,)).fetchone()[0], 'COMPLETED')
+        self.workflows.conn.close()
 
-        recovered = JobData(self.database)
+        recovered = WorkflowData(self.database)
         self.addCleanup(recovered.conn.close)
         self.addCleanup(recovered.stopWorkers)
-        self.assertEqual(recovered.jobStatus(job_id), ActionStatus.COMPLETED)
+        self.assertEqual(recovered.workflowStatus(workflow_id), ActionStatus.COMPLETED)
         self.assertEqual(len(recovered.listWorkflows(statuses=ActionStatus.COMPLETED)), 1)
 
     def test_failed_workflow_status_persists_without_starting_remaining_stages(self):
@@ -284,36 +301,36 @@ class WorkflowStorageTests(unittest.TestCase):
         output = self.root / 'must-not-exist'
         # Writing text over the existing workspace directory fails through the
         # normal API; no provider or execution-state database is mocked.
-        job_id = self.jobs.enqueueJob([APIAction([WriteFile('local', str(self.root), 'invalid')]),
+        workflow_id = self.workflows.enqueueWorkflow([APIAction([WriteFile('local', str(self.root), 'invalid')]),
                                       APIAction([WriteFile('local', str(output), 'unexpected')])])
-        self.jobs.startWorkflows([job_id])
-        self.assertEqual(self.jobs.jobState(job_id)['workflow_status'], ActionStatus.FAILED)
-        with self.jobs.conn as conn:
-            self.assertEqual(conn.execute('SELECT workflow_status FROM jobs WHERE job_id = ?',
-                                          (job_id,)).fetchone()[0], 'FAILED')
+        self.workflows.startWorkflows([workflow_id])
+        self.assertEqual(self.workflows.workflowState(workflow_id)['workflow_status'], ActionStatus.FAILED)
+        with self.workflows.conn as conn:
+            self.assertEqual(conn.execute('SELECT workflow_status FROM workflows WHERE workflow_id = ?',
+                                          (workflow_id,)).fetchone()[0], 'FAILED')
             self.assertEqual([row[0] for row in conn.execute('SELECT action_status FROM actions ORDER BY workflow_stage')],
                              ['FAILED', 'PENDING'])
-        self.jobs.conn.close()
+        self.workflows.conn.close()
 
-        recovered = JobData(self.database)
+        recovered = WorkflowData(self.database)
         self.addCleanup(recovered.conn.close)
         self.addCleanup(recovered.stopWorkers)
         recovered.startWorkflows()
         recovered.progressActiveState()
-        self.assertEqual(recovered.jobStatus(job_id), ActionStatus.FAILED)
+        self.assertEqual(recovered.workflowStatus(workflow_id), ActionStatus.FAILED)
         self.assertEqual(len(recovered.listWorkflows(statuses=ActionStatus.FAILED)), 1)
         self.assertFalse(output.exists())
 
     def test_late_execution_result_cannot_clear_workflow_cancellation(self):
         """Cancel between execution and its status copy, then deliver the stale result.
 
-        The first API stage has finished externally, but JobData still records
+        The first API stage has finished externally, but WorkflowData still records
         SCHEDULING. Simulate a cancellation during that status read; its returned
         completion must not restore ACTIVE or start the remaining stage.
         """
         output = self.root / 'must-not-exist'
-        job_id = self.jobs.enqueueJob([APIAction(), APIAction([WriteFile('local', str(output), 'unexpected')])])
-        manager = self.jobs.action_man[ActionClass.API]
+        workflow_id = self.workflows.enqueueWorkflow([APIAction(), APIAction([WriteFile('local', str(output), 'unexpected')])])
+        manager = self.workflows.action_man[ActionClass.API]
         query = manager.queryRecordedStatus
 
         def cancel_before_returning(action_id, *, force_update=False):
@@ -324,18 +341,18 @@ class WorkflowStorageTests(unittest.TestCase):
             """
             result = query(action_id, force_update=force_update)
             with patch.object(manager, 'queryRecordedStatus', query):
-                self.jobs.cancelJob(job_id)
+                self.workflows.cancelWorkflow(workflow_id)
             return result
 
         with patch.object(manager, 'queryRecordedStatus', side_effect=cancel_before_returning):
-            self.jobs.startWorkflows([job_id])
-        self.jobs.progressActiveState()
-        self.jobs.startWorkflows()
-        self.assertEqual(self.jobs.jobStatus(job_id), ActionStatus.CANCELED)
+            self.workflows.startWorkflows([workflow_id])
+        self.workflows.progressActiveState()
+        self.workflows.startWorkflows()
+        self.assertEqual(self.workflows.workflowStatus(workflow_id), ActionStatus.CANCELED)
         self.assertFalse(output.exists())
-        with self.jobs.conn as conn:
-            self.assertEqual(conn.execute('SELECT workflow_status FROM jobs WHERE job_id = ?',
-                                          (job_id,)).fetchone()[0], 'CANCELED')
+        with self.workflows.conn as conn:
+            self.assertEqual(conn.execute('SELECT workflow_status FROM workflows WHERE workflow_id = ?',
+                                          (workflow_id,)).fetchone()[0], 'CANCELED')
 
     def test_action_and_workflow_status_updates_roll_back_together(self):
         """Abort the workflow-status write after action projection and recover SQLite.
@@ -345,26 +362,26 @@ class WorkflowStorageTests(unittest.TestCase):
         stays ACTIVE. Reopening reconciles the completed execution without replay.
         """
         output = self.root / 'artifact'
-        job_id = self.jobs.enqueueJob(APIAction([WriteFile('local', str(output), 'original')]))
-        with self.jobs.conn as conn:
-            conn.execute("""CREATE TRIGGER fail_workflow_status BEFORE UPDATE OF workflow_status ON jobs
+        workflow_id = self.workflows.enqueueWorkflow(APIAction([WriteFile('local', str(output), 'original')]))
+        with self.workflows.conn as conn:
+            conn.execute("""CREATE TRIGGER fail_workflow_status BEFORE UPDATE OF workflow_status ON workflows
                             WHEN OLD.workflow_status = 'ACTIVE' AND NEW.workflow_status = 'ACTIVE'
                             BEGIN SELECT RAISE(ABORT, 'simulated workflow status write failure'); END""")
         with self.assertRaisesRegex(sqlite3.IntegrityError, 'simulated workflow status write failure'):
-            self.jobs.startWorkflows([job_id])
+            self.workflows.startWorkflows([workflow_id])
         self.assertEqual(output.read_text(), 'original')
-        self.assertEqual(self.jobs.jobStatus(job_id), ActionStatus.ACTIVE)
-        self.assertEqual(self.jobs.headActionStatus(job_id), ActionStatus.SCHEDULING)
+        self.assertEqual(self.workflows.workflowStatus(workflow_id), ActionStatus.ACTIVE)
+        self.assertEqual(self.workflows.headActionStatus(workflow_id), ActionStatus.SCHEDULING)
         output.write_text('preserve completed effect')
-        with self.jobs.conn as conn:
+        with self.workflows.conn as conn:
             conn.execute('DROP TRIGGER fail_workflow_status')
-        self.jobs.conn.close()
+        self.workflows.conn.close()
 
-        recovered = JobData(self.database)
+        recovered = WorkflowData(self.database)
         self.addCleanup(recovered.conn.close)
         self.addCleanup(recovered.stopWorkers)
         recovered.progressActiveState()
-        self.assertEqual(recovered.jobStatus(job_id), ActionStatus.COMPLETED)
+        self.assertEqual(recovered.workflowStatus(workflow_id), ActionStatus.COMPLETED)
         self.assertEqual(output.read_text(), 'preserve completed effect')
 
     def test_shutdown_does_not_wait_for_a_canceled_chain_with_a_completed_head(self):
@@ -373,15 +390,15 @@ class WorkflowStorageTests(unittest.TestCase):
         Keep the completed head for history while canceling the overall chain.
         An attempted drain sleep fails immediately instead of hanging the test.
         """
-        manager = JobManager(self.root / 'manager.sqlite', max_workflows_active=0)
+        manager = WorkflowManager(self.root / 'manager.sqlite', max_workflows_active=0)
         self.addCleanup(manager.stop, wait_until_done=False, close_database=True)
         manager.start()
-        with manager as jobs:
-            job_id = jobs.enqueueJob([APIAction(), APIAction()])
-            jobs.startWorkflows([job_id])
-            jobs.cancelJob(job_id)
-            self.assertEqual(jobs.headActionStatus(job_id), ActionStatus.COMPLETED)
-            self.assertEqual(jobs.jobStatus(job_id), ActionStatus.CANCELED)
+        with manager as workflows:
+            workflow_id = workflows.enqueueWorkflow([APIAction(), APIAction()])
+            workflows.startWorkflows([workflow_id])
+            workflows.cancelWorkflow(workflow_id)
+            self.assertEqual(workflows.headActionStatus(workflow_id), ActionStatus.COMPLETED)
+            self.assertEqual(workflows.workflowStatus(workflow_id), ActionStatus.CANCELED)
         with patch('amscjobmanager.manager.time.sleep', side_effect=AssertionError('Unexpected drain wait')):
             manager.stop(close_database=True)
 

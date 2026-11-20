@@ -24,7 +24,7 @@ from amscjobmanager import logging as manager_logging, local_api
 from amscjobmanager.api_actions import APIAction, MakeDirectory, WriteFile, UploadFile, DownloadFile, CopyFile, RunLocal
 from amscjobmanager.compute_actions import ExecuteBatchScriptComputeAction, ExecuteJobComputeAction
 from amscjobmanager.globus_transfer_action import GlobusTransfer
-from amscjobmanager.manager import JobManager
+from amscjobmanager.manager import WorkflowManager
 from amscjobmanager.workflow import workflow_adapter
 from test_mcp_server import Client, call_mcp, run_client
 
@@ -48,13 +48,13 @@ class MCPWorkflowTests(unittest.IsolatedAsyncioTestCase):
         """Create and start an isolated server runtime without binding HTTP sockets.
 
         max_workflows_active (int, default 0) controls automatic execution.
-        Return ManagerHTTPServer with fake-free local JobManager, query routing
+        Return ManagerHTTPServer with fake-free local WorkflowManager, query routing
         and cleanup installed. Each call uses a different SQLite database.
         """
         from amscjobmanager.server.runner import ManagerHTTPServer
 
         path = self.root / f'{time.monotonic_ns()}.sqlite'
-        server = ManagerHTTPServer(lambda: JobManager(path, poll_freq=.01,
+        server = ManagerHTTPServer(lambda: WorkflowManager(path, poll_freq=.01,
                                                       max_workflows_active=max_workflows_active),
                                    port=0, log_path=self.root / 'server.log')
         self.enterContext(patch.object(manager_logging, 'api_query_user_func', server.runtime.queries.ask))
@@ -98,15 +98,15 @@ class MCPWorkflowTests(unittest.IsolatedAsyncioTestCase):
                   GlobusTransfer('dest', '/out', 'source', '/in')]
         stages = json.loads(workflow_adapter.dump_json(native))
         async with Client(server.mcp_server, cache=None) as client:
-            result = await call_mcp(client, 'submit_workflow', {'stages': stages, 'job_group': 'original', 'submission_key': 'request'})
+            result = await call_mcp(client, 'submit_workflow', {'stages': stages, 'workflow_group': 'original', 'submission_key': 'request'})
             self.assertFalse(result.is_error)
             workflow_id = result.structured_content['workflow_id']
             self.assertEqual(result.structured_content['workflow_status'], 'PENDING')
-            original = server.runtime.manager(lambda jobs: jobs.jobState(workflow_id))
+            original = server.runtime.manager(lambda workflows: workflows.workflowState(workflow_id))
             self.assertNotIn('workflow', original)
-            retry = await call_mcp(client, 'submit_workflow', {'stages': stages[:1], 'job_group': 'changed', 'submission_key': 'request'})
+            retry = await call_mcp(client, 'submit_workflow', {'stages': stages[:1], 'workflow_group': 'changed', 'submission_key': 'request'})
             self.assertEqual(retry.structured_content['workflow_id'], workflow_id)
-            self.assertEqual(server.runtime.manager(lambda jobs: jobs.jobState(workflow_id)), original)
+            self.assertEqual(server.runtime.manager(lambda workflows: workflows.workflowState(workflow_id)), original)
             unkeyed = await client.call_tool('submit_workflow', {'stages': stages[:1]})
             self.assertNotEqual(unkeyed.structured_content['workflow_id'], workflow_id)
 
@@ -173,7 +173,7 @@ class MCPWorkflowTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(invalid.is_error)
             self.assertEqual(invalid.structured_content['error']['code'], 'invalid_input')
             self.assertIn('Unknown dependency key', str(invalid.content))
-            self.assertEqual(server.runtime.manager(lambda jobs: jobs.listWorkflows()), [])
+            self.assertEqual(server.runtime.manager(lambda workflows: workflows.listWorkflows()), [])
             root = await client.call_tool('submit_workflow', {
                 'stages': [{'type': 'api', 'producer_key': 'root'}]})
             dependent = await client.call_tool('submit_workflow', {
@@ -197,7 +197,7 @@ class MCPWorkflowTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(retry.is_error)
             self.assertEqual(retry.structured_content, {
                 'workflow_id': dependent.structured_content['workflow_id'], 'workflow_status': 'CANCELED'})
-            self.assertEqual(len(server.runtime.manager(lambda jobs: jobs.listWorkflows())), 3)
+            self.assertEqual(len(server.runtime.manager(lambda workflows: workflows.listWorkflows())), 3)
 
     async def test_invalid_requests_enqueue_nothing(self):
         """Reject invalid later stages and API operations before persisting a workflow."""
@@ -214,7 +214,7 @@ class MCPWorkflowTests(unittest.IsolatedAsyncioTestCase):
                 with self.subTest(stages=stages):
                     response = await client.call_tool('submit_workflow', {'stages': stages})
                     self.assertTrue(response.is_error)
-            self.assertEqual(server.runtime.manager(lambda jobs: jobs.listWorkflows()), [])
+            self.assertEqual(server.runtime.manager(lambda workflows: workflows.listWorkflows()), [])
 
     async def test_cancel_pending_retains_workflow_and_submission_key(self):
         """Cancel via MCP twice and retain the record/key without submitting compute work."""
@@ -233,7 +233,7 @@ class MCPWorkflowTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(missing.structured_content['error']['code'], 'workflow_not_found')
             for invalid in (0, True):
                 self.assertTrue((await client.call_tool('cancel_workflow', {'workflow_id': invalid})).is_error)
-            self.assertEqual(len(server.runtime.manager(lambda jobs: jobs.listWorkflows())), 1)
+            self.assertEqual(len(server.runtime.manager(lambda workflows: workflows.listWorkflows())), 1)
 
     async def test_lifecycle_tools_report_unavailable_manager(self):
         """Return structured errors before startup, after initialization failure and shutdown."""
@@ -245,7 +245,7 @@ class MCPWorkflowTests(unittest.IsolatedAsyncioTestCase):
                     """Return a manager or simulate a bootstrap failure for this subtest."""
                     if state == 'failed':
                         raise RuntimeError('Simulated bootstrap failure')
-                    return JobManager(max_workflows_active=0)
+                    return WorkflowManager(max_workflows_active=0)
 
                 server = ManagerHTTPServer(initialize, log_path=self.root / 'server.log')
                 self.addCleanup(server.runtime.stop)
@@ -360,10 +360,10 @@ class MCPWorkflowTests(unittest.IsolatedAsyncioTestCase):
         server = await self._startServer(10)
         original = WriteFile.execute
 
-        def write(operation, job_id):
+        def write(operation, workflow_id):
             """Ask before writing the selected output, then perform normal API execution."""
             manager_logging.wfapiUserQuery('write', 'Allow output?')
-            original(operation, job_id)
+            original(operation, workflow_id)
 
         with patch.object(WriteFile, 'execute', write):
             async with Client(server.mcp_server, cache=None) as client:
@@ -415,7 +415,7 @@ class MCPWorkflowCLITests(unittest.TestCase):
                         str(job), 1, 0, pre_launch='printf pre > before', post_launch='printf post > after', nodes=1)]
             stages = json.loads(workflow_adapter.dump_json(native))
             document = {'tool': 'submit_workflow', 'arguments': {
-                'stages': stages, 'job_group': 'cli-test', 'submission_key': 'cli-workflow'}}
+                'stages': stages, 'workflow_group': 'cli-test', 'submission_key': 'cli-workflow'}}
             workflow_id = None
             for session in range(2):
                 with (root / 'admin.log').open('w+') as admin, (root / 'stderr.log').open('w+') as errors:

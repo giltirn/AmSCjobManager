@@ -9,7 +9,7 @@ from typing import Callable
 import uvicorn
 
 from ..logging import wfmanLog
-from ..manager import JobManager
+from ..manager import WorkflowManager
 from .runtime import ServerRuntime
 from .admin import AdminServer
 from .tools import ManagerMCPServer
@@ -18,12 +18,12 @@ from .tools import ManagerMCPServer
 class ManagerHTTPServer(uvicorn.Server):
     """Serve MCP on loopback and announce readiness only after socket startup."""
 
-    def __init__(self, initialize_manager: Callable[[], JobManager], *, port: int = 8765, log_path: str | Path,
+    def __init__(self, initialize_manager: Callable[[], WorkflowManager], *, port: int = 8765, log_path: str | Path,
                  admin_socket: str | Path | None = None, admin_password: str | None = None):
         """Construct the listener without starting it or the manager.
 
         Args:
-            initialize_manager (Callable[[], JobManager]): No-argument factory
+            initialize_manager (Callable[[], WorkflowManager]): No-argument factory
                 that configures the API and returns a new manager. Called on a
                 worker after HTTP readiness; it can issue user queries. The
                 caller configures logging and query hooks before running.
@@ -98,7 +98,7 @@ class ManagerHTTPServer(uvicorn.Server):
                 listening sockets, forwarded to Uvicorn for shutdown.
 
         Returns:
-            None when awaited: Stop the runtime without canceling remote jobs.
+            None when awaited: Stop the runtime without canceling remote workflows.
             First close the optional admin listener and its active connections.
             Emit the endpoint through wfmanLog to its sink
             and stdout if startup succeeded, then await normal HTTP shutdown.

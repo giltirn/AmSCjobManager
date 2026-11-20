@@ -23,7 +23,12 @@ class ExecuteBatchScriptComputeAction(ComputeActionBase):
     exclusive: StrictBool = True
     type: Literal["batch_script"] = field(default="batch_script", kw_only=True)
 
-    def initiateAction(self, job_id, name: str | None = None)->str:
+    def initiateAction(self, workflow_id, name: str | None = None)->str:
+        """Submit the batch script and return its provider job ID (str).
+
+        workflow_id (positive int) is the owning workflow database ID, unused by
+        this submission. name (str | None) supplies the optional remote job name.
+        """
         return executeBatchJobCompat(self.machine, self.script_body, self.nodes, self.ranks_per_node, self.gpus_per_rank,  time=self.time, queue=self.queue, account=self.account, job_run_dir=self.rundir, exclusive=self.exclusive, allow_unsafe=False, name=name)
 
 
@@ -48,7 +53,12 @@ class ExecuteJobComputeAction(ComputeActionBase):
     exclusive: StrictBool = True
     type: Literal["execute_job"] = field(default="execute_job", kw_only=True)
 
-    def initiateAction(self, job_id, name: str | None = None) -> str:
+    def initiateAction(self, workflow_id, name: str | None = None) -> str:
+        """Submit the executable and return its provider job ID (str).
+
+        workflow_id (positive int) is the owning workflow database ID, unused by
+        this submission. name (str | None) supplies the optional remote job name.
+        """
         return executeJob(
             self.machine, self.executable, self.arguments, self.nodes, self.ranks_per_node,
             self.gpus_per_rank,

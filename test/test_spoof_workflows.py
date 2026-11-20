@@ -18,28 +18,28 @@ from amscjobmanager.action_manager import ActionStatus
 from amscjobmanager.actions_base import ActionClass
 from amscjobmanager.compute_actions import ExecuteBatchScriptComputeAction
 from amscjobmanager.globus_transfer_action import GlobusTransfer
-from amscjobmanager.job_data import JobData
+from amscjobmanager.workflow_data import WorkflowData
 
 
 class SpoofWorkflowTests(unittest.TestCase):
     def setUp(self):
         # These tests isolate the checked-in reconciliation bodies; real
         # asynchronous lifecycles and crash recovery have separate integration tests.
-        adapter = patch('amscjobmanager.job_data.ComputeActions', DirectComputeActions)
+        adapter = patch('amscjobmanager.workflow_data.ComputeActions', DirectComputeActions)
         adapter.start()
         self.addCleanup(adapter.stop)
-        adapter = patch('amscjobmanager.job_data.GlobusDataTransfers', DirectGlobusActions)
+        adapter = patch('amscjobmanager.workflow_data.GlobusDataTransfers', DirectGlobusActions)
         adapter.start()
         self.addCleanup(adapter.stop)
-        adapter = patch('amscjobmanager.job_data.APIActions', DirectAPIActions)
+        adapter = patch('amscjobmanager.workflow_data.APIActions', DirectAPIActions)
         adapter.start()
         self.addCleanup(adapter.stop)
         # Zero delay makes each remote status query deterministically complete.
         spoof_api.resetSpoofActionState(completion_delay=0)
-        self.job_data = JobData()
+        self.workflow_data = WorkflowData()
 
     def tearDown(self):
-        self.job_data.conn.close()
+        self.workflow_data.conn.close()
 
     def test_default_compute_and_transfer_durations_are_random_and_not_immediate(self):
         spoof_api.resetSpoofActionState()
@@ -106,16 +106,16 @@ class SpoofWorkflowTests(unittest.TestCase):
         )
 
     def _run_workflow(self, workflow):
-        job_id = self.job_data.enqueueJob(workflow)
-        self.job_data.startWorkflows([job_id])
+        workflow_id = self.workflow_data.enqueueWorkflow(workflow)
+        self.workflow_data.startWorkflows([workflow_id])
 
         for _ in range(len(workflow) + 1):
-            if self.job_data.jobStatus(job_id) == ActionStatus.COMPLETED:
+            if self.workflow_data.workflowStatus(workflow_id) == ActionStatus.COMPLETED:
                 break
-            self.job_data.progressActiveState(force_poll=True)
+            self.workflow_data.progressActiveState(force_poll=True)
         else:
             self.fail("Workflow did not complete within one progression pass per action")
-        return job_id
+        return workflow_id
 
     def test_compute_transfer_compute_transfer_workflow(self):
         workflow = [
@@ -124,10 +124,10 @@ class SpoofWorkflowTests(unittest.TestCase):
             self._compute_action("compute-two"),
             self._transfer_action("transfer-two"),
         ]
-        job_id = self._run_workflow(workflow)
+        workflow_id = self._run_workflow(workflow)
 
-        state = self.job_data.jobState(job_id)
-        self.assertEqual(self.job_data.jobStatus(job_id), ActionStatus.COMPLETED)
+        state = self.workflow_data.workflowState(workflow_id)
+        self.assertEqual(self.workflow_data.workflowStatus(workflow_id), ActionStatus.COMPLETED)
         self.assertEqual(state["workflow_stage"], len(workflow))
         self.assertEqual(state["head_action_class"], ActionClass.NONE)
         self.assertEqual(state["head_action_status"], ActionStatus.COMPLETED)
@@ -171,9 +171,9 @@ class SpoofWorkflowTests(unittest.TestCase):
             self._compute_action("compute-middle"),
             self._transfer_action("transfer-last"),
         ]
-        job_id = self._run_workflow(workflow)
+        workflow_id = self._run_workflow(workflow)
 
-        self.assertEqual(self.job_data.jobStatus(job_id), ActionStatus.COMPLETED)
+        self.assertEqual(self.workflow_data.workflowStatus(workflow_id), ActionStatus.COMPLETED)
         submissions = [
             event for event in spoof_api.getSpoofActionHistory()
             if event["event"] == "submitted"
@@ -193,31 +193,31 @@ class SpoofWorkflowTests(unittest.TestCase):
         )
 
     def test_canceled_queued_workflow_is_retained_and_never_starts(self):
-        job_id = self.job_data.enqueueJob(self._compute_action("queued"))
-        self.job_data.cancelJob(job_id)
+        workflow_id = self.workflow_data.enqueueWorkflow(self._compute_action("queued"))
+        self.workflow_data.cancelWorkflow(workflow_id)
 
-        self.assertEqual(self.job_data.jobStatus(job_id), ActionStatus.CANCELED)
-        self.job_data.startWorkflows([job_id])
-        self.job_data.progressActiveState(force_poll=True)
+        self.assertEqual(self.workflow_data.workflowStatus(workflow_id), ActionStatus.CANCELED)
+        self.workflow_data.startWorkflows([workflow_id])
+        self.workflow_data.progressActiveState(force_poll=True)
         self.assertEqual(spoof_api.getSpoofActionHistory(), [])
 
     def test_canceled_active_workflow_is_retained_and_does_not_advance(self):
         spoof_api.resetSpoofActionState(completion_delay=300)
-        job_id = self.job_data.enqueueJob([
+        workflow_id = self.workflow_data.enqueueWorkflow([
             self._compute_action("current"), self._compute_action("next"),
         ])
-        self.job_data.startWorkflows([job_id])
-        action_id = self.job_data.jobState(job_id)["head_action_id"]
+        self.workflow_data.startWorkflows([workflow_id])
+        action_id = self.workflow_data.workflowState(workflow_id)["head_action_id"]
 
-        self.job_data.cancelJob(job_id)
-        self.assertEqual(self.job_data.jobStatus(job_id), ActionStatus.CANCELED)
+        self.workflow_data.cancelWorkflow(workflow_id)
+        self.assertEqual(self.workflow_data.workflowStatus(workflow_id), ActionStatus.CANCELED)
         self.assertEqual(
-            self.job_data.action_man[ActionClass.COMPUTE].queryRecordedStatus(
+            self.workflow_data.action_man[ActionClass.COMPUTE].queryRecordedStatus(
                 action_id, force_update=True
             )[0],
             ActionStatus.CANCELED,
         )
-        self.job_data.progressActiveState(force_poll=True)
+        self.workflow_data.progressActiveState(force_poll=True)
         self.assertEqual(
             [event["event"] for event in spoof_api.getSpoofActionHistory()],
             ["submitted", "canceled"],

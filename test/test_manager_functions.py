@@ -16,8 +16,8 @@ from pydantic import Field, RootModel, ValidationError
 
 from amscjobmanager.actions_base import ActionClass
 from amscjobmanager.compute_action_manager import ComputeActions
-from amscjobmanager.job_data import JobData
-from amscjobmanager.manager import JobManager
+from amscjobmanager.workflow_data import WorkflowData
+from amscjobmanager.manager import WorkflowManager
 from amscjobmanager.manager_functions import FunctionArguments, FunctionDefinition
 from amscjobmanager.server.functions import FunctionError, FunctionRegistry
 from amscjobmanager.server.runtime import ServerRuntime
@@ -66,44 +66,44 @@ class ExtensionComputeActions(ComputeActions):
         ),)
 
 
-class ExtensionJobManager(JobManager):
+class ExtensionWorkflowManager(WorkflowManager):
     """Advertise workflow-manager operations without modifying transport code."""
 
     def getMCPFunctions(self):
-        """Describe standard operations and a JobManager-owned extension."""
-        def _inspect(manager: ExtensionJobManager, args: ExtensionArguments) -> ExtensionResult:
+        """Describe standard operations and a WorkflowManager-owned extension."""
+        def _inspect(manager: ExtensionWorkflowManager, args: ExtensionArguments) -> ExtensionResult:
             """Return args.value plus ten under the supplied manager's lock."""
             with manager:
                 return ExtensionResult(result=args.value + 10)
 
         return super().getMCPFunctions() + (FunctionDefinition(
-            'inspect_manager_extension', 'Inspect a JobManager extension.', _inspect, read_only=True,
+            'inspect_manager_extension', 'Inspect a WorkflowManager extension.', _inspect, read_only=True,
         ),)
 
     def getAdminFunctions(self):
-        """Describe standard administration and a JobManager-owned extension."""
-        def _apply(manager: ExtensionJobManager, args: ExtensionArguments) -> ExtensionResult:
+        """Describe standard administration and a WorkflowManager-owned extension."""
+        def _apply(manager: ExtensionWorkflowManager, args: ExtensionArguments) -> ExtensionResult:
             """Return args.value plus twenty under the supplied manager's lock."""
             with manager:
                 return ExtensionResult(result=args.value + 20)
 
         return super().getAdminFunctions() + (FunctionDefinition(
-            'apply_manager_extension', 'Apply a JobManager extension.', _apply,
+            'apply_manager_extension', 'Apply a WorkflowManager extension.', _apply,
         ),)
 
 
 class ManagerFunctionTests(unittest.TestCase):
-    """Test the public registration contract and dispatch against real JobData owners."""
+    """Test the public registration contract and dispatch against real WorkflowData owners."""
 
     def setUp(self):
         """Construct an empty database with the extension manager; register close cleanup."""
-        self.jobs = JobData(_test_action_manager_factories={ActionClass.COMPUTE: ExtensionComputeActions})
-        self.addCleanup(self.jobs.conn.close)
+        self.workflows = WorkflowData(_test_action_manager_factories={ActionClass.COMPUTE: ExtensionComputeActions})
+        self.addCleanup(self.workflows.conn.close)
 
-    def test_discovery_and_invocation_resolve_the_supplied_jobdata(self):
+    def test_discovery_and_invocation_resolve_the_supplied_workflow_data(self):
         """Use one registry against two databases to prove manager instances are not captured."""
-        registry = FunctionRegistry(self.jobs)
-        other = JobData(_test_action_manager_factories={ActionClass.COMPUTE: ExtensionComputeActions})
+        registry = FunctionRegistry(self.workflows)
+        other = WorkflowData(_test_action_manager_factories={ActionClass.COMPUTE: ExtensionComputeActions})
         self.addCleanup(other.conn.close)
         descriptions = {item.name: item for item in registry.describe('mcp')}
         self.assertIn('inspect_extension', descriptions)
@@ -114,7 +114,7 @@ class ManagerFunctionTests(unittest.TestCase):
         self.assertTrue(description.read_only)
         result, _ = registry.invoke(other, 'mcp', 'inspect_extension', {'value': 4})
         self.assertEqual(result, {'result': 8})
-        self.assertEqual(self.jobs.getManager(ActionClass.COMPUTE).invocations, 0)
+        self.assertEqual(self.workflows.getManager(ActionClass.COMPUTE).invocations, 0)
         self.assertEqual(other.getManager(ActionClass.COMPUTE).invocations, 1)
         result, message = registry.invoke(other, 'admin', 'apply_extension', {'value': 4})
         self.assertEqual(result, {'result': 12})
@@ -122,26 +122,26 @@ class ManagerFunctionTests(unittest.TestCase):
 
     def test_invalid_arguments_and_wrong_channels_never_invoke_methods(self):
         """Reject extra fields, type coercions, invalid bounds, and admin calls through MCP."""
-        registry = FunctionRegistry(self.jobs)
+        registry = FunctionRegistry(self.workflows)
         for arguments in ({'value': -1}, {'value': True}, {'value': '2'}, {'value': 2, 'multiplier': 99}):
             with self.subTest(arguments=arguments), self.assertRaises(ValidationError):
-                registry.invoke(self.jobs, 'admin', 'apply_extension', arguments)
+                registry.invoke(self.workflows, 'admin', 'apply_extension', arguments)
         with self.assertRaises(FunctionError):
-            registry.invoke(self.jobs, 'mcp', 'apply_extension', {'value': 2})
-        self.assertEqual(self.jobs.getManager(ActionClass.COMPUTE).invocations, 0)
+            registry.invoke(self.workflows, 'mcp', 'apply_extension', {'value': 2})
+        self.assertEqual(self.workflows.getManager(ActionClass.COMPUTE).invocations, 0)
 
     def test_invalid_output_is_reported_after_exactly_one_invocation(self):
         """Distinguish a faulty result contract from invalid input, without retrying the operation."""
-        registry = FunctionRegistry(self.jobs)
+        registry = FunctionRegistry(self.workflows)
         with patch.object(ExtensionComputeActions, 'inspectExtension', return_value='not an integer') as operation:
             with self.assertRaises(FunctionError) as error:
-                registry.invoke(self.jobs, 'admin', 'apply_extension', {'value': 3})
+                registry.invoke(self.workflows, 'admin', 'apply_extension', {'value': 3})
             self.assertEqual(error.exception.code, 'operation_failed')
             operation.assert_called_once_with(3, multiplier=3)
 
     def test_invalid_registrations_fail_before_publication(self):
         """Reject duplicate names, missing model hints, invalid arity, and non-model returns."""
-        definition = self.jobs.getManager(ActionClass.COMPUTE).getMCPFunctions()[-1]
+        definition = self.workflows.getManager(ActionClass.COMPUTE).getMCPFunctions()[-1]
         from dataclasses import replace
 
         def _unannotated(manager, args):
@@ -168,7 +168,7 @@ class ManagerFunctionTests(unittest.TestCase):
             with self.subTest(definitions=definitions), \
                  patch.object(ExtensionComputeActions, 'getMCPFunctions', return_value=definitions), \
                  self.assertRaises(ValueError):
-                FunctionRegistry(self.jobs)
+                FunctionRegistry(self.workflows)
 
     def test_backend_definitions_do_not_import_server_or_mcp(self):
         """Describe all backend functions in a fresh process with both transport imports blocked."""
@@ -176,12 +176,12 @@ class ManagerFunctionTests(unittest.TestCase):
 import sys
 sys.modules['mcp'] = None
 sys.modules['amscjobmanager.server'] = None
-from amscjobmanager.manager import JobManager
+from amscjobmanager.manager import WorkflowManager
 from amscjobmanager.actions_base import ActionClass
 from amscjobmanager.user_queries import UserQueryQueue
-manager = JobManager(max_workflows_active=0)
+manager = WorkflowManager(max_workflows_active=0)
 try:
-    providers = [manager, UserQueryQueue(), manager.job_data.getManager(ActionClass.COMPUTE)]
+    providers = [manager, UserQueryQueue(), manager.workflow_data.getManager(ActionClass.COMPUTE)]
     for provider in providers:
         for definition in provider.getMCPFunctions() + provider.getAdminFunctions():
             definition.describe()
@@ -202,13 +202,13 @@ finally:
         self.assertEqual(definition.describe().parameter_order, ['value'])
         self.assertEqual(definition.invoke(None, ExtensionArguments(value=7)), ExtensionResult(result=7))
 
-    def test_jobmanager_functions_are_backend_owned_and_keep_raw_receipt_shape(self):
+    def test_workflow_manager_functions_are_backend_owned_and_keep_raw_receipt_shape(self):
         """Dispatch workflow-manager callbacks directly without importing MCP or a transport handler."""
-        manager = ExtensionJobManager(max_workflows_active=0)
+        manager = ExtensionWorkflowManager(max_workflows_active=0)
         self.addCleanup(manager.stop, False, close_database=True)
         manager.start()
-        with manager as jobs:
-            registry = FunctionRegistry(jobs, manager=manager)
+        with manager as workflows:
+            registry = FunctionRegistry(workflows, manager=manager)
         receipt, _ = registry.invoke(None, 'mcp', 'submit_workflow',
             {'stages': [{'type': 'api', 'operations': []}]}, manager=manager)
         self.assertEqual(set(receipt), {'workflow_id', 'workflow_status'})
@@ -222,28 +222,28 @@ finally:
 
     def test_wallet_adapters_keep_enabled_out_of_public_inputs(self):
         """Retain separate enable/disable commands with typed machine-only inputs."""
-        registry = FunctionRegistry(self.jobs)
+        registry = FunctionRegistry(self.workflows)
         with patch('amscjobmanager.api_general.getKnownMachines', return_value=['local']):
             descriptions = {item.name: item for item in registry.describe('admin')}
             self.assertEqual(descriptions['enable_wallet'].parameter_order, ['machine'])
             self.assertNotIn('enabled', descriptions['enable_wallet'].input_schema['properties'])
-            registry.invoke(self.jobs, 'admin', 'enable_wallet', {'machine': 'LOCAL'})
-            registry.invoke(self.jobs, 'admin', 'recharge_wallet', {'machine': 'local', 'node_hours': 2})
+            registry.invoke(self.workflows, 'admin', 'enable_wallet', {'machine': 'LOCAL'})
+            registry.invoke(self.workflows, 'admin', 'recharge_wallet', {'machine': 'local', 'node_hours': 2})
             with self.assertRaises(ValidationError):
-                registry.invoke(self.jobs, 'admin', 'disable_wallet', {'machine': 'local', 'enabled': True})
-        wallet = self.jobs.getManager(ActionClass.COMPUTE).getWallets()['local']
+                registry.invoke(self.workflows, 'admin', 'disable_wallet', {'machine': 'local', 'enabled': True})
+        wallet = self.workflows.getManager(ActionClass.COMPUTE).getWallets()['local']
         self.assertTrue(wallet['enabled'])
         self.assertEqual(wallet['available_node_hours'], 2)
 
     def test_runtime_reports_initialization_and_failure_without_publishing_functions(self):
         """A malformed registration fails initialization rather than exposing a partial catalog."""
-        runtime = ServerRuntime(lambda: JobManager(max_workflows_active=0))
+        runtime = ServerRuntime(lambda: WorkflowManager(max_workflows_active=0))
         self.addCleanup(runtime.stop)
         with self.assertRaises(FunctionError) as error:
             runtime.describeFunctions('admin')
         self.assertEqual(error.exception.code, 'server_initializing')
         with patch.object(ComputeActions, 'getMCPFunctions', return_value=(
-                self.jobs.getManager(ActionClass.COMPUTE).getMCPFunctions()[-1],) * 2):
+                self.workflows.getManager(ActionClass.COMPUTE).getMCPFunctions()[-1],) * 2):
             runtime.start()
             runtime._startup_worker.future.result(3)
         self.assertEqual(runtime.state, 'failed')
@@ -274,8 +274,8 @@ class FunctionTransportTests(unittest.IsolatedAsyncioTestCase):
         from amscjobmanager.server.runner import ManagerHTTPServer
 
         temporary = self.enterContext(tempfile.TemporaryDirectory())
-        with patch('amscjobmanager.job_data.ComputeActions', ExtensionComputeActions):
-            manager = ExtensionJobManager(max_workflows_active=0)
+        with patch('amscjobmanager.workflow_data.ComputeActions', ExtensionComputeActions):
+            manager = ExtensionWorkflowManager(max_workflows_active=0)
         server = ManagerHTTPServer(lambda: manager, port=0, log_path=Path(temporary) / 'server.log')
         self.addCleanup(server.runtime.stop)
         admin = AdminServer(Path(temporary) / 'private' / 'admin.sock', 'secret', server.runtime)

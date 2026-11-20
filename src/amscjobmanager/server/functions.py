@@ -11,11 +11,11 @@ from ..manager_functions import FunctionError
 class FunctionRegistry:
     """Map channel/name pairs to annotated callables and their current backend owner."""
 
-    def __init__(self, jobs=None, *, manager=None, query_provider=None):
+    def __init__(self, workflows=None, *, manager=None, query_provider=None):
         """Collect explicitly exposed operations without retaining backend instances.
 
-        jobs (locked JobData | None) supplies action-manager definitions; manager
-        (JobManager | None) supplies workflow/sandbox definitions; query_provider
+        workflows (locked WorkflowData | None) supplies action-manager definitions; manager
+        (WorkflowManager | None) supplies workflow/sandbox definitions; query_provider
         (UserQueryQueue | None) supplies always-available interaction definitions.
         Return None after rejecting conflicting names or invalid annotations.
         Stored owner keys identify a category/provider, never a bound instance.
@@ -26,8 +26,8 @@ class FunctionRegistry:
             providers.append(('manager', manager))
         if query_provider is not None:
             providers.append(('queries', query_provider))
-        if jobs is not None:
-            providers.extend((action_class, jobs.getManager(action_class)) for action_class in jobs.getManagerClasses())
+        if workflows is not None:
+            providers.extend((action_class, workflows.getManager(action_class)) for action_class in workflows.getManagerClasses())
 
         # Validate all registrations before this registry is published.
         for owner, provider in providers:
@@ -46,16 +46,16 @@ class FunctionRegistry:
         """Return fresh FunctionDescription objects for channel ('mcp' or 'admin'), in registration order."""
         return [definition.describe() for _, definition in self._functions[channel].values()]
 
-    def invoke(self, jobs, channel: str, name: str, arguments: dict, *,
+    def invoke(self, workflows, channel: str, name: str, arguments: dict, *,
                manager=None, query_provider=None) -> tuple[dict, str]:
         """Validate inputs, resolve the current owner, invoke once, and validate output.
 
-        jobs (locked JobData | None) supports direct action-manager invocation.
+        workflows (locked WorkflowData | None) supports direct action-manager invocation.
         channel (str) selects mcp/admin; name (str) is an advertised command;
-        arguments (dict) supplies its model fields. manager (JobManager | None)
-        supplies workflow operations or acquires JobData for action operations;
+        arguments (dict) supplies its model fields. manager (WorkflowManager | None)
+        supplies workflow operations or acquires WorkflowData for action operations;
         query_provider (UserQueryQueue | None) supplies the query service.
-        Return (serialized output-model dict, acknowledgment str). JobManager
+        Return (serialized output-model dict, acknowledgment str). WorkflowManager
         callbacks own their locking; action callbacks run under its lock here.
         No operation is retried and no backend instance is retained.
         """
@@ -76,15 +76,15 @@ class FunctionRegistry:
                 if manager is None or not manager.isAlive():
                     raise FunctionError('manager_unavailable', 'Workflow manager is not running.')
                 value = definition.invoke(manager, validated)
-            elif jobs is not None:
-                value = definition.invoke(jobs.getManager(owner), validated)
+            elif workflows is not None:
+                value = definition.invoke(workflows.getManager(owner), validated)
             else:
                 if manager is None or not manager.isAlive():
                     raise FunctionError('manager_unavailable', 'Workflow manager is not running.')
-                with manager as locked_jobs:
+                with manager as locked_workflows:
                     if not manager.isAlive():
                         raise FunctionError('manager_unavailable', 'Workflow manager is not running.')
-                    value = definition.invoke(locked_jobs.getManager(owner), validated)
+                    value = definition.invoke(locked_workflows.getManager(owner), validated)
         except ValidationError as exc:
             wfmanLog(f'Invalid model constructed by {name}: {type(exc).__name__}')
             raise FunctionError('operation_failed', 'Function returned an invalid result; check the server log.') from exc

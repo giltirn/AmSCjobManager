@@ -21,9 +21,9 @@ actions. Files created by a successful action remain if a later action fails.
 
 ```mermaid
 flowchart TD
-    User[Python application] --> Manager[JobManager: background loop and lock]
-    Manager --> Jobs[JobData: workflows and head actions]
-    Jobs --> Actions[ActionManager interface: individual actions]
+    User[Python application] --> Manager[WorkflowManager: background loop and lock]
+    Manager --> Workflows[WorkflowData: workflows and head actions]
+    Workflows --> Actions[ActionManager interface: individual actions]
     Actions --> Action[Action object: resource query and submission]
     Action --> API[api_general: selected implementation]
     Actions --> API
@@ -31,14 +31,14 @@ flowchart TD
     API --> Globus[IRI movement API and Globus Transfer API]
     API --> Local[Local processes]
     API --> Spoof[SPOOF simulation]
-    Jobs --> DB[(SQLite)]
+    Workflows --> DB[(SQLite)]
     Actions --> DB
 ```
 
 | Component | Responsibility |
 | --- | --- |
-| `JobManager` | Owns a `JobData` instance, progresses it in a background thread, and serializes access through a lock. |
-| `JobData` | Persists workflows, selects the current action, allocates action IDs, and advances completed workflows. |
+| `WorkflowManager` | Owns a `WorkflowData` instance, progresses it in a background thread, and serializes access through a lock. |
+| `WorkflowData` | Persists workflows, selects the current action, allocates action IDs, and advances completed workflows. |
 | `ActionManager` | Abstract interface plus shared worker lifecycle handling. Does not prescribe storage or polling policy. |
 | `AsyncActionManager` | Implements action persistence and its supervision loop for submission/cancellation recovery, remote identifiers, polling, and retries. Compute and Globus subclasses supply the remote control operations. |
 | `APIActions` | Runs each ordered API sequence directly on its worker, using its own table and a checkpoint for the next unfinished operation. Interrupted operations must be replay-safe. |
@@ -55,19 +55,21 @@ cancel them itself.
 
 Keep these identifiers distinct:
 
-- **Workflow `job_id`:** the integer returned by `JobData.enqueueJob()`.
-- **Action ID:** the `actions` table's integer primary key, assigned by JobData
+- **Workflow `workflow_id`:** the integer returned by `WorkflowData.enqueueWorkflow()`.
+- **Workflow group `workflow_group`:** optional, nonunique metadata supplied at
+  submission; it is separate from the unique `submission_key` used for retry safety.
+- **Action ID:** the `actions` table's integer primary key, assigned by WorkflowData
   to every workflow step when the workflow is enqueued.
 - **Remote API key:** the provider's compute job ID or Globus task ID, stored in
   the action table's `api_key` column. Here “key” means an identifier, not a token.
 - **Remote action name:** `amscjm_<action_id>`, used to recover a submitted action
   if the process stops before saving its remote ID.
 
-The manager database contains `jobs`, `actions`, `computes`, `transfers`, and
+The manager database contains `workflows`, `actions`, `computes`, `transfers`, and
 `api_actions`. Each queued stage has an `actions` row with its workflow ID,
 zero-based stage index, concrete type, category, recorded status, and a pickled
 action definition. There is no workflow-level BLOB or separate ID allocator.
-`jobs` retains workflow metadata, the current stage, and a persisted
+`workflows` retains workflow metadata, the current stage, and a persisted
 `workflow_status`: PENDING, ACTIVE, COMPLETED, FAILED, CANCELING, or CANCELED.
 ACTIVE includes submission, provider-held work, and intermediate action
 completion; SCHEDULING and PROVIDER_HELD are only action statuses. CANCELING
@@ -75,6 +77,13 @@ records workflow-wide cancellation intent; executing heads are always canceled.
 Globus INACTIVE and IRI compute held
 map to PROVIDER_HELD, preserving polling and cancellation of accepted work.
 A read-only `workflow_heads` view derives head metadata and action status.
+
+Workflow terminology applies to the Python interface, persisted records, and
+MCP fields. Individual compute jobs retain provider-oriented names such as
+`executeJob` and `cancelJob`; their provider IDs are distinct from workflow IDs.
+The package name and `AMSC_JOB_MANAGER_API_IMPL` environment variable are unchanged.
+This alpha schema does not migrate databases using the previous workflow field
+names; create a new workflow database for this version.
 
 Two additional read-only views centralize status rules:
 
@@ -89,17 +98,17 @@ definitions used by Python checks. Polling and `getLiveActions()` select LIVE
 members; execution supervision selects EXECUTING. Waiting for completion also
 includes CANCELING explicitly, rather than defining another group.
 
-Action managers own their execution records. JobData copies their recorded
+Action managers own their execution records. WorkflowData copies their recorded
 statuses into `actions`, retaining completed stages after the head advances.
 The action projection and corresponding overall workflow status update commit
 together. Advancing past the final stage records workflow completion, while
 cancellation remains authoritative over late execution-status results.
 An externally canceled head first places its workflow in CANCELING so that
 reconciliation can finish cancellation of its remaining queued stages.
-`jobStatus()` reads the persisted workflow status, and workflow listing filters
+`workflowStatus()` reads the persisted workflow status, and workflow listing filters
 that column directly. Head-action status remains independent: canceling a chain
 does not turn an already successful producer into a canceled action.
-`jobState` and `listWorkflows` return workflow/head metadata without loading or
+`workflowState` and `listWorkflows` return workflow/head metadata without loading or
 returning serialized action definitions.
 
 Action definitions also accept optional keyword-only `producer_key` and
@@ -107,7 +116,7 @@ Action definitions also accept optional keyword-only `producer_key` and
 example `["prepared", "AND", ["solver_a", "OR", "solver_b"]]`. Nonempty lists
 alternate operands with uppercase AND/OR operators. Nested lists act as
 parentheses; AND has its normal precedence over OR. These fields are stored as
-producer text and dependency JSON in the action rows. JobData checks keys against
+producer text and dependency JSON in the action rows. WorkflowData checks keys against
 earlier submissions and earlier stages of the same workflow before inserting each
 action. Unknown references reject the entire submission; no partial chain or
 submission key is retained. Dependency checks require no action-manager records.
@@ -129,7 +138,7 @@ dependency in a later stage. The complete cascade is recorded atomically
 before remote cancellation. Intent recording changes only workflow records;
 reconciliation handles pending heads locally, preserves terminal action history,
 and delegates executing heads to their action managers. Constructor recovery calls
-the same `JobData.performPendingCancellations()` method before restoring ordinary
+the same `WorkflowData.performPendingCancellations()` method before restoring ordinary
 ACTIVE execution workers.
 The cancellation check follows prerequisite chains, so a waiting action cannot count its
 own future output or a circular fallback as an alternative after a producer is

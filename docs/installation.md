@@ -47,7 +47,7 @@ transfer its data. See the [example walkthrough](workflows.md).
 import os
 os.environ["AMSC_JOB_MANAGER_API_IMPL"] = "SPOOF"
 
-from amscjobmanager import JobManager
+from amscjobmanager import WorkflowManager
 ```
 
 The choice is process-wide and happens at import time. Use a fresh Python

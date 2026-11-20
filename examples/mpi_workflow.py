@@ -1,4 +1,4 @@
-r"""Upload, compile, run and retrieve a real MPI reduction through JobManager.
+r"""Upload, compile, run and retrieve a real MPI reduction through WorkflowManager.
 
     python examples/mpi_workflow.py manager-config.json local --ranks-per-node 4
     python examples/mpi_workflow.py manager-config.json frontier \
@@ -30,7 +30,7 @@ import shlex
 import time
 import uuid
 
-from amscjobmanager import ActionStatus, JobManager, api_general as api
+from amscjobmanager import ActionStatus, WorkflowManager, api_general as api
 from amscjobmanager import globals as manager_globals
 from amscjobmanager.api_actions import APIAction, MakeDirectory, UploadFile
 from amscjobmanager.compute_actions import ExecuteJobComputeAction
@@ -129,7 +129,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Workflow state and databases: {state_directory}", flush=True)
 
     # 5. Demonstrate staging API actions as a workflow stage. Constructing these
-    # operations does not create directories or upload files: JobManager executes
+    # operations does not create directories or upload files: WorkflowManager executes
     # them when this stage is reached, before advancing to the compute stage.
     # The API manager checkpoints each operation for recovery after interruption.
     remote_source = run_directory / "mpi_reduction.cpp"
@@ -154,22 +154,22 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     # 7. Persist and enqueue the ordered stages. Successful API preparation is
-    # required before compute can start. JobManager owns execution/progression;
+    # required before compute can start. WorkflowManager owns execution/progression;
     # access its workflow database under the manager lock.
     manifest = {"machine": args.machine, "run_directory": str(run_directory),
                 "output_directory": str(output_directory), "expected_ranks": expected_ranks,
                 "build_profile": profile, "nodes": args.nodes, "ranks_per_node": args.ranks_per_node}
     manifest_path = state_directory / "run.json"
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
-    manager = JobManager(filename=str(state_directory / "workflow.sqlite"), poll_freq=args.poll_interval, max_workflows_active=1)
-    job_id = None
+    manager = WorkflowManager(filename=str(state_directory / "workflow.sqlite"), poll_freq=args.poll_interval, max_workflows_active=1)
+    workflow_id = None
     status = None
     try:
-        with manager as jobs:
-            job_id = jobs.enqueueJob([preparation, compute], job_group=f"mpi-example-{run_id}")
-        manifest["job_id"] = job_id
+        with manager as workflows:
+            workflow_id = workflows.enqueueWorkflow([preparation, compute], workflow_group=f"mpi-example-{run_id}")
+        manifest["workflow_id"] = workflow_id
         manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
-        print(f"Workflow {job_id}: expecting {expected_ranks} MPI ranks", flush=True)
+        print(f"Workflow {workflow_id}: expecting {expected_ranks} MPI ranks", flush=True)
         # Keep this program alive while the background manager handles queueing,
         # execution, and polling. Force a refresh on our own timer so queued
         # jobs can be distinguished from running jobs, even without a change.
@@ -178,34 +178,34 @@ def main(argv: list[str] | None = None) -> int:
         next_poll = time.monotonic()
         while True:
             if not manager.isAlive():
-                raise RuntimeError("JobManager stopped before the workflow completed")
-            with manager as jobs:
+                raise RuntimeError("WorkflowManager stopped before the workflow completed")
+            with manager as workflows:
                 force_poll = time.monotonic() >= next_poll
-                action_status, api_status = jobs.headActionStatus(
-                    job_id, force_poll=force_poll, return_api_status=True
+                action_status, api_status = workflows.headActionStatus(
+                    workflow_id, force_poll=force_poll, return_api_status=True
                 )
                 if force_poll:
                     next_poll = time.monotonic() + args.poll_interval
-                status = jobs.jobStatus(job_id)
-                state = jobs.jobState(job_id)
+                status = workflows.workflowStatus(workflow_id)
+                state = workflows.workflowState(workflow_id)
             summary = (status.name, action_status.name, api_status, state["workflow_stage"], state["head_action_type"])
             if force_poll or summary != previous:
-                print(f"Workflow {job_id}: workflow_status={status.name}, "
+                print(f"Workflow {workflow_id}: workflow_status={status.name}, "
                       f"action_status={action_status.name}, api_status={api_status!r}, "
                       f"stage={state['workflow_stage']}, action={state['head_action_type']}", flush=True)
                 previous = summary
             if status == ActionStatus.COMPLETED:
                 break
             if status in (ActionStatus.FAILED, ActionStatus.CANCELED):
-                raise RuntimeError(f"Workflow {job_id} ended as {status.name}; inspect logs in {args.machine}:{run_directory}")
+                raise RuntimeError(f"Workflow {workflow_id} ended as {status.name}; inspect logs in {args.machine}:{run_directory}")
             time.sleep(min(1, args.poll_interval))
     except BaseException:
         # Request cancellation of unfinished work on interruption or an error.
         # Preserve terminal failure records and report unconfirmed cancellation.
-        if job_id is not None and status not in (ActionStatus.COMPLETED, ActionStatus.FAILED, ActionStatus.CANCELED):
+        if workflow_id is not None and status not in (ActionStatus.COMPLETED, ActionStatus.FAILED, ActionStatus.CANCELED):
             try:
-                with manager as jobs:
-                    jobs.cancelJob(job_id)
+                with manager as workflows:
+                    workflows.cancelWorkflow(workflow_id)
             except Exception as error:
                 print(f"Cancellation could not be confirmed: {error}; inspect {state_directory / 'workflow.sqlite'} before resubmitting", flush=True)
         raise

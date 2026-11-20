@@ -18,7 +18,7 @@ from amscjobmanager.actions_base import ActionClass
 from amscjobmanager.api_actions import APIAction, WriteFile
 from amscjobmanager.compute_actions import ExecuteJobComputeAction
 from amscjobmanager.globus_transfer_action import GlobusTransfer
-from amscjobmanager.job_data import JobData
+from amscjobmanager.workflow_data import WorkflowData
 
 
 class ProviderHeldTests(unittest.TestCase):
@@ -49,22 +49,22 @@ class ProviderHeldTests(unittest.TestCase):
         self.actions = [ExecuteJobComputeAction('local', '', '', '60', '/bin/true', [], '/tmp', 1, 0, nodes=1),
                         GlobusTransfer('dest', '/output', 'source', '/input')]
 
-    def _newJobs(self, *, filename=None, workers=False):
-        """Open isolated JobData and register cleanup, optionally reopening a prior file.
+    def _newWorkflows(self, *, filename=None, workers=False):
+        """Open isolated WorkflowData and register cleanup, optionally reopening a prior file.
 
         filename (Path | None) chooses storage; None creates a new temporary
         path. workers (bool, default False) selects production workers instead
-        of deterministic adapters. Return JobData with infinite automatic poll
+        of deterministic adapters. Return WorkflowData with infinite automatic poll
         delay; tests explicitly wake or poll it without relying on wall time.
         """
         if filename is None:
             self.next_database += 1
             filename = self.root / f'workflow-{self.next_database}.sqlite'
-        jobs = JobData(filename, poll_freq=float('inf'),
+        workflows = WorkflowData(filename, poll_freq=float('inf'),
                        _test_action_manager_factories=None if workers else self.factories)
-        self.addCleanup(jobs.conn.close)
-        self.addCleanup(jobs.stopWorkers)
-        return jobs
+        self.addCleanup(workflows.conn.close)
+        self.addCleanup(workflows.stopWorkers)
+        return workflows
 
     def _waitUntil(self, condition):
         """Wait up to three seconds for condition (zero-argument bool callable); return None."""
@@ -83,25 +83,25 @@ class ProviderHeldTests(unittest.TestCase):
         for action in self.actions:
             action_class = actions_base.actionClass(action)
             with self.subTest(action_class=action_class):
-                jobs = self._newJobs()
+                workflows = self._newWorkflows()
                 output = self.root / action_class.name
-                job_id = jobs.enqueueJob([action, APIAction([WriteFile('local', str(output), 'done')])])
-                jobs.startWorkflows([job_id])
-                manager = jobs.getManager(action_class)
-                self.assertEqual(jobs.headActionStatus(job_id), ActionStatus.PROVIDER_HELD)
-                self.assertEqual(jobs.jobStatus(job_id), ActionStatus.ACTIVE)
-                self.assertEqual(len(jobs.listWorkflows(statuses=ActionStatus.ACTIVE)), 1)
+                workflow_id = workflows.enqueueWorkflow([action, APIAction([WriteFile('local', str(output), 'done')])])
+                workflows.startWorkflows([workflow_id])
+                manager = workflows.getManager(action_class)
+                self.assertEqual(workflows.headActionStatus(workflow_id), ActionStatus.PROVIDER_HELD)
+                self.assertEqual(workflows.workflowStatus(workflow_id), ActionStatus.ACTIVE)
+                self.assertEqual(len(workflows.listWorkflows(statuses=ActionStatus.ACTIVE)), 1)
                 self.assertEqual(len(manager.getLiveActions()), 1)
                 for _ in range(2):
-                    jobs.progressActiveState(force_poll=True)
+                    workflows.progressActiveState(force_poll=True)
                 self.assertFalse(output.exists())
                 self.status[action_class].return_value = 'active' if action_class == ActionClass.COMPUTE else 'ACTIVE'
-                jobs.progressActiveState(force_poll=True)
-                self.assertEqual(jobs.headActionStatus(job_id), ActionStatus.ACTIVE)
+                workflows.progressActiveState(force_poll=True)
+                self.assertEqual(workflows.headActionStatus(workflow_id), ActionStatus.ACTIVE)
                 self.status[action_class].return_value = 'completed' if action_class == ActionClass.COMPUTE else 'SUCCEEDED'
-                jobs.progressActiveState(force_poll=True)
-                jobs.progressActiveState()
-                self.assertEqual(jobs.jobStatus(job_id), ActionStatus.COMPLETED)
+                workflows.progressActiveState(force_poll=True)
+                workflows.progressActiveState()
+                self.assertEqual(workflows.workflowStatus(workflow_id), ActionStatus.COMPLETED)
                 self.assertEqual(output.read_text(), 'done')
                 self.submit[action_class].assert_called_once()
 
@@ -111,43 +111,43 @@ class ProviderHeldTests(unittest.TestCase):
             action_class = actions_base.actionClass(action)
             with self.subTest(action_class=action_class):
                 self.status[action_class].return_value = 'active' if action_class == ActionClass.COMPUTE else 'ACTIVE'
-                jobs = self._newJobs()
-                job_id = jobs.enqueueJob(action)
-                jobs.startWorkflows([job_id])
+                workflows = self._newWorkflows()
+                workflow_id = workflows.enqueueWorkflow(action)
+                workflows.startWorkflows([workflow_id])
                 self.status[action_class].return_value = 'held' if action_class == ActionClass.COMPUTE else 'INACTIVE'
-                jobs.progressActiveState(force_poll=True)
-                self.assertEqual(jobs.headActionStatus(job_id), ActionStatus.PROVIDER_HELD)
+                workflows.progressActiveState(force_poll=True)
+                self.assertEqual(workflows.headActionStatus(workflow_id), ActionStatus.PROVIDER_HELD)
                 self.status[action_class].side_effect = RuntimeError('temporary polling outage')
-                jobs.progressActiveState(force_poll=True)
-                self.assertEqual(jobs.headActionStatus(job_id), ActionStatus.PROVIDER_HELD)
-                self.assertEqual(jobs.jobStatus(job_id), ActionStatus.ACTIVE)
+                workflows.progressActiveState(force_poll=True)
+                self.assertEqual(workflows.headActionStatus(workflow_id), ActionStatus.PROVIDER_HELD)
+                self.assertEqual(workflows.workflowStatus(workflow_id), ActionStatus.ACTIVE)
                 self.status[action_class].side_effect = None
                 self.status[action_class].return_value = 'failed' if action_class == ActionClass.COMPUTE else 'FAILED'
-                jobs.progressActiveState(force_poll=True)
-                self.assertEqual(jobs.jobStatus(job_id), ActionStatus.FAILED)
+                workflows.progressActiveState(force_poll=True)
+                self.assertEqual(workflows.workflowStatus(workflow_id), ActionStatus.FAILED)
 
     def test_held_jobs_are_cancellable_and_failed_transfers_need_no_remote_cancel(self):
         """Cancel held work normally, but leave a genuinely failed transfer terminal."""
         for action in self.actions:
             action_class = actions_base.actionClass(action)
             with self.subTest(action_class=action_class):
-                jobs = self._newJobs()
-                job_id = jobs.enqueueJob(action)
-                jobs.startWorkflows([job_id])
-                jobs.cancelJob(job_id)
-                self.assertEqual(jobs.jobStatus(job_id), ActionStatus.CANCELED)
-                self.assertEqual(jobs.headActionStatus(job_id), ActionStatus.CANCELED)
+                workflows = self._newWorkflows()
+                workflow_id = workflows.enqueueWorkflow(action)
+                workflows.startWorkflows([workflow_id])
+                workflows.cancelWorkflow(workflow_id)
+                self.assertEqual(workflows.workflowStatus(workflow_id), ActionStatus.CANCELED)
+                self.assertEqual(workflows.headActionStatus(workflow_id), ActionStatus.CANCELED)
                 self.cancel[action_class].assert_called_once()
         self.status[ActionClass.TRANSFER].return_value = 'FAILED'
-        jobs = self._newJobs()
-        job_id = jobs.enqueueJob(self.actions[1])
-        jobs.startWorkflows([job_id])
-        self.assertEqual(jobs.jobStatus(job_id), ActionStatus.FAILED)
+        workflows = self._newWorkflows()
+        workflow_id = workflows.enqueueWorkflow(self.actions[1])
+        workflows.startWorkflows([workflow_id])
+        self.assertEqual(workflows.workflowStatus(workflow_id), ActionStatus.FAILED)
         self.status[ActionClass.TRANSFER].reset_mock()
         self.cancel[ActionClass.TRANSFER].reset_mock()
-        jobs.cancelJob(job_id)
-        self.assertEqual(jobs.jobStatus(job_id), ActionStatus.CANCELED)
-        self.assertEqual(jobs.headActionStatus(job_id), ActionStatus.FAILED)
+        workflows.cancelWorkflow(workflow_id)
+        self.assertEqual(workflows.workflowStatus(workflow_id), ActionStatus.CANCELED)
+        self.assertEqual(workflows.headActionStatus(workflow_id), ActionStatus.FAILED)
         self.status[ActionClass.TRANSFER].assert_not_called()
         self.cancel[ActionClass.TRANSFER].assert_not_called()
 
@@ -156,20 +156,20 @@ class ProviderHeldTests(unittest.TestCase):
         for action in self.actions:
             action_class = actions_base.actionClass(action)
             with self.subTest(action_class=action_class):
-                jobs = self._newJobs()
-                with jobs.conn as conn:
+                workflows = self._newWorkflows()
+                with workflows.conn as conn:
                     filename = conn.execute('PRAGMA database_list').fetchone()['file']
-                job_id = jobs.enqueueJob(action)
-                jobs.startWorkflows([job_id])
-                jobs._test_crash_at = 'job_head_canceling_persisted'
+                workflow_id = workflows.enqueueWorkflow(action)
+                workflows.startWorkflows([workflow_id])
+                workflows._test_crash_at = 'workflow_head_canceling_persisted'
                 with self.assertRaises(SimulatedCrash):
-                    jobs.cancelJob(job_id)
-                self.assertEqual(jobs.jobStatus(job_id), ActionStatus.CANCELING)
+                    workflows.cancelWorkflow(workflow_id)
+                self.assertEqual(workflows.workflowStatus(workflow_id), ActionStatus.CANCELING)
                 self.cancel[action_class].assert_not_called()
-                jobs.conn.close()
-                recovered = self._newJobs(filename=filename)
+                workflows.conn.close()
+                recovered = self._newWorkflows(filename=filename)
                 recovered.progressActiveState()
-                self.assertEqual(recovered.jobStatus(job_id), ActionStatus.CANCELED)
+                self.assertEqual(recovered.workflowStatus(workflow_id), ActionStatus.CANCELED)
                 self.cancel[action_class].assert_called_once()
                 self.submit[action_class].assert_called_once()
 
@@ -177,19 +177,19 @@ class ProviderHeldTests(unittest.TestCase):
         """Reopen durable held records using production supervisors, without resubmitting.
 
         Explicitly wake a recovered worker and observe held-to-completed state
-        through normal JobData polling. Startup must supervise the existing ID.
+        through normal WorkflowData polling. Startup must supervise the existing ID.
         """
         for action in self.actions:
             action_class = actions_base.actionClass(action)
             with self.subTest(action_class=action_class):
-                jobs = self._newJobs()
-                with jobs.conn as conn:
+                workflows = self._newWorkflows()
+                with workflows.conn as conn:
                     filename = conn.execute('PRAGMA database_list').fetchone()['file']
-                job_id = jobs.enqueueJob(action)
-                jobs.startWorkflows([job_id])
-                action_id = jobs.jobState(job_id)['head_action_id']
-                jobs.conn.close()
-                recovered = self._newJobs(filename=filename, workers=True)
+                workflow_id = workflows.enqueueWorkflow(action)
+                workflows.startWorkflows([workflow_id])
+                action_id = workflows.workflowState(workflow_id)['head_action_id']
+                workflows.conn.close()
+                recovered = self._newWorkflows(filename=filename, workers=True)
                 manager = recovered.action_man[action_class]
                 before = self.status[action_class].call_count
                 manager.updateStatuses()
@@ -199,18 +199,18 @@ class ProviderHeldTests(unittest.TestCase):
                 manager.updateStatuses()
                 self._waitUntil(lambda: manager.queryRecordedStatus(action_id)[0] == ActionStatus.COMPLETED)
                 recovered.progressActiveState()
-                self.assertEqual(recovered.jobStatus(job_id), ActionStatus.COMPLETED)
+                self.assertEqual(recovered.workflowStatus(workflow_id), ActionStatus.COMPLETED)
                 self.submit[action_class].assert_called_once()
                 recovered.stopWorkers()
 
     def test_wait_for_action_and_supervisor_continue_while_provider_holds_it(self):
         """Keep real execution and waiter threads alive across a held-to-success transition."""
-        jobs = self._newJobs(workers=True)
-        job_id = jobs.enqueueJob(self.actions[0])
-        action_id = jobs.jobState(job_id)['head_action_id']
-        manager = jobs.action_man[ActionClass.COMPUTE]
+        workflows = self._newWorkflows(workers=True)
+        workflow_id = workflows.enqueueWorkflow(self.actions[0])
+        action_id = workflows.workflowState(workflow_id)['head_action_id']
+        manager = workflows.action_man[ActionClass.COMPUTE]
         manager.poll_freq = .01
-        jobs.startWorkflows([job_id])
+        workflows.startWorkflows([workflow_id])
         self._waitUntil(lambda: manager.queryRecordedStatus(action_id)[0] == ActionStatus.PROVIDER_HELD)
         with ThreadPoolExecutor(max_workers=1) as executor:
             waiting = executor.submit(manager.waitForAction, action_id, .001)
@@ -224,8 +224,8 @@ class ProviderHeldTests(unittest.TestCase):
                 # A failed assertion must still release a held supervisor/waiter.
                 self.status[ActionClass.COMPUTE].return_value = 'completed'
                 manager.updateStatuses()
-        jobs.progressActiveState()
-        self.assertEqual(jobs.jobStatus(job_id), ActionStatus.COMPLETED)
+        workflows.progressActiveState()
+        self.assertEqual(workflows.workflowStatus(workflow_id), ActionStatus.COMPLETED)
         self.submit[ActionClass.COMPUTE].assert_called_once()
 
 

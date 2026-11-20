@@ -17,8 +17,8 @@ from action_manager_helpers import DirectComputeActions
 from amscjobmanager.action_manager import ActionStatus, SimulatedCrash, _unser
 from amscjobmanager.actions_base import ActionClass
 from amscjobmanager.compute_actions import ExecuteJobComputeAction
-from amscjobmanager.job_data import JobData
-from amscjobmanager.manager import JobManager
+from amscjobmanager.workflow_data import WorkflowData
+from amscjobmanager.manager import WorkflowManager
 
 
 class ComputeWalletTests(unittest.TestCase):
@@ -31,14 +31,14 @@ class ComputeWalletTests(unittest.TestCase):
         self.now = 1000
         self.remote = {}
         self.status = 'queued'
-        self.enterContext(patch('amscjobmanager.job_data.ComputeActions', DirectComputeActions))
+        self.enterContext(patch('amscjobmanager.workflow_data.ComputeActions', DirectComputeActions))
         self.enterContext(patch('amscjobmanager.compute_action_manager.time.time', side_effect=lambda: self.now))
         self.enterContext(patch('amscjobmanager.api_general.queryMachineStatus', return_value=True))
         self.submit = self.enterContext(patch('amscjobmanager.compute_actions.executeJob', side_effect=self.submitJob))
         self.enterContext(patch('amscjobmanager.compute_action_manager.findJobByName', side_effect=lambda machine, name: self.remote.get(name)))
         self.poll = self.enterContext(patch('amscjobmanager.compute_action_manager.getJobState', side_effect=lambda *args: self.status))
         self.cancel = self.enterContext(patch('amscjobmanager.compute_action_manager.cancelJob'))
-        self.jobs = self.openDatabase()
+        self.workflows = self.openDatabase()
 
     def submitJob(self, *args, **kwargs):
         """Accept provider args/kwargs, save its deterministic name, and return a job ID str."""
@@ -49,18 +49,18 @@ class ComputeWalletTests(unittest.TestCase):
     def openDatabase(self, crash_at=None):
         """Recover self.path and refresh the compute-manager fixture.
 
-        crash_at (str | None) selects a simulated crash. Return JobData with
+        crash_at (str | None) selects a simulated crash. Return WorkflowData with
         registered cleanup; set self.computes to its recovered compute manager.
         """
-        jobs = JobData(self.path, _test_crash_at=crash_at, poll_freq=float('inf'))
-        self.computes = jobs.getManager(ActionClass.COMPUTE)
+        workflows = WorkflowData(self.path, _test_crash_at=crash_at, poll_freq=float('inf'))
+        self.computes = workflows.getManager(ActionClass.COMPUTE)
         self.computes.scheduling_retry_delay = 0
-        self.addCleanup(jobs.conn.close)
-        return jobs
+        self.addCleanup(workflows.conn.close)
+        return workflows
 
     def enqueue(self, nodes=2, seconds=100):
         """Queue a fake compute request with nodes/seconds (positive int); return workflow ID."""
-        return self.jobs.enqueueJob(ExecuteJobComputeAction(
+        return self.workflows.enqueueWorkflow(ExecuteJobComputeAction(
             machine='local', account='', queue='', time=str(seconds), nodes=nodes,
             executable='/bin/true', arguments=[], rundir='/tmp', ranks_per_node=1,
             gpus_per_rank=0))
@@ -68,27 +68,27 @@ class ComputeWalletTests(unittest.TestCase):
     def test_shortage_is_visible_and_recharge_resumes_without_attempts(self):
         """Keep unfunded work SCHEDULING, expose its reason, then submit after recharge."""
         self.computes.setWalletEnabled('LOCAL', True)
-        job = self.enqueue()
-        self.jobs.startWorkflows([job])
+        workflow = self.enqueue()
+        self.workflows.startWorkflows([workflow])
         for _ in range(3):
-            self.jobs.submitSchedulingActions()
-        self.assertEqual(self.jobs.headActionStatus(job, return_api_status=True),
+            self.workflows.submitSchedulingActions()
+        self.assertEqual(self.workflows.headActionStatus(workflow, return_api_status=True),
                          (ActionStatus.SCHEDULING, 'INSUFFICIENT_WALLET_BALANCE'))
-        with self.jobs.conn as conn:
+        with self.workflows.conn as conn:
             self.assertEqual(conn.execute('SELECT submission_attempts FROM computes').fetchone()[0], 0)
         self.submit.assert_not_called()
         # A restart must recheck funding, preserving the reason and zero attempts.
-        self.jobs.conn.close()
-        self.jobs = self.openDatabase()
-        self.assertEqual(self.jobs.headActionStatus(job, return_api_status=True)[1],
+        self.workflows.conn.close()
+        self.workflows = self.openDatabase()
+        self.assertEqual(self.workflows.headActionStatus(workflow, return_api_status=True)[1],
                          'INSUFFICIENT_WALLET_BALANCE')
         self.computes.rechargeWallet('local', 1)
-        self.jobs.submitSchedulingActions()
-        self.assertEqual(self.jobs.headActionStatus(job, return_api_status=True), (ActionStatus.ACTIVE, 'queued'))
+        self.workflows.submitSchedulingActions()
+        self.assertEqual(self.workflows.headActionStatus(workflow, return_api_status=True), (ActionStatus.ACTIVE, 'queued'))
         self.assertAlmostEqual(self.computes.getWallets('local')['local']['available_node_hours'], 3400 / 3600)
         self.assertEqual(self.submit.call_count, 1)
         # The two-node, 100-second request is stored directly in node-hours.
-        with self.jobs.conn as conn:
+        with self.workflows.conn as conn:
             accounting = conn.execute('SELECT requested_node_hours, reserved_node_hours, used_node_hours FROM compute_wallet_actions').fetchone()
             self.assertAlmostEqual(accounting['requested_node_hours'], 200 / 3600)
             self.assertAlmostEqual(accounting['reserved_node_hours'], 200 / 3600)
@@ -104,10 +104,10 @@ class ComputeWalletTests(unittest.TestCase):
         first, second = self.enqueue(), self.enqueue()
         manager = self.computes
         # Persist both intents first so admission itself is raced across threads.
-        for job in (first, second):
-            with self.jobs.conn as conn:
-                row = conn.execute('SELECT details, action_id FROM actions WHERE job_id = ?', (job,)).fetchone()
-            manager._recordSchedulingIntentIfNew(_unser(row['details']), job, row['action_id'])
+        for workflow in (first, second):
+            with self.workflows.conn as conn:
+                row = conn.execute('SELECT details, action_id FROM actions WHERE workflow_id = ?', (workflow,)).fetchone()
+            manager._recordSchedulingIntentIfNew(_unser(row['details']), workflow, row['action_id'])
         with ThreadPoolExecutor(2) as pool:
             list(pool.map(manager._reconcileScheduledAction, (1, 2)))
         states = [manager.queryRecordedStatus(i) for i in (1, 2)]
@@ -123,10 +123,10 @@ class ComputeWalletTests(unittest.TestCase):
                 self.computes.setWalletEnabled('local', True)
                 self.computes.rechargeWallet('local', 1)
                 initial = self.computes.getWallets('local')['local']['available_node_hours']
-                job = self.enqueue()
+                workflow = self.enqueue()
                 self.status = 'queued'
-                self.jobs.startWorkflows([job])
-                action_id = self.jobs.jobState(job)['head_action_id']
+                self.workflows.startWorkflows([workflow])
+                action_id = self.workflows.workflowState(workflow)['head_action_id']
                 manager = self.computes
                 self.now += 1000
                 self.status = 'held'
@@ -149,28 +149,28 @@ class ComputeWalletTests(unittest.TestCase):
         self.computes.setWalletEnabled('local', True)
         self.computes.rechargeWallet('local', 1)
         self.status = 'active'
-        job = self.enqueue()
-        self.jobs.startWorkflows([job])
+        workflow = self.enqueue()
+        self.workflows.startWorkflows([workflow])
         self.now += 10
         self.cancel.side_effect = RuntimeError('gateway unavailable')
         with self.assertRaisesRegex(RuntimeError, 'gateway unavailable'):
-            self.jobs.cancelJob(job)
+            self.workflows.cancelWorkflow(workflow)
         self.assertAlmostEqual(self.computes.getWallets('local')['local']['available_node_hours'], 3400 / 3600)
-        self.assertEqual(self.jobs.jobStatus(job), ActionStatus.CANCELING)
+        self.assertEqual(self.workflows.workflowStatus(workflow), ActionStatus.CANCELING)
         self.now += 2
         self.cancel.side_effect = None
-        self.jobs.performPendingCancellations()
-        self.assertEqual(self.jobs.jobStatus(job), ActionStatus.CANCELED)
+        self.workflows.performPendingCancellations()
+        self.assertEqual(self.workflows.workflowStatus(workflow), ActionStatus.CANCELED)
         self.assertAlmostEqual(self.computes.getWallets('local')['local']['available_node_hours'], 3576 / 3600)
-        self.jobs.performPendingCancellations()
+        self.workflows.performPendingCancellations()
         self.assertAlmostEqual(self.computes.getWallets('local')['local']['available_node_hours'], 3576 / 3600)
 
     def test_disabled_wallet_and_later_enable_do_not_charge_existing_work(self):
         """Leave unbudgeted submissions uncharged and settle old reservations while disabled."""
-        job = self.enqueue()
-        self.jobs.startWorkflows([job])
+        workflow = self.enqueue()
+        self.workflows.startWorkflows([workflow])
         self.assertEqual(self.computes.getWallets(), {})
-        with self.jobs.conn as conn:
+        with self.workflows.conn as conn:
             self.assertEqual(conn.execute('SELECT COUNT(*) FROM compute_wallet_actions').fetchone()[0], 0)
         self.computes.setWalletEnabled('local', True)
         self.computes.rechargeWallet('local', 1)
@@ -180,8 +180,8 @@ class ComputeWalletTests(unittest.TestCase):
         manager._pollAction(1)
         self.assertAlmostEqual(self.computes.getWallets('local')['local']['available_node_hours'], 1)
         self.status = 'active'
-        next_job = self.enqueue()
-        self.jobs.startWorkflows([next_job])
+        next_workflow = self.enqueue()
+        self.workflows.startWorkflows([next_workflow])
         self.computes.setWalletEnabled('local', False)
         self.now += 10
         self.status = 'completed'
@@ -198,19 +198,19 @@ class ComputeWalletTests(unittest.TestCase):
         self.computes.setWalletEnabled('local', False)
         retrying, pending = self.enqueue(), self.enqueue()
         self.submit.side_effect = RuntimeError('submission rejected')
-        self.jobs.startWorkflows([retrying])
-        with self.jobs.conn as conn:
+        self.workflows.startWorkflows([retrying])
+        with self.workflows.conn as conn:
             self.assertEqual(conn.execute('SELECT COUNT(*) FROM compute_wallet_actions').fetchone()[0], 0)
         self.computes.setWalletEnabled('local', True)
         self.submit.side_effect = self.submitJob
-        self.jobs.submitSchedulingActions()
-        self.jobs.startWorkflows([pending])
-        for job in (retrying, pending):
-            self.assertEqual(self.jobs.headActionStatus(job, return_api_status=True),
+        self.workflows.submitSchedulingActions()
+        self.workflows.startWorkflows([pending])
+        for workflow in (retrying, pending):
+            self.assertEqual(self.workflows.headActionStatus(workflow, return_api_status=True),
                              (ActionStatus.SCHEDULING, 'INSUFFICIENT_WALLET_BALANCE'))
         self.assertEqual(self.submit.call_count, 1)
         self.computes.rechargeWallet('local', 1)
-        self.jobs.submitSchedulingActions()
+        self.workflows.submitSchedulingActions()
         self.assertEqual(self.submit.call_count, 3)
         self.assertAlmostEqual(self.computes.getWallets()['local']['available_node_hours'], 1 - 400 / 3600)
 
@@ -222,14 +222,14 @@ class ComputeWalletTests(unittest.TestCase):
             raise RuntimeError('response lost')
 
         self.submit.side_effect = acceptThenFail
-        job = self.enqueue()
-        self.jobs.startWorkflows([job])
+        workflow = self.enqueue()
+        self.workflows.startWorkflows([workflow])
         self.computes.setWalletEnabled('local', True)
-        self.jobs.submitSchedulingActions()
-        self.assertEqual(self.jobs.headActionStatus(job), ActionStatus.ACTIVE)
+        self.workflows.submitSchedulingActions()
+        self.assertEqual(self.workflows.headActionStatus(workflow), ActionStatus.ACTIVE)
         self.assertEqual(self.submit.call_count, 1)
         self.assertEqual(self.computes.getWallets()['local']['available_node_hours'], 0)
-        with self.jobs.conn as conn:
+        with self.workflows.conn as conn:
             self.assertEqual(conn.execute('SELECT COUNT(*) FROM compute_wallet_actions').fetchone()[0], 0)
 
     def test_unsubmitted_cancellation_and_exhausted_retries_refund_all(self):
@@ -237,22 +237,22 @@ class ComputeWalletTests(unittest.TestCase):
         self.computes.setWalletEnabled('local', True)
         self.computes.rechargeWallet('local', 1)
         self.computes._test_crash_at = 'wallet_reserved'
-        job = self.enqueue()
+        workflow = self.enqueue()
         with self.assertRaises(SimulatedCrash):
-            self.jobs.startWorkflows([job])
+            self.workflows.startWorkflows([workflow])
         self.assertAlmostEqual(self.computes.getWallets('local')['local']['available_node_hours'], 3400 / 3600)
         manager = self.computes
         manager._test_crash_at = None
-        self.jobs.cancelJob(job)
+        self.workflows.cancelWorkflow(workflow)
         self.assertAlmostEqual(self.computes.getWallets('local')['local']['available_node_hours'], 1)
         self.submit.assert_not_called()
         self.submit.side_effect = RuntimeError('submission rejected')
         manager.max_submission_attempts = 1
         second = self.enqueue()
-        self.jobs.startWorkflows([second])
+        self.workflows.startWorkflows([second])
         self.assertAlmostEqual(self.computes.getWallets('local')['local']['available_node_hours'], 3400 / 3600)
-        self.jobs.submitSchedulingActions()
-        self.assertEqual(self.jobs.jobStatus(second), ActionStatus.FAILED)
+        self.workflows.submitSchedulingActions()
+        self.assertEqual(self.workflows.workflowStatus(second), ActionStatus.FAILED)
         self.assertAlmostEqual(self.computes.getWallets('local')['local']['available_node_hours'], 1)
 
     def test_reservation_and_accepted_submission_recover_without_duplicate_effects(self):
@@ -260,39 +260,39 @@ class ComputeWalletTests(unittest.TestCase):
         for point in ('wallet_reservation_recorded', 'wallet_reserved', 'before_remote_submission',
                       'remote_submission_completed', 'remote_id_persisted'):
             with self.subTest(point=point):
-                self.jobs.conn.close()
+                self.workflows.conn.close()
                 self.path = self.path.with_name(point + '.sqlite')
                 self.remote.clear()
                 self.submit.reset_mock()
-                self.jobs = self.openDatabase(point)
+                self.workflows = self.openDatabase(point)
                 self.computes.setWalletEnabled('local', True)
                 self.computes.rechargeWallet('local', 1)
-                job = self.enqueue()
+                workflow = self.enqueue()
                 with self.assertRaises(SimulatedCrash):
-                    self.jobs.startWorkflows([job])
+                    self.workflows.startWorkflows([workflow])
                 self.assertAlmostEqual(self.computes.getWallets('local')['local']['available_node_hours'], 1 if point == 'wallet_reservation_recorded' else 1 - 200 / 3600)
-                self.jobs.conn.close()
-                self.jobs = self.openDatabase()
-                self.jobs.submitSchedulingActions()
+                self.workflows.conn.close()
+                self.workflows = self.openDatabase()
+                self.workflows.submitSchedulingActions()
                 self.assertAlmostEqual(self.computes.getWallets('local')['local']['available_node_hours'], 3400 / 3600)
                 self.assertEqual(self.submit.call_count, 1)
                 self.assertEqual(len(self.remote), 1)
-                self.assertEqual(self.jobs.headActionStatus(job), ActionStatus.ACTIVE)
+                self.assertEqual(self.workflows.headActionStatus(workflow), ActionStatus.ACTIVE)
 
     def test_settlement_crashes_recover_without_double_refund(self):
         """Crash before/after terminal accounting commits, reopen, and check exactly one refund."""
         for point in ('before_status_settlement', 'wallet_settlement_recorded', 'status_settled',
                       'remote_cancellation_completed', 'before_cancellation_settlement', 'cancellation_settled'):
             with self.subTest(point=point):
-                self.jobs.conn.close()
+                self.workflows.conn.close()
                 self.path = self.path.with_name(point + '.sqlite')
                 self.remote.clear()
-                self.jobs = self.openDatabase()
+                self.workflows = self.openDatabase()
                 self.computes.setWalletEnabled('local', True)
                 self.computes.rechargeWallet('local', 1)
                 self.status = 'active'
-                job = self.enqueue()
-                self.jobs.startWorkflows([job])
+                workflow = self.enqueue()
+                self.workflows.startWorkflows([workflow])
                 manager = self.computes
                 manager._test_crash_at = point
                 self.now += 10
@@ -305,13 +305,13 @@ class ComputeWalletTests(unittest.TestCase):
                     # even if its local status/settlement write never happened.
                     self.cancel.side_effect = lambda *args: setattr(self, 'status', 'canceled')
                     with self.assertRaises(SimulatedCrash):
-                        self.jobs.cancelJob(job)
-                self.jobs.conn.close()
-                self.jobs = self.openDatabase()
-                self.jobs.progressActiveActions(force_poll=True)
-                self.jobs.progressActiveState()
+                        self.workflows.cancelWorkflow(workflow)
+                self.workflows.conn.close()
+                self.workflows = self.openDatabase()
+                self.workflows.progressActiveActions(force_poll=True)
+                self.workflows.progressActiveState()
                 self.assertAlmostEqual(self.computes.getWallets('local')['local']['available_node_hours'], 3580 / 3600)
-                self.jobs.performPendingCancellations()
+                self.workflows.performPendingCancellations()
                 self.assertAlmostEqual(self.computes.getWallets('local')['local']['available_node_hours'], 3580 / 3600)
 
     def test_uncertain_submission_and_failed_polls_do_not_release_funds(self):
@@ -323,16 +323,16 @@ class ComputeWalletTests(unittest.TestCase):
             self.submitJob(*args, **kwargs)
             raise RuntimeError('response lost')
         self.submit.side_effect = acceptThenFail
-        job = self.enqueue()
-        self.jobs.startWorkflows([job])
+        workflow = self.enqueue()
+        self.workflows.startWorkflows([workflow])
         self.assertAlmostEqual(self.computes.getWallets('local')['local']['available_node_hours'], 3400 / 3600)
         self.poll.side_effect = RuntimeError('poll unavailable')
-        self.jobs.submitSchedulingActions()
+        self.workflows.submitSchedulingActions()
         self.assertAlmostEqual(self.computes.getWallets('local')['local']['available_node_hours'], 3400 / 3600)
         self.assertEqual(self.submit.call_count, 1)
         self.poll.side_effect = lambda *args: self.status
-        self.jobs.submitSchedulingActions()
-        self.assertEqual(self.jobs.headActionStatus(job), ActionStatus.ACTIVE)
+        self.workflows.submitSchedulingActions()
+        self.assertEqual(self.workflows.headActionStatus(workflow), ActionStatus.ACTIVE)
 
     def test_usage_is_capped_and_local_worker_failure_does_not_refund(self):
         """Cap estimated use at the reservation and retain funds for uncertain remote work."""
@@ -340,7 +340,7 @@ class ComputeWalletTests(unittest.TestCase):
         self.computes.rechargeWallet('local', 1)
         self.status = 'active'
         first = self.enqueue()
-        self.jobs.startWorkflows([first])
+        self.workflows.startWorkflows([first])
         self.now += 10000
         self.status = 'completed'
         manager = self.computes
@@ -348,7 +348,7 @@ class ComputeWalletTests(unittest.TestCase):
         self.assertAlmostEqual(self.computes.getWallets('local')['local']['available_node_hours'], 3400 / 3600)
         second = self.enqueue()
         self.status = 'active'
-        self.jobs.startWorkflows([second])
+        self.workflows.startWorkflows([second])
         manager._recordWorkerFailure(2, RuntimeError('local supervision failed'))
         self.assertAlmostEqual(self.computes.getWallets('local')['local']['available_node_hours'], 3200 / 3600)
         self.assertEqual(manager.queryRecordedStatus(2)[0], ActionStatus.FAILED)
@@ -367,14 +367,14 @@ class ComputeWalletTests(unittest.TestCase):
         self.computes.setWalletEnabled('local', True)
         initial = self.computes.getWallets()['local']['available_node_hours']
         self.status = 'active'
-        job = self.enqueue()
-        self.jobs.startWorkflows([job])
+        workflow = self.enqueue()
+        self.workflows.startWorkflows([workflow])
         self.assertAlmostEqual(self.computes.getWallets()['local']['available_node_hours'], initial - 200 / 3600)
         self.now += 3
         self.status = 'completed'
         self.computes._pollAction(1)
-        self.jobs.conn.close()
-        self.jobs = self.openDatabase()
+        self.workflows.conn.close()
+        self.workflows = self.openDatabase()
         self.assertAlmostEqual(self.computes.getWallets()['local']['available_node_hours'], initial - 6 / 3600)
         self.assertEqual(self.computes.getWallets()['local']['reserved_node_hours'], 0)
 
@@ -387,18 +387,18 @@ class ComputeWalletTests(unittest.TestCase):
         """
         self.computes.setWalletEnabled('local', True)
         self.computes.rechargeWallet('local', 1)
-        job = self.enqueue()
-        self.jobs.startWorkflows([job])
+        workflow = self.enqueue()
+        self.workflows.startWorkflows([workflow])
         before = self.computes.getWallets()
         for table, column in (('compute_wallets', 'available_node_hours'),
                               ('compute_wallet_actions', 'requested_node_hours'),
                               ('compute_wallet_actions', 'reserved_node_hours'),
                               ('compute_wallet_actions', 'used_node_hours')):
             with self.subTest(column=column):
-                with self.jobs.conn as conn:
+                with self.workflows.conn as conn:
                     self.assertEqual(conn.execute(f'SELECT typeof({column}) FROM {table}').fetchone()[0], 'real')
                 with self.assertRaises(sqlite3.IntegrityError):
-                    with self.jobs.conn as conn:
+                    with self.workflows.conn as conn:
                         conn.execute(f'UPDATE {table} SET {column} = -1')
         self.assertEqual(self.computes.getWallets(), before)
 
@@ -422,29 +422,29 @@ class ComputeWalletWorkerTests(unittest.TestCase):
         with patch('amscjobmanager.api_general.queryMachineStatus', return_value=True), \
              patch('amscjobmanager.compute_actions.executeJob', return_value='remote-id') as submit, \
              patch('amscjobmanager.compute_action_manager.getJobState', return_value='completed'):
-            manager = JobManager(poll_freq=.02)
+            manager = WorkflowManager(poll_freq=.02)
             self.addCleanup(manager.stop, False, close_database=True)
-            manager(lambda jobs: jobs.getManager(ActionClass.COMPUTE).setWalletEnabled('local', True))
-            workflow = manager(lambda jobs: jobs.enqueueJob(ExecuteJobComputeAction(
+            manager(lambda workflows: workflows.getManager(ActionClass.COMPUTE).setWalletEnabled('local', True))
+            workflow = manager(lambda workflows: workflows.enqueueWorkflow(ExecuteJobComputeAction(
                 machine='local', account='', queue='', time='60', nodes=1,
                 executable='/bin/true', arguments=[], rundir='/tmp', ranks_per_node=1, gpus_per_rank=0)))
             manager.start()
             deadline = time.monotonic() + 8
             while time.monotonic() < deadline:
-                status = manager(lambda jobs: jobs.headActionStatus(workflow, return_api_status=True))
+                status = manager(lambda workflows: workflows.headActionStatus(workflow, return_api_status=True))
                 if status[1] == 'INSUFFICIENT_WALLET_BALANCE':
                     break
                 time.sleep(.02)
             self.assertEqual(status, (ActionStatus.SCHEDULING, 'INSUFFICIENT_WALLET_BALANCE'))
             submit.assert_not_called()
-            manager(lambda jobs: jobs.getManager(ActionClass.COMPUTE).rechargeWallet('local', 1))
+            manager(lambda workflows: workflows.getManager(ActionClass.COMPUTE).rechargeWallet('local', 1))
             while time.monotonic() < deadline:
-                if manager(lambda jobs: jobs.jobStatus(workflow)) == ActionStatus.COMPLETED:
+                if manager(lambda workflows: workflows.workflowStatus(workflow)) == ActionStatus.COMPLETED:
                     break
                 time.sleep(.02)
-            self.assertEqual(manager(lambda jobs: jobs.jobStatus(workflow)), ActionStatus.COMPLETED)
+            self.assertEqual(manager(lambda workflows: workflows.workflowStatus(workflow)), ActionStatus.COMPLETED)
             self.assertEqual(submit.call_count, 1)
-            self.assertEqual(manager(lambda jobs: jobs.getManager(ActionClass.COMPUTE).getWallets()['local']['reserved_node_hours']), 0)
+            self.assertEqual(manager(lambda workflows: workflows.getManager(ActionClass.COMPUTE).getWallets()['local']['reserved_node_hours']), 0)
 
 
 if __name__ == '__main__':

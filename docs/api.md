@@ -3,7 +3,7 @@
 [Documentation home](../README.md#documentation)
 
 Use `from amscjobmanager import api_general as api` for the selected IRI/SPOOF
-implementation. The top-level package exports `JobManager`, `JobData`, and
+implementation. The top-level package exports `WorkflowManager`, `WorkflowData`, and
 `ActionStatus`. The interfaces below describe the current Python API; provider
 support and sandbox enforcement are detailed in the linked guides.
 
@@ -34,25 +34,25 @@ session-local. Running servers expose listing through MCP's
 
 | Entry point | Arguments and result |
 | --- | --- |
-| `JobManager(filename=None, poll_freq=30, max_workflows_active=10)` | Creates a single-use manager and JobData, immediately recovering workers for unfinished persisted actions. The workflow-progression thread starts later. |
+| `WorkflowManager(filename=None, poll_freq=30, max_workflows_active=10)` | Creates a single-use manager and WorkflowData, immediately recovering workers for unfinished persisted actions. The workflow-progression thread starts later. |
 | `manager.start()` | Starts progression in a background thread. Repeated calls while running are harmless; calls after shutdown or failure raise an error. |
 | `manager.isAlive()` | Returns whether its background thread is running. |
-| `with manager as jobs:` | Locks access and yields JobData. Does not manage thread lifetime. |
-| `manager(operation)` | Calls `operation(job_data)` under lock and returns its result. |
+| `with manager as workflows:` | Locks access and yields WorkflowData. Does not manage thread lifetime. |
+| `manager(operation)` | Calls `operation(workflow_data)` under lock and returns its result. |
 | `manager.stop(wait_until_done=True, *, close_database=False)` | Waits according to its arguments, permanently shuts down the instance, and joins the thread. Repeated shutdown is safe; recovery requires a new manager. |
-| `JobData.enqueueJob(workflow, job_group=None, *, submission_key=None)` | Accepts one action or a nonempty list; returns the integer workflow ID. Validates dependency keys against earlier producers and rejects conditions requiring canceled producers atomically. Reusing an optional submission key returns the original ID without changing or revalidating its replacement payload. |
-| `JobData.jobStatus(job_id)` | Returns a coarse `ActionStatus`; scheduling/intermediate completion appear as `ACTIVE`. |
-| `JobData.headActionStatus(job_id, force_poll=False, return_api_status=False)` | Returns the head `ActionStatus`, optionally paired with its provider status string; forced polling refreshes all active heads. Options are keyword-only. |
-| `JobData.jobState(job_id)` | Returns workflow/head metadata with enum-valued workflow status, head status, and head class. Action definitions and serialized blobs are excluded. |
-| `JobData.listWorkflows(job_id=None, statuses=None)` | Lists state dictionaries in ID order, optionally filtering by ID and overall `ActionStatus` value(s). Includes terminal workflows; an explicit unknown ID raises `ValueError`. Does not poll. |
-| `JobData.cancelJob(job_id)` | Marks cancellation while retaining records and cancels executing work. Returns `None`; may raise while leaving `CANCELING`. |
-| `JobData.getManager(action_class)` | Returns the existing manager for an `ActionClass` (COMPUTE, TRANSFER, or API). Call its public methods under the JobManager lock; each manager owns its action state and implementation-specific operations. |
-| `jobs.getManager(action_class).getLiveActions()` | Returns info dictionaries for ACTIVE or PROVIDER_HELD actions of the selected `ActionClass`. Entries include workflow ID, remote `api_key`, and raw `api_status`. `ActionClass.API` returns an empty list because unfinished API sequences retain `SCHEDULING`. |
-| `JobData.countWorkflowsWithStatus(statuses)` | Accepts one `ActionStatus` or a list; counts matching persisted overall workflow statuses, including terminal workflows. Submission and intermediate action completion belong to ACTIVE workflows. |
-| `JobData.startWorkflows(job_ids=None)` | Reconciles submissions, then starts selected eligible workflows or fills automatic slots. |
-| `JobData.progressActiveState(force_poll=False)` | Restores missing supervision, observes recorded action states, and progresses successful workflows. Forced polling requests an early worker poll without waiting or changing its interval. Failed polls are logged and deferred per action while other workflows progress. Used by JobManager or an application driving JobData manually. |
+| `WorkflowData.enqueueWorkflow(workflow, workflow_group=None, *, submission_key=None)` | Accepts one action or a nonempty list; returns the integer workflow ID. Validates dependency keys against earlier producers and rejects conditions requiring canceled producers atomically. Reusing an optional submission key returns the original ID without changing or revalidating its replacement payload. |
+| `WorkflowData.workflowStatus(workflow_id)` | Returns a coarse `ActionStatus`; scheduling/intermediate completion appear as `ACTIVE`. |
+| `WorkflowData.headActionStatus(workflow_id, force_poll=False, return_api_status=False)` | Returns the head `ActionStatus`, optionally paired with its provider status string; forced polling refreshes all active heads. Options are keyword-only. |
+| `WorkflowData.workflowState(workflow_id)` | Returns workflow/head metadata with enum-valued workflow status, head status, and head class. Action definitions and serialized blobs are excluded. |
+| `WorkflowData.listWorkflows(workflow_id=None, statuses=None)` | Lists state dictionaries in ID order, optionally filtering by ID and overall `ActionStatus` value(s). Includes terminal workflows; an explicit unknown ID raises `ValueError`. Does not poll. |
+| `WorkflowData.cancelWorkflow(workflow_id)` | Marks cancellation while retaining records and cancels executing work. Returns `None`; may raise while leaving `CANCELING`. |
+| `WorkflowData.getManager(action_class)` | Returns the existing manager for an `ActionClass` (COMPUTE, TRANSFER, or API). Call its public methods under the WorkflowManager lock; each manager owns its action state and implementation-specific operations. |
+| `workflows.getManager(action_class).getLiveActions()` | Returns info dictionaries for ACTIVE or PROVIDER_HELD actions of the selected `ActionClass`. Entries include workflow ID, remote `api_key`, and raw `api_status`. `ActionClass.API` returns an empty list because unfinished API sequences retain `SCHEDULING`. |
+| `WorkflowData.countWorkflowsWithStatus(statuses)` | Accepts one `ActionStatus` or a list; counts matching persisted overall workflow statuses, including terminal workflows. Submission and intermediate action completion belong to ACTIVE workflows. |
+| `WorkflowData.startWorkflows(workflow_ids=None)` | Reconciles submissions, then starts selected eligible workflows or fills automatic slots. |
+| `WorkflowData.progressActiveState(force_poll=False)` | Restores missing supervision, observes recorded action states, and progresses successful workflows. Forced polling requests an early worker poll without waiting or changing its interval. Failed polls are logged and deferred per action while other workflows progress. Used by WorkflowManager or an application driving WorkflowData manually. |
 
-When a manager thread runs, call these JobData operations through its lock.
+When a manager thread runs, call these WorkflowData operations through its lock.
 See [operations](operations.md) for status semantics and recovery limits.
 
 ## Action constructors
@@ -82,7 +82,7 @@ GlobusTransfer(
 ```
 
 Prefer keyword arguments. These dataclasses are descriptions, not submitted
-jobs. `initiateAction(job_id, name=None)` returns the remote ID when called by
+jobs. `initiateAction(workflow_id, name=None)` returns the remote ID when called by
 AsyncActionManager; exceptions are handled by its submission policy.
 `queryResourceStatus()` returns `True`, `False`, or `None` for no available
 signal. See [workflows](workflows.md) for parameter meanings.
@@ -189,7 +189,7 @@ remains confined to the configured staging root.
 | `api.findJobByName(machine, name)` | Matching remote ID or `None`. |
 | `api.cancelJob(machine, jobid)` | Sends a remote compute cancellation request. Locally, prevents launch or terminates the job's process group and waits before recording `canceled`; repeated cancellation preserves terminal statuses. Returns `None`. |
 
-Direct submissions are not added to JobData. Use actions when the manager
+Direct submissions are not added to WorkflowData. Use actions when the manager
 should own ordering, monitoring, and cancellation. See [transfers](transfers.md)
 for namespaces and staging.
 

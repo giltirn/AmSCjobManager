@@ -8,9 +8,14 @@ from enum import Enum
 
 """Actions are classes of operations that can be performed via the AmSC infrastructure"""
 
-def replaceJobIdSubstring(in_str, job_id):
-    """Replace instances of <JOBID> with the job index in path strings"""
-    return re.sub(r'<JOBID>', str(job_id), in_str)
+def replaceWorkflowIdSubstring(in_str, workflow_id):
+    """Expand workflow-ID placeholders in a string without modifying other text.
+
+    in_str (str) is a path or argument containing optional <WORKFLOWID> tokens.
+    workflow_id (int) is the owning workflow's database ID, not a compute-job ID.
+    Return str with every token replaced by the decimal workflow ID.
+    """
+    return re.sub(r'<WORKFLOWID>', str(workflow_id), in_str)
 
 def _validateDependencyCondition(condition: str | list) -> str | list:
     """Validate alternating operands and Boolean operators in one expression list.
@@ -86,7 +91,7 @@ class ActionDefinition:
     AND/OR, with nested lists acting as parentheses and normal AND precedence.
     None means no explicit prerequisites. producer_key (str | None) labels
     successful completion, with repeated labels permitted.
-    Both fields are keyword-only. JobData checks producer existence at submission,
+    Both fields are keyword-only. WorkflowData checks producer existence at submission,
     waits for successful completion before scheduling, and propagates cancellation
     when required unfinished producers are canceled. Keys are database-scoped.
     """
@@ -113,8 +118,13 @@ class TransferActionBase(ActionDefinition):
         """
         raise NotImplementedError("Derived class must implement getInfo")
 
-    def initiateAction(self, job_id, name: str | None = None)->str:
-        """Initiate the action and return the API key; name identifies the action."""
+    def initiateAction(self, workflow_id, name: str | None = None)->str:
+        """Submit a transfer and return its provider task identifier (str).
+
+        workflow_id (positive int) identifies the owning workflow in the manager
+        database. name (str | None) optionally labels the remote action for recovery.
+        Implementations perform API calls; the action manager owns recorded state.
+        """
         raise NotImplementedError("Derived class must implement initiateAction")
 
 @dataclass(config=ConfigDict(extra="forbid"))
@@ -151,8 +161,13 @@ class ComputeActionBase(ActionDefinition):
         """
         return {"machine" : self.machine, "queue" : self.queue, "time" : self.time, "nodes": self.nodes}
 
-    def initiateAction(self, job_id, name: str | None = None)->str:
-        """Initiate the action and return the API key; name identifies the action."""
+    def initiateAction(self, workflow_id, name: str | None = None)->str:
+        """Submit a compute job and return its provider job identifier (str).
+
+        workflow_id (positive int) identifies the owning workflow, distinct from
+        the returned compute-job ID. name (str | None) optionally names the
+        remote job for recovery. The action manager owns persistence and retries.
+        """
         raise NotImplementedError("Derived class must implement initiateAction")
 
 class ActionClass(Enum):

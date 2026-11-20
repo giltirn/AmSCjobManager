@@ -163,7 +163,7 @@ def serve_local_workflow(directory, ready, stop):
     """
     from amscjobmanager.compute_actions import ExecuteJobComputeAction
     from amscjobmanager.local_api import setStatusManagerDatabasePath
-    from amscjobmanager.manager import JobManager
+    from amscjobmanager.manager import WorkflowManager
     from amscjobmanager.manager_config import readManagerConfigFile, setupManager
     from amscjobmanager.server.runner import ManagerHTTPServer
     from amscjobmanager import logging as manager_logging
@@ -177,26 +177,26 @@ def serve_local_workflow(directory, ready, stop):
         config.write_text(json.dumps({'iri_implementations': {}, 'sandbox_directories': {'local': [directory]}}))
         setupManager(readManagerConfigFile(config))
         setStatusManagerDatabasePath(str(root / 'local.sqlite'))
-        manager = JobManager(str(root / 'workflows.sqlite'), poll_freq=1)
+        manager = WorkflowManager(str(root / 'workflows.sqlite'), poll_freq=1)
         server = ManagerHTTPServer(lambda: manager, port=0, log_path=root / 'server.log')
         runtime = server.runtime
         thread = None
-        job_id = None
+        workflow_id = None
         try:
             # Submit through the Python API, not through an MCP submission tool.
-            with manager as jobs:
-                job_id = jobs.enqueueJob(ExecuteJobComputeAction(
+            with manager as workflows:
+                workflow_id = workflows.enqueueWorkflow(ExecuteJobComputeAction(
                     machine='local', executable='/bin/sleep', arguments=['30'],
                     account='', queue='', time='60', rundir=directory,
                     nodes=1, ranks_per_node=1, gpus_per_rank=0,
-                ), job_group='mcp-test')
+                ), workflow_group='mcp-test')
                 # Successful and failing commands provide real terminal states;
                 # separate run directories prevent their log files colliding.
                 terminal_ids = {}
                 for name, executable in (('completed', '/bin/true'), ('failed', '/bin/false')):
                     run_dir = root / name
                     run_dir.mkdir()
-                    terminal_ids[name] = jobs.enqueueJob(ExecuteJobComputeAction(
+                    terminal_ids[name] = workflows.enqueueWorkflow(ExecuteJobComputeAction(
                         machine='local', executable=executable, arguments=[], account='', queue='', time='60',
                         rundir=str(run_dir), nodes=1, ranks_per_node=1, gpus_per_rank=0,
                     ))
@@ -206,11 +206,11 @@ def serve_local_workflow(directory, ready, stop):
             # Wait for observable states instead of assuming a fixed startup
             # delay is enough for background submission and progression.
             deadline = time.monotonic() + 15
-            while manager(lambda jobs: jobs.headActionStatus(job_id)).name != 'ACTIVE':
+            while manager(lambda workflows: workflows.headActionStatus(workflow_id)).name != 'ACTIVE':
                 if time.monotonic() >= deadline:
                     raise TimeoutError('Local workflow did not become active')
                 time.sleep(0.02)
-            while any(manager(lambda jobs: jobs.jobStatus(value)).name != name.upper()
+            while any(manager(lambda workflows: workflows.workflowStatus(value)).name != name.upper()
                       for name, value in terminal_ids.items()):
                 if time.monotonic() >= deadline:
                     raise TimeoutError('Short local workflows did not finish')
@@ -227,12 +227,12 @@ def serve_local_workflow(directory, ready, stop):
                     if not thread.is_alive() or time.monotonic() >= deadline:
                         raise RuntimeError('MCP listener did not start')
                     time.sleep(0.02)
-                ready.send({'port': listener.getsockname()[1], 'workflow_id': job_id, **terminal_ids})
+                ready.send({'port': listener.getsockname()[1], 'workflow_id': workflow_id, **terminal_ids})
                 stop.wait(60)
                 # Cancel while storage is open; listener shutdown owns manager
                 # cleanup and closes the workflow database.
-                manager(lambda jobs: jobs.cancelJob(job_id))
-                job_id = None
+                manager(lambda workflows: workflows.cancelWorkflow(workflow_id))
+                workflow_id = None
                 server.should_exit = True
                 thread.join(timeout=10)
                 if thread.is_alive():
@@ -242,8 +242,8 @@ def serve_local_workflow(directory, ready, stop):
             raise
         finally:
             try:
-                if job_id is not None and manager.isAlive():
-                    manager(lambda jobs: jobs.cancelJob(job_id))
+                if workflow_id is not None and manager.isAlive():
+                    manager(lambda workflows: workflows.cancelWorkflow(workflow_id))
             finally:
                 server.should_exit = True
                 if thread is not None:
@@ -402,10 +402,10 @@ class MCPToolTests(unittest.IsolatedAsyncioTestCase):
         Returns:
             None when awaited: Checks report failures through unittest assertions.
         """
-        from amscjobmanager.manager import JobManager
+        from amscjobmanager.manager import WorkflowManager
         from amscjobmanager.server.runner import ManagerHTTPServer
 
-        manager = JobManager(max_workflows_active=0)
+        manager = WorkflowManager(max_workflows_active=0)
         server = ManagerHTTPServer(lambda: manager, port=0, log_path=Path(tempfile.gettempdir()) / 'amsc-mcp-test.log')
         runtime = server.runtime
         self.enterContext(patch.object(manager_logging, 'api_query_user_func', runtime.queries.ask))
@@ -413,7 +413,7 @@ class MCPToolTests(unittest.IsolatedAsyncioTestCase):
         async with Client(server.mcp_server, cache=None) as client:
             response = await asyncio.wait_for(call_mcp(client, 'list_workflows', {}), timeout=3)
             self.assertEqual(response.structured_content['error']['code'], 'server_initializing')
-            with patch.object(manager.job_data, 'progressActiveState', side_effect=RuntimeError('injected manager crash')), \
+            with patch.object(manager.workflow_data, 'progressActiveState', side_effect=RuntimeError('injected manager crash')), \
                  patch('amscjobmanager.manager.wfmanLog') as log:
                 runtime.start()
                 await asyncio.to_thread(runtime._startup_worker.future.result, 3)
@@ -448,10 +448,10 @@ class MCPToolTests(unittest.IsolatedAsyncioTestCase):
         Returns:
             None when awaited: Checks report failures through unittest assertions.
         """
-        from amscjobmanager.manager import JobManager
+        from amscjobmanager.manager import WorkflowManager
         from amscjobmanager.server.runner import ManagerHTTPServer
 
-        manager = JobManager(max_workflows_active=0)
+        manager = WorkflowManager(max_workflows_active=0)
         server = ManagerHTTPServer(lambda: manager, port=0, log_path=Path(tempfile.gettempdir()) / 'amsc-mcp-test.log')
         runtime = server.runtime
         self.enterContext(patch.object(manager_logging, 'api_query_user_func', runtime.queries.ask))
@@ -460,7 +460,7 @@ class MCPToolTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.to_thread(runtime._startup_worker.future.result, 3)
         async with Client(server.mcp_server, cache=None) as client:
             with patch.object(manager, 'isAlive', side_effect=[True, True, False]), \
-                 patch.object(manager.job_data, 'listWorkflows') as listing:
+                 patch.object(manager.workflow_data, 'listWorkflows') as listing:
                 response = await call_mcp(client, 'list_workflows', {})
                 self.assertEqual(response.structured_content['error']['code'], 'manager_unavailable')
                 listing.assert_not_called()
@@ -514,11 +514,11 @@ class MCPToolTests(unittest.IsolatedAsyncioTestCase):
 
                 with patch('amscjobmanager.manager_config.readManagerConfigFile'), \
                      patch('amscjobmanager.manager_config.setupManager', side_effect=lambda config: manager_logging.wfapiLog('setup API message')), \
-                     patch('amscjobmanager.manager.JobManager') as manager, \
+                     patch('amscjobmanager.manager.WorkflowManager') as manager, \
                      patch.object(ManagerHTTPServer, 'run', listener), redirect_stdout(output):
                     # Exercise the default without creating state in the working
                     # directory: the manager is mocked. Also retain override coverage.
-                    database = str(Path(directory) / 'jobs.sqlite') if fail else 'workflows.sqlite'
+                    database = str(Path(directory) / 'workflows.sqlite') if fail else 'workflows.sqlite'
                     arguments = ['unused.json', '--log-file', str(log_path)]
                     if fail:
                         arguments += ['--database', database]
@@ -541,11 +541,11 @@ class MCPToolTests(unittest.IsolatedAsyncioTestCase):
     async def test_compute_wallet_listing_and_visible_submission_wait(self):
         """Read budgets and the wallet-wait marker through MCP, without privileged tools.
 
-        Fund changes use JobData directly, standing in for the separate admin
+        Fund changes use WorkflowData directly, standing in for the separate admin
         endpoint. A real compute worker must wait without submitting; its reason
         must appear in list_workflows and survive schema/CLI serialization.
         """
-        from amscjobmanager.manager import JobManager
+        from amscjobmanager.manager import WorkflowManager
         from amscjobmanager.server.cli import parse_function_arguments
         from amscjobmanager.server.runner import ManagerHTTPServer
         from amscjobmanager.compute_actions import ExecuteJobComputeAction
@@ -553,7 +553,7 @@ class MCPToolTests(unittest.IsolatedAsyncioTestCase):
         self.enterContext(patch('amscjobmanager.api_general.queryMachineStatus', return_value=True))
         submit = self.enterContext(patch('amscjobmanager.compute_actions.executeJob',
                                         side_effect=AssertionError('Unfunded job submitted')))
-        manager = JobManager(max_workflows_active=0, poll_freq=.02)
+        manager = WorkflowManager(max_workflows_active=0, poll_freq=.02)
         server = ManagerHTTPServer(lambda: manager, port=0,
                                    log_path=Path(tempfile.gettempdir()) / 'amsc-wallet-list.log')
         self.addCleanup(server.runtime.stop)
@@ -564,8 +564,8 @@ class MCPToolTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.to_thread(server.runtime._startup_worker.future.result, 3)
             empty = await call_mcp(client, 'list_compute_wallets')
             self.assertEqual(empty.structured_content, {'result': {}})
-            manager(lambda jobs: jobs.getManager(ActionClass.COMPUTE).setWalletEnabled('local', True))
-            manager(lambda jobs: jobs.getManager(ActionClass.COMPUTE).rechargeWallet('other', 2))
+            manager(lambda workflows: workflows.getManager(ActionClass.COMPUTE).setWalletEnabled('local', True))
+            manager(lambda workflows: workflows.getManager(ActionClass.COMPUTE).rechargeWallet('other', 2))
             tools = await client.list_tools()
             tool = next(tool for tool in tools.tools if tool.name == 'list_compute_wallets')
             self.assertTrue(tool.annotations.read_only_hint)
@@ -580,16 +580,16 @@ class MCPToolTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(invalid.is_error)
             unknown = await call_mcp(client, 'list_compute_wallets', {'machine': 'missing'})
             self.assertEqual(unknown.structured_content, {'result': {}})
-            job = manager(lambda jobs: jobs.enqueueJob(ExecuteJobComputeAction(
+            workflow = manager(lambda workflows: workflows.enqueueWorkflow(ExecuteJobComputeAction(
                 machine='local', account='', queue='', time='60', nodes=1,
                 executable='/bin/true', arguments=[], rundir='/tmp', ranks_per_node=1, gpus_per_rank=0)))
-            manager(lambda jobs: jobs.startWorkflows([job]))
+            manager(lambda workflows: workflows.startWorkflows([workflow]))
             for _ in range(100):
-                state = manager(lambda jobs: jobs.headActionStatus(job, return_api_status=True))
+                state = manager(lambda workflows: workflows.headActionStatus(workflow, return_api_status=True))
                 if state[1] == 'INSUFFICIENT_WALLET_BALANCE':
                     break
                 await asyncio.sleep(.02)
-            listing = await call_mcp(client, 'list_workflows', {'workflow_id': job})
+            listing = await call_mcp(client, 'list_workflows', {'workflow_id': workflow})
             record = listing.structured_content['result'][0]
             self.assertEqual(record['api_status'], 'INSUFFICIENT_WALLET_BALANCE')
             self.assertEqual(record['head_action_status'], 'SCHEDULING')
@@ -605,7 +605,7 @@ class MCPToolTests(unittest.IsolatedAsyncioTestCase):
             waiting = await call_mcp(client, tool.name, request)
             actions = waiting.structured_content['result']
             self.assertEqual(len(actions), 1)
-            self.assertEqual(actions[0]['job_id'], job)
+            self.assertEqual(actions[0]['workflow_id'], workflow)
             self.assertEqual(actions[0]['machine'], 'local')
             self.assertEqual(actions[0]['action_status'], 'SCHEDULING')
             self.assertEqual(actions[0]['api_status'], 'INSUFFICIENT_WALLET_BALANCE')
@@ -621,7 +621,7 @@ class MCPToolTests(unittest.IsolatedAsyncioTestCase):
         strict input types, generated CLI arguments, live registration changes,
         and copied Python results that cannot mutate the owner's records.
         """
-        from amscjobmanager.manager import JobManager
+        from amscjobmanager.manager import WorkflowManager
         from amscjobmanager.server.cli import parse_function_arguments
         from amscjobmanager.server.runner import ManagerHTTPServer
 
@@ -634,7 +634,7 @@ class MCPToolTests(unittest.IsolatedAsyncioTestCase):
                                        side_effect=AssertionError('Listing probed a directory')))
         query = self.enterContext(patch.object(manager_logging, 'api_query_user_func',
                                                side_effect=AssertionError('Listing asked a question')))
-        manager = JobManager(max_workflows_active=0)
+        manager = WorkflowManager(max_workflows_active=0)
         server = ManagerHTTPServer(lambda: manager, port=0,
                                    log_path=Path(tempfile.gettempdir()) / 'amsc-sandbox-list.log')
         self.addCleanup(server.runtime.stop)
@@ -701,10 +701,10 @@ class MCPToolTests(unittest.IsolatedAsyncioTestCase):
             None when awaited: Checks report failures through unittest assertions.
         """
         from amscjobmanager.compute_actions import ExecuteJobComputeAction
-        from amscjobmanager.manager import JobManager
+        from amscjobmanager.manager import WorkflowManager
         from amscjobmanager.server.runner import ManagerHTTPServer
 
-        manager = JobManager(max_workflows_active=0)
+        manager = WorkflowManager(max_workflows_active=0)
         server = ManagerHTTPServer(lambda: manager, port=0, log_path=Path(tempfile.gettempdir()) / 'amsc-mcp-test.log')
         runtime = server.runtime
         self.enterContext(patch.object(manager_logging, 'api_query_user_func', runtime.queries.ask))
@@ -721,9 +721,9 @@ class MCPToolTests(unittest.IsolatedAsyncioTestCase):
                 machine='local', executable='/bin/true', arguments=[], account='', queue='', time='60',
                 rundir='/tmp', nodes=1, ranks_per_node=1, gpus_per_rank=0,
             )
-            first = manager(lambda jobs: jobs.enqueueJob(action))
-            second = manager(lambda jobs: jobs.enqueueJob(action))
-            manager(lambda jobs: jobs.cancelJob(second))
+            first = manager(lambda workflows: workflows.enqueueWorkflow(action))
+            second = manager(lambda workflows: workflows.enqueueWorkflow(action))
+            manager(lambda workflows: workflows.cancelWorkflow(second))
             result = await call_mcp(client, 'list_workflows', {})
             records = result.structured_content['result']
             self.assertEqual([row['workflow_id'] for row in records], [first, second])
@@ -953,7 +953,7 @@ class MCPSubprocessTests(unittest.TestCase):
                         self.assertIn('Stopped AmSC Job Manager MCP server',
                                       (directory / 'workflows.sqlite.log').read_text())
 
-    def test_local_job_status_through_json_cli(self):
+    def test_local_workflow_status_through_json_cli(self):
         """Query real local workflows over HTTP from the JSON CLI subprocess.
 
         Spawn serve_local_workflow, which directly submits sleep/true/false
@@ -989,14 +989,14 @@ class MCPSubprocessTests(unittest.TestCase):
                 info = parent.recv()
                 self.assertNotIn('error', info, info)
                 url = f"http://127.0.0.1:{info['port']}/mcp"
-                job_id = info['workflow_id']
+                workflow_id = info['workflow_id']
                 script = Path(__file__).resolve().parents[1] / 'utilities' / 'manager_client.py'
                 base = [sys.executable, str(script), '--url', url, '--timeout', '5']
 
                 # One connection executes all requests in order. Refresh must
                 # return a provider status as well as both manager statuses.
                 requests = [{'tool': 'list_workflows', 'arguments': {}},
-                            {'tool': 'list_workflows', 'arguments': {'workflow_id': job_id, 'refresh': True}},
+                            {'tool': 'list_workflows', 'arguments': {'workflow_id': workflow_id, 'refresh': True}},
                             {'tool': 'list_workflows', 'arguments': {'statuses': ['FAILED']}},
                             {'tool': 'list_workflows', 'arguments': {'statuses': ['COMPLETED']}},
                             {'tool': 'list_workflows', 'arguments': {'statuses': ['FAILED', 'COMPLETED']}}]
@@ -1007,18 +1007,18 @@ class MCPSubprocessTests(unittest.TestCase):
                 # The sleep is still executing, while true/false have already
                 # produced final workflow states before the listener was ready.
                 row = result['results'][1]['result'][0]
-                self.assertEqual(row['workflow_id'], job_id)
+                self.assertEqual(row['workflow_id'], workflow_id)
                 self.assertEqual(row['workflow_status'], 'ACTIVE')
                 self.assertEqual(row['head_action_status'], 'ACTIVE')
                 self.assertEqual(row['api_status'], 'active')
-                self.assertEqual(row['job_group'], 'mcp-test')
+                self.assertEqual(row['workflow_group'], 'mcp-test')
                 self.assertEqual([row['workflow_id'] for row in result['results'][2]['result']], [info['failed']])
                 self.assertEqual([row['workflow_id'] for row in result['results'][3]['result']], [info['completed']])
                 self.assertEqual(len(result['results'][4]['result']), 2)
 
                 # The traditional command must produce the same workflow record
                 # as JSON input, while translating list and boolean options.
-                completed = run_client(base + ['list_workflows', '--workflow-id', str(job_id),
+                completed = run_client(base + ['list_workflows', '--workflow-id', str(workflow_id),
                                               '--refresh', '--statuses', 'ACTIVE'],
                                        capture_output=True, text=True, timeout=15)
                 self.assertEqual(completed.returncode, 0, completed.stderr + completed.stdout)
@@ -1032,12 +1032,12 @@ class MCPSubprocessTests(unittest.TestCase):
                 # The manager-owned action query is discovered automatically;
                 # its CLI returns the same independent workflow identifier.
                 completed = run_client(base + ['list_active_and_past_compute_actions',
-                                              '--job-id', str(job_id), '--machine', 'LOCAL'],
+                                              '--workflow-id', str(workflow_id), '--machine', 'LOCAL'],
                                        capture_output=True, text=True, timeout=15)
                 self.assertEqual(completed.returncode, 0, completed.stderr)
                 actions = json.loads(completed.stdout)['results'][0]['result']
                 self.assertEqual(len(actions), 1)
-                self.assertEqual(actions[0]['job_id'], job_id)
+                self.assertEqual(actions[0]['workflow_id'], workflow_id)
                 completed = run_client(base + ['-h', 'list_active_and_past_compute_actions'],
                                        capture_output=True, text=True, timeout=15)
                 self.assertEqual(completed.returncode, 0, completed.stderr)

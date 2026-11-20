@@ -17,14 +17,14 @@ from action_manager_helpers import DirectComputeActions
 from amscjobmanager.action_manager import ActionStatus
 from amscjobmanager.compute_actions import ExecuteBatchScriptComputeAction
 from amscjobmanager.iri_api import compute
-from amscjobmanager.job_data import JobData
+from amscjobmanager.workflow_data import WorkflowData
 
 
 class LocalCancellationTests(unittest.TestCase):
     def setUp(self):
         # These tests isolate the checked-in reconciliation bodies; real
         # asynchronous lifecycles and crash recovery have separate integration tests.
-        adapter = patch('amscjobmanager.job_data.ComputeActions', DirectComputeActions)
+        adapter = patch('amscjobmanager.workflow_data.ComputeActions', DirectComputeActions)
         adapter.start()
         self.addCleanup(adapter.stop)
         self.temporary = tempfile.TemporaryDirectory()
@@ -261,15 +261,15 @@ class LocalCancellationTests(unittest.TestCase):
             local_api.cancelJob("untracked")
 
     def test_workflow_cancellation_stops_local_action_and_retains_records(self):
-        jobs = JobData()
+        workflows = WorkflowData()
         try:
-            workflow_id = jobs.enqueueJob(ExecuteBatchScriptComputeAction(
+            workflow_id = workflows.enqueueWorkflow(ExecuteBatchScriptComputeAction(
                 machine="local", account="", queue="", time="60",
                 script_body="echo ready > ready\nexec sleep 60\n", rundir=str(self.directory),
                 nodes=1, ranks_per_node=1, gpus_per_rank=0,
             ))
-            jobs.startWorkflows([workflow_id])
-            with jobs.conn as conn:
+            workflows.startWorkflows([workflow_id])
+            with workflows.conn as conn:
                 jobid = conn.execute("SELECT api_key FROM computes").fetchone()[0]
             with local_api._local_jobs_lock:
                 self.jobs.append((jobid, local_api._local_jobs.get(jobid)))
@@ -277,24 +277,24 @@ class LocalCancellationTests(unittest.TestCase):
             # A failed signal preserves both cancellation intents and the handle.
             with patch.object(local_api.os, "killpg", side_effect=PermissionError("denied")):
                 with self.assertRaises(PermissionError):
-                    jobs.cancelJob(workflow_id)
-            # The request raised before JobData could copy the manager's status.
+                    workflows.cancelWorkflow(workflow_id)
+            # The request raised before WorkflowData could copy the manager's status.
             # Its workflow intent is durable while the head copy remains ACTIVE.
-            self.assertEqual(jobs.jobStatus(workflow_id), ActionStatus.CANCELING)
-            self.assertEqual(jobs.jobState(workflow_id)["head_action_status"], ActionStatus.ACTIVE)
-            with jobs.conn as conn:
+            self.assertEqual(workflows.workflowStatus(workflow_id), ActionStatus.CANCELING)
+            self.assertEqual(workflows.workflowState(workflow_id)["head_action_status"], ActionStatus.ACTIVE)
+            with workflows.conn as conn:
                 self.assertEqual(conn.execute("SELECT action_status FROM computes").fetchone()[0], "CANCELING")
             self.assertEqual(local_api.getJobState(jobid), "active")
             # The normal reconciliation path then finishes the same cancellation.
-            jobs.performPendingCancellations()
-            self.assertEqual(jobs.jobState(workflow_id)["head_action_status"], ActionStatus.CANCELED)
+            workflows.performPendingCancellations()
+            self.assertEqual(workflows.workflowState(workflow_id)["head_action_status"], ActionStatus.CANCELED)
             self.assertEqual(local_api.getJobState(jobid), "canceled")
-            with jobs.conn as conn:
+            with workflows.conn as conn:
                 self.assertEqual(conn.execute("SELECT action_status FROM computes").fetchone()[0], "CANCELED")
-            with jobs.conn as conn:
-                self.assertEqual(conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0], 1)
+            with workflows.conn as conn:
+                self.assertEqual(conn.execute("SELECT COUNT(*) FROM workflows").fetchone()[0], 1)
         finally:
-            jobs.conn.close()
+            workflows.conn.close()
 
 
 if __name__ == "__main__":

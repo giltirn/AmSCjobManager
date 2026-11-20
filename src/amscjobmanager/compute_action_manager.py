@@ -59,7 +59,7 @@ ComputeActionStatusName = Literal[tuple(status.name for status in ActionStatus)]
 class ComputeActionFilter(FunctionArguments):
     """Optional AND-combined filters for records owned by the compute manager.
 
-    action_id/job_id (positive int | None) are database IDs, not list/stage
+    action_id/workflow_id (positive int | None) are database IDs, not list/stage
     positions. machine (str | None) matches case-insensitively; api_status
     (str | None) matches exactly, preserving provider casing or manager reasons.
     statuses (list[ActionStatus name] | None) uses OR; None means all and [] none.
@@ -67,7 +67,7 @@ class ComputeActionFilter(FunctionArguments):
     """
 
     action_id: int | None = Field(default=None, gt=0, strict=True, description='Optional positive action database ID, not a stage/list index; unmatched IDs return an empty list.')
-    job_id: int | None = Field(default=None, gt=0, strict=True, description='Optional positive owning workflow database ID; independent of action IDs.')
+    workflow_id: int | None = Field(default=None, gt=0, strict=True, description='Optional positive owning workflow database ID; independent of action IDs.')
     machine: StrictStr | None = Field(default=None, description='Optional case-insensitive machine name; unknown machines return an empty list.')
     statuses: list[ComputeActionStatusName] | None = Field(default=None, description='Recorded action-status names, combined using OR; omit for all, [] for none. Includes SCHEDULING and PROVIDER_HELD. Combined with other filters using AND.')
     api_status: StrictStr | None = Field(default=None, description='Exact, case-sensitive provider status or manager reason, for example active or INSUFFICIENT_WALLET_BALANCE. Omit for all, including unknown/null statuses.')
@@ -76,7 +76,7 @@ class ComputeActionFilter(FunctionArguments):
 class ComputeActionSummary(BaseModel):
     """Recorded compute identity, request, and execution state, without executable/script contents.
 
-    action_id/job_id (int) are independent positive database IDs. machine,
+    action_id/workflow_id (int) are independent positive database IDs. machine,
     action_type, action_status (str) identify target, definition class, and stored
     ActionStatus name. api_key/api_status (str | None) are a provider job ID (not
     a credential) and provider status or manager reason; None means not recorded.
@@ -88,7 +88,7 @@ class ComputeActionSummary(BaseModel):
     """
 
     action_id: int = Field(description='Positive global action database ID; not a workflow ID or stage/list position.')
-    job_id: int = Field(description='Positive database ID of the owning workflow.')
+    workflow_id: int = Field(description='Positive database ID of the owning workflow.')
     machine: str = Field(description='Target machine as recorded on the action.')
     action_type: str = Field(description='Stored compute definition class name, for example ExecuteJobComputeAction.')
     action_status: ComputeActionStatusName = Field(description='Recorded ActionStatus name; SCHEDULING includes wallet waits, ACTIVE includes provider-queued work.')
@@ -188,7 +188,7 @@ class ComputeActions(AsyncActionManager):
         ComputeActionListing with result ordered by action_id, as documented by
         ComputeActionSummary. Unknown IDs/machines or unmatched API-status values yield no matches.
         Read this manager's table only; unstarted future stages are excluded.
-        Call under JobManager's lock while it runs. No state or provider changes occur.
+        Call under WorkflowManager's lock while it runs. No state or provider changes occur.
         """
         if filters is None:
             filters = ComputeActionFilter()
@@ -197,7 +197,7 @@ class ComputeActions(AsyncActionManager):
 
         # Filter the owned execution table before deserializing any definitions.
         conditions, parameters = [], []
-        for column, value in (('action_id', filters.action_id), ('job_id', filters.job_id),
+        for column, value in (('action_id', filters.action_id), ('workflow_id', filters.workflow_id),
                               ('api_status', filters.api_status)):
             if value is not None:
                 conditions.append(f'{column} = ?')
@@ -221,7 +221,7 @@ class ComputeActions(AsyncActionManager):
         for row in rows:
             action = _unser(row['details'])
             summaries.append(ComputeActionSummary(
-                action_id=row['action_id'], job_id=row['job_id'], machine=row['machine'],
+                action_id=row['action_id'], workflow_id=row['workflow_id'], machine=row['machine'],
                 action_type=type(action).__name__, action_status=row['action_status'],
                 api_key=row['api_key'], api_status=row['api_status'], nodes=action.nodes,
                 time=action.time, account=action.account, queue=action.queue,

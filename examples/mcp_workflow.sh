@@ -57,7 +57,7 @@ cat >"$example_dir/submission.json" <<JSON
 {
   "tool": "submit_workflow",
   "arguments": {
-    "job_group": "local-mcp-example",
+    "workflow_group": "local-mcp-example",
     "submission_key": "increment-workflow",
     "stages": [
       {

@@ -6,7 +6,7 @@ from unittest.mock import Mock, patch
 
 from amscjobmanager.action_manager import ActionStatus
 from amscjobmanager.compute_actions import ExecuteJobComputeAction
-from amscjobmanager.manager import JobManager
+from amscjobmanager.manager import WorkflowManager
 
 
 class ManagerFailureTests(unittest.TestCase):
@@ -17,7 +17,7 @@ class ManagerFailureTests(unittest.TestCase):
         context. Verify object identity, lock release, and successful reentry;
         the caller catches the errors while the manager continues running.
         """
-        manager = JobManager(max_workflows_active=0)
+        manager = WorkflowManager(max_workflows_active=0)
         try:
             manager.start()
             for error in (ValueError('invalid workflow'), KeyboardInterrupt()):
@@ -28,8 +28,8 @@ class ManagerFailureTests(unittest.TestCase):
                     self.assertIs(caught.exception, error)
                     self.assertTrue(manager._lock.acquire(timeout=1), 'Context error retained its lock')
                     manager._lock.release()
-                    with manager as jobs:
-                        self.assertEqual(jobs.listWorkflows(), [])
+                    with manager as workflows:
+                        self.assertEqual(workflows.listWorkflows(), [])
                     self.assertTrue(manager.isAlive())
         finally:
             manager.stop(wait_until_done=False, close_database=True)
@@ -51,9 +51,9 @@ class ManagerFailureTests(unittest.TestCase):
         """
         for operation in ('startWorkflows', 'progressActiveState'):
             with self.subTest(operation=operation):
-                manager = JobManager(max_workflows_active=0)
+                manager = WorkflowManager(max_workflows_active=0)
                 try:
-                    with patch.object(manager.job_data, operation, side_effect=RuntimeError('unexpected worker failure')), \
+                    with patch.object(manager.workflow_data, operation, side_effect=RuntimeError('unexpected worker failure')), \
                          patch('amscjobmanager.manager.wfmanLog') as log:
                         manager.start()
                         manager._thread.join(timeout=3)
@@ -77,7 +77,7 @@ class ManagerFailureTests(unittest.TestCase):
         """
         for started in (False, True):
             with self.subTest(started=started):
-                manager = JobManager(max_workflows_active=0)
+                manager = WorkflowManager(max_workflows_active=0)
                 try:
                     if started:
                         manager.start()
@@ -86,7 +86,7 @@ class ManagerFailureTests(unittest.TestCase):
                         self.assertIs(manager._thread, original)
                     manager.stop(wait_until_done=False, close_database=True)
                     manager.stop()
-                    with self.assertRaisesRegex(RuntimeError, 'create a new JobManager'):
+                    with self.assertRaisesRegex(RuntimeError, 'create a new WorkflowManager'):
                         manager.start()
                     self.assertFalse(manager.isAlive())
                 finally:
@@ -98,7 +98,7 @@ class ManagerFailureTests(unittest.TestCase):
         Substitute only Thread construction, then check that a second start is
         rejected and shutdown does not try to join a thread that never started.
         """
-        manager = JobManager(max_workflows_active=0)
+        manager = WorkflowManager(max_workflows_active=0)
         thread = Mock()
         thread.start.side_effect = RuntimeError('launch denied')
         try:
@@ -128,13 +128,13 @@ class ManagerFailureTests(unittest.TestCase):
         Returns:
             None: Checks report failures through unittest assertions.
         """
-        manager = JobManager(max_workflows_active=0)
+        manager = WorkflowManager(max_workflows_active=0)
         try:
-            job_id = manager(lambda jobs: jobs.enqueueJob(ExecuteJobComputeAction(
+            workflow_id = manager(lambda workflows: workflows.enqueueWorkflow(ExecuteJobComputeAction(
                 machine='local', executable='/bin/true', arguments=[], account='', queue='', time='60',
                 rundir='/tmp', nodes=1, ranks_per_node=1, gpus_per_rank=0,
             )))
-            with patch.object(manager.job_data, 'startWorkflows', side_effect=RuntimeError('worker stopped')), \
+            with patch.object(manager.workflow_data, 'startWorkflows', side_effect=RuntimeError('worker stopped')), \
                  patch('amscjobmanager.manager.wfmanLog'):
                 manager.start()
                 manager._thread.join(timeout=3)
@@ -143,7 +143,7 @@ class ManagerFailureTests(unittest.TestCase):
             stopper.start()
             stopper.join(timeout=2)
             self.assertFalse(stopper.is_alive(), 'stop waited for a dead worker to finish workflows')
-            self.assertEqual(manager(lambda jobs: jobs.jobStatus(job_id)), ActionStatus.PENDING)
+            self.assertEqual(manager(lambda workflows: workflows.workflowStatus(workflow_id)), ActionStatus.PENDING)
         finally:
             manager.stop(wait_until_done=False, close_database=True)
 

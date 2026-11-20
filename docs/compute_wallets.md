@@ -52,13 +52,13 @@ compute provider, including stages of already submitted workflows and submission
 retries. Disabled wallets create no zero-cost accounting records or exemptions.
 Jobs already accepted without a reservation are not charged retroactively.
 
-For direct Python use, retrieve the compute manager through `JobData.getManager`:
+For direct Python use, retrieve the compute manager through `WorkflowData.getManager`:
 
 ```python
 from amscjobmanager.actions_base import ActionClass
 
-with manager as jobs:
-    computes = jobs.getManager(ActionClass.COMPUTE)
+with manager as workflows:
+    computes = workflows.getManager(ActionClass.COMPUTE)
     computes.setWalletEnabled("frontier", True)
     computes.rechargeWallet("frontier", 100)
     wallets = computes.getWallets("frontier")
@@ -83,7 +83,7 @@ python utilities/manager_client.py list_active_and_past_compute_actions \
 
 MCP clients call `list_active_and_past_compute_actions` with
 `{"api_status": "INSUFFICIENT_WALLET_BALANCE"}`. Each matching action includes
-its `action_id`, owning `job_id`, `machine`, `action_status`, `api_status`,
+its `action_id`, owning `workflow_id`, `machine`, `action_status`, `api_status`,
 requested `nodes` and `time` (walltime in seconds), and submission diagnostics.
 The IDs are database identifiers, not stage positions. The action remains
 `SCHEDULING` while its overall workflow is `ACTIVE`.
@@ -101,13 +101,13 @@ For direct Python inspection under the manager lock:
 ```python
 from amscjobmanager.compute_action_manager import ComputeActionFilter
 
-with manager as jobs:
-    computes = jobs.getManager(ActionClass.COMPUTE)
+with manager as workflows:
+    computes = workflows.getManager(ActionClass.COMPUTE)
     waiting = computes.listActiveAndPastComputeActions(
         ComputeActionFilter(api_status="INSUFFICIENT_WALLET_BALANCE")
     )
     for action in waiting.result:
-        print(action.action_id, action.job_id, action.machine)
+        print(action.action_id, action.workflow_id, action.machine)
 ```
 
 ## Reservations, waits, and refunds

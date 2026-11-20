@@ -1,5 +1,5 @@
-from .manager import JobManager
-from .job_data import JobData
+from .manager import WorkflowManager
+from .workflow_data import WorkflowData
 from .action_manager import ActionStatus
 
-__all__ = ["JobManager", "JobData", "ActionStatus"]
+__all__ = ["WorkflowManager", "WorkflowData", "ActionStatus"]

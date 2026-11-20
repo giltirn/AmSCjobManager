@@ -27,7 +27,7 @@ are explicitly configured. Use distinct database paths for separate servers.
 
 The listener binds to `127.0.0.1` and serves `/mcp`. Its `ServerRuntime` owns
 asynchronous initialization, a user-query queue, and the eventual background
-`JobManager`. Initialization starts after HTTP is listening, so configuration or
+`WorkflowManager`. Initialization starts after HTTP is listening, so configuration or
 authentication questions can be answered even before a manager exists. Once ready,
 the manager recovers/progresses workflows in its database. Pending questions keep
 the asking worker waiting while unrelated workflows continue. Run only one
@@ -71,8 +71,8 @@ server calls from prompting after the terminal hook has been restored.
 
 `server.runner.ManagerHTTPServer(initialize_manager, port=8765, log_path=...)`
 constructs its own runtime and a generic MCP adapter. Tool definitions come from
-JobManager, its action managers, and the user-query provider. `initialize_manager` is a no-argument
-factory that configures the API and returns a new `JobManager`; it runs after
+WorkflowManager, its action managers, and the user-query provider. `initialize_manager` is a no-argument
+factory that configures the API and returns a new `WorkflowManager`; it runs after
 listener startup. The server owns runtime startup/shutdown and emits readiness
 and termination announcements.
 
@@ -206,7 +206,7 @@ For remote administration, SSH into the server host and run this utility there.
 
 ## Submit and cancel workflows
 
-`submit_workflow(stages, job_group=None, submission_key=None)` persists an ordered,
+`submit_workflow(stages, workflow_group=None, submission_key=None)` persists an ordered,
 nonempty list of built-in actions. It returns `workflow_id` (the positive database
 ID) and `workflow_status` (the recorded overall status). This confirms persistence;
 provider submission and execution happen on background workers. Authentication
@@ -217,7 +217,7 @@ in workflow status and the server log.
 workflow without replacing its stages or group, including after completion or
 cancellation. Omit it to create new work every time. The client never retries
 requests automatically; reuse the key after a timeout or lost response when the
-outcome is uncertain. `job_group` remains an optional, nonunique label.
+outcome is uncertain. `workflow_group` remains an optional, nonunique label.
 
 For example, save the following as `submission.json` and submit it with
 `python utilities/manager_client.py --file submission.json`:
@@ -227,7 +227,7 @@ For example, save the following as `submission.json` and submit it with
   "tool": "submit_workflow",
   "arguments": {
     "submission_key": "example-run-1",
-    "job_group": "examples",
+    "workflow_group": "examples",
     "stages": [
       {
         "type": "api",
@@ -255,7 +255,7 @@ before consumers; keys must exist in earlier submissions or earlier stages of
 the current workflow. A condition is a key string or a nested infix array such
 as `["prepared", "AND", ["solver_a", "OR", "solver_b"]]`. Unknown keys and
 conditions requiring canceled producers return an `invalid_input` error without
-enqueuing partial work. These checks are owned by JobData and also apply to
+enqueuing partial work. These checks are owned by WorkflowData and also apply to
 direct Python submissions. See [workflow dependencies](workflows.md#connect-workflows-with-dependencies)
 for readiness, repeated keys, cancellation cascades, and key lifetime.
 
@@ -460,7 +460,7 @@ in ID order, including completed and canceled ones, or a one-element list for
 an explicit ID. An empty database returns an empty list; an unknown explicit
 ID is an error. Each record contains:
 
-- `workflow_id`, `job_group`, and `workflow_status` from the public manager API.
+- `workflow_id`, `workflow_group`, and `workflow_status` from the public manager API.
 - `workflow_stage`, `head_action_id`, `head_action_type`, `head_action_class`,
   and `head_action_status`.
 - `api_status`: a recorded provider status, a submission-blocking reason such as
@@ -498,13 +498,13 @@ workflows.
 
 ```bash
 python utilities/manager_client.py list_active_and_past_compute_actions
-python utilities/manager_client.py list_active_and_past_compute_actions --job-id 1
+python utilities/manager_client.py list_active_and_past_compute_actions --workflow-id 1
 python utilities/manager_client.py list_active_and_past_compute_actions \
     --machine frontier --api-status INSUFFICIENT_WALLET_BALANCE
 python utilities/manager_client.py -h list_active_and_past_compute_actions
 ```
 
-Optional filters are `action_id`, `job_id`, `machine`, `statuses`, and
+Optional filters are `action_id`, `workflow_id`, `machine`, `statuses`, and
 `api_status` (CLI flags replace underscores with hyphens). Filters combine using
 AND; multiple `statuses` combine using OR. Omitted or null filters impose no
 restriction; `statuses=[]` matches nothing. Machine names match case-insensitively,
@@ -586,7 +586,7 @@ Execution uses a separately authenticated envelope:
 
 The server validates the envelope, password and registered argument schema,
 then resolves the current backend provider. Action-manager callbacks run under
-the JobManager lock; JobManager callbacks acquire their own locks, while query
+the WorkflowManager lock; WorkflowManager callbacks acquire their own locks, while query
 callbacks remain available independently of initialization. Success returns `success: true`, `code: "ok"`, an acknowledgment `message`, and the
 operation's `result` when non-null. Failures return `success: false` with a
 stable `code` and credential-free `message`. Unknown commands/arguments are
@@ -659,7 +659,7 @@ python -m unittest discover -s test -p test_mcp_server.py -v
 ```
 
 You can also run `python test/test_mcp_server.py -v`. To select only the local
-workflow/HTTP test, append `-k local_job_status` to the unittest discovery command.
+workflow/HTTP test, append `-k local_workflow_status` to the unittest discovery command.
 
 The test prints each MCP request and response to stderr. Subprocess checks also
 show the full CLI command, the JSON payload (including file/stdin contents),

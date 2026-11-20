@@ -5,20 +5,20 @@
 ## Lifecycle and locking
 
 Initialize API configuration before constructing a manager: opening an existing
-database immediately recovers workers for unfinished actions. `JobManager.start()` launches
+database immediately recovers workers for unfinished actions. `WorkflowManager.start()` launches
 a background thread that starts eligible workflows and progresses active ones.
 Calls to `start()` while it is already running return without starting another
 thread.
 
-Always access JobData through the manager's lock while that thread is running:
+Always access WorkflowData through the manager's lock while that thread is running:
 
 ```python
-with manager as jobs:
-    state = jobs.jobState(job_id)
-    status = jobs.jobStatus(job_id)
+with manager as workflows:
+    state = workflows.workflowState(workflow_id)
+    status = workflows.workflowStatus(workflow_id)
 
 # The callable form also acquires the lock.
-status = manager(lambda jobs: jobs.jobStatus(job_id))
+status = manager(lambda workflows: workflows.workflowStatus(workflow_id))
 ```
 
 Keep these blocks short. The manager holds the same lock while doing its API
@@ -30,20 +30,20 @@ A typical remote monitoring loop, after configuration and workflow construction:
 
 ```python
 import time
-from amscjobmanager import ActionStatus, JobManager
+from amscjobmanager import ActionStatus, WorkflowManager
 
-manager = JobManager(filename="workflow.sqlite", poll_freq=30,
+manager = WorkflowManager(filename="workflow.sqlite", poll_freq=30,
                      max_workflows_active=4)
 try:
-    with manager as jobs:
-        job_id = jobs.enqueueJob(workflow)
+    with manager as workflows:
+        workflow_id = workflows.enqueueWorkflow(workflow)
     manager.start()
     while True:
         if not manager.isAlive():
-            raise RuntimeError("JobManager thread stopped")
-        with manager as jobs:
-            status = jobs.jobStatus(job_id)
-            state = jobs.jobState(job_id)
+            raise RuntimeError("WorkflowManager thread stopped")
+        with manager as workflows:
+            status = workflows.workflowStatus(workflow_id)
+            state = workflows.workflowState(workflow_id)
         print(status.name, state["workflow_stage"], state["head_action_type"])
         if status in (ActionStatus.COMPLETED, ActionStatus.FAILED,
                       ActionStatus.CANCELED):
@@ -78,9 +78,9 @@ no extra poll-failure counter or backoff is maintained. Only a successful status
 read can authorize the next workflow step. Direct status API calls can still
 raise errors to their callers.
 
-For manual starts, use `jobs.startWorkflows([job_id, ...])` under the lock. An
+For manual starts, use `workflows.startWorkflows([workflow_id, ...])` under the lock. An
 explicit list starts eligible heads without applying the automatic concurrency
-selection. Applications can also use JobData without a background manager and
+selection. Applications can also use WorkflowData without a background manager and
 call `startWorkflows()` and `progressActiveState()` themselves.
 
 ## Workflow and action states
@@ -96,18 +96,18 @@ call `startWorkflows()` and `progressActiveState()` themselves.
 | `CANCELING` | Cancellation intent is durable and remote cancellation/reconciliation remains unresolved. |
 | `CANCELED` | Workflow has been canceled, or a remotely canceled compute action has stopped its progression. |
 
-`jobState(job_id)` returns a dictionary containing the head-action state and
+`workflowState(workflow_id)` returns a dictionary containing the head-action state and
 class, action ID/type, workflow stage, group, timestamps, and overall workflow
 status. Serialized action definitions are not loaded or returned.
 The stage is `-1` before the first action and increases as steps are selected.
 
-`jobStatus(job_id)` reads the persisted overall workflow status: PENDING,
+`workflowStatus(workflow_id)` reads the persisted overall workflow status: PENDING,
 ACTIVE, COMPLETED, FAILED, CANCELING, or CANCELED. Workflows remain ACTIVE while
 their head is SCHEDULING, ACTIVE, PROVIDER_HELD, or an intermediate COMPLETED
 stage. COMPLETED is recorded after progression advances past the final stage.
 Inspect `head_action_status` for the separate execution state.
 
-Use `headActionStatus(job_id)` for the recorded head action status, including
+Use `headActionStatus(workflow_id)` for the recorded head action status, including
 `SCHEDULING` and intermediate `COMPLETED`. With `return_api_status=True` it
 returns `(action_status, api_status)`, where the latter is the provider status
 string or `None` when unavailable. Set `force_poll=True` to wake supervisors
@@ -115,7 +115,7 @@ for all active or provider-held heads and copy their currently recorded status w
 workflow steps. The requested polls may finish after this call returns; read
 again to observe their results. Failed polls retain the last known state and
 are logged.
-Call under the `JobManager` lock while its background thread is running.
+Call under the `WorkflowManager` lock while its background thread is running.
 Compute `ACTIVE` includes provider states `new`, `queued`, and `active`;
 only the provider status distinguishes waiting from execution.
 
@@ -147,7 +147,7 @@ exponential backoff starting at 30 seconds. An attempt is committed before
 `initiateAction()`. If the request fails ambiguously, later reconciliation
 searches by name before trying again. Once the attempt limit is reached, a
 successful lookup finding no remote work leads to `FAILED` when the resource
-check permits it. These defaults are AsyncActionManager settings; JobManager does
+check permits it. These defaults are AsyncActionManager settings; WorkflowManager does
 not expose constructor arguments for them.
 
 An up pre-check cannot guarantee the subsequent request succeeds. Ordinary API,
@@ -158,12 +158,12 @@ workflow; it is not automatically resubmitted.
 ## Cancellation
 
 ```python
-with manager as jobs:
-    jobs.cancelJob(job_id)
+with manager as workflows:
+    workflows.cancelWorkflow(workflow_id)
 ```
 
 The workflow record remains in the database. Every affected workflow first enters
-`CANCELING`, with its action rows unchanged. `JobData.performPendingCancellations()` cancels pending stages
+`CANCELING`, with its action rows unchanged. `WorkflowData.performPendingCancellations()` cancels pending stages
 locally, preserves completed/failed history, and delegates executing heads to their
 action managers. Those heads enter `CANCELING` before remote cancellation. Once
 resolved, the workflow becomes `CANCELED`. Subsequent passes retry unfinished
@@ -196,20 +196,20 @@ finish later. Shutdown does not cancel remote jobs or transfers.
 `close_database=True` also closes workflow storage; repeated `stop()` calls are
 safe even after closure. Local compute processes have their own lifetime.
 
-A `JobManager` is single-use. Calling `start()` on a running instance is harmless,
+A `WorkflowManager` is single-use. Calling `start()` on a running instance is harmless,
 but calling it after shutdown, failure, or `stop()` before the first start raises
 an error. Workers belonging to the stopped instance are not revived.
 
 To resume remote work, initialize the same API configuration and create a new
-JobManager with the same database filename. Its JobData constructor restores
+WorkflowManager with the same database filename. Its WorkflowData constructor restores
 supervision of unfinished actions; call `start()` for workflow progression without
 enqueuing the old workflow again. Scheduling/cancellation intents are reconciled and active heads
 are polled. Previously `FAILED` or `CANCELED` workflows stay stopped; there is no
 public automatic retry/resume operation for those states.
 
 Keep database files private and action definitions compatible: reopening
-unpickles stored Python objects. Use one live JobData instance per workflow
-database, whether used directly or owned by a JobManager. Locks coordinate only
+unpickles stored Python objects. Use one live WorkflowData instance per workflow
+database, whether used directly or owned by a WorkflowManager. Locks coordinate only
 threads sharing that instance; multiple instances/processes are not supported.
 Close the previous instance before reopening the database for recovery.
 Remote names currently contain only the action ID; independent databases can
@@ -250,13 +250,13 @@ Each action has one worker thread. For compute and transfer actions,
 through separate execution and cancellation-completion hooks. API actions run
 their complete remaining sequence directly on their worker, without periodic
 polling or a retry delay. `startOrResumeAction` persists
-intent and starts or reuses execution without waiting; `JobData` observes recorded
+intent and starts or reuses execution without waiting; `WorkflowData` observes recorded
 action states and advances workflow stages.
 Nested calls can wait for shared authentication without occupying the workflow
 manager. Independent implementations initialize under separate client locks.
 
 Authentication workers do not inherit their callers' shutdown state. Canceling
-an action or stopping a JobManager stops its caller's wait, while shared
+an action or stopping a WorkflowManager stops its caller's wait, while shared
 authentication can continue. There is no waiter counting; unused questions may
 remain pending until answered or the server shuts down. Server shutdown closes
 the query queue and explicitly stops outstanding authentication workers. Late
@@ -264,7 +264,7 @@ answers/provider responses are ignored at interruption checks, and later calls
 can start fresh authentication. Each component retains its own worker registry.
 
 Action workers write their own records through the same `LockedConnection`
-context manager as `JobData`. It holds a reentrant lock and yields the persistent,
+context manager as `WorkflowData`. It holds a reentrant lock and yields the persistent,
 ordinary SQLite connection for each `with self.conn as conn:` block. All SQL
 statements and result fetching must finish inside that block; the wrapper exposes
 no SQL methods. Leaving the block commits or rolls back and releases the lock.
@@ -279,7 +279,7 @@ Resumption refers to recovery of missing worker supervision when constructing
 a new manager after shutdown or process failure, not a pause/resume feature for workflows. Normal
 workers progress independently; repeated start/resume calls reuse live workers.
 
-After a process crash, workers and questions are gone. JobData construction
+After a process crash, workers and questions are gone. WorkflowData construction
 calls `resumeActions` once to restore supervisors for current unfinished workflow
 heads, including already ACTIVE jobs; historical abandoned records are not restarted. API sequences replay the
 unfinished operation. Submission recovery discovers accepted work by its stable
@@ -293,7 +293,7 @@ provider polling interval configured at manager construction. Its optional
 without waiting. Likewise, `force_poll=True` wakes an existing supervisor
 without waiting; its eventual successful poll updates the action record without
 another query or workflow pass. Poll failures retain existing state and are logged.
-`JobData` copies the latest recorded state into the workflow on its next pass.
+`WorkflowData` copies the latest recorded state into the workflow on its next pass.
 
 Worker interruption and action cancellation are separate. `Workers.interrupt`
 asks the current Python call to finish running by raising `WorkerInterrupted`.

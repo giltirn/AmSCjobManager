@@ -74,7 +74,7 @@ traditional/JSON command-line client, see the optional
 [private MCP server](docs/server.md).
 
 For a real calculation, see the [MPI workflow example](examples/README.md).
-It uploads C++ source, compiles in pre-launch, runs MPI under `JobManager`,
+It uploads C++ source, compiles in pre-launch, runs MPI under `WorkflowManager`,
 then downloads and verifies the result on local or configured IRI machines.
 
 For real operations, select IRI before importing the package and initialize it
@@ -92,7 +92,7 @@ setupManager(config)
 
 See [installation](docs/installation.md) and
 [configuration and authentication](docs/configuration.md) before connecting to a
-facility. Creating a `JobManager` does not initialize API configuration.
+facility. Creating a `WorkflowManager` does not initialize API configuration.
 
 ## Documentation
 

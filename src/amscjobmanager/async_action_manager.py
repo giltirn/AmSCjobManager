@@ -33,7 +33,7 @@ class AsyncActionManager(ActionManager):
                  scheduling_retry_delay=30, max_submission_attempts=3, workers: Workers | None = None, poll_freq=30):
         """Initialize remote-action storage, shared status views, and supervision settings.
 
-        connection (LockedConnection) is JobData's shared locking context manager.
+        connection (LockedConnection) is WorkflowData's shared locking context manager.
         table_name (str) names this manager's table; api_action_status_map
         (dict[str, ActionStatus]) maps provider states. scheduling_retry_delay
         (float, default 30) is initial backoff in seconds; max_submission_attempts
@@ -62,7 +62,7 @@ class AsyncActionManager(ActionManager):
             api_status TEXT,
             action_status TEXT,
             last_update INTEGER,
-            job_id INTEGER,
+            workflow_id INTEGER,
             submission_attempts INTEGER NOT NULL DEFAULT 0,
             last_submission_attempt INTEGER,
             last_submission_error TEXT
@@ -141,13 +141,13 @@ class AsyncActionManager(ActionManager):
                         )
             return False, None
 
-    def _recordSchedulingIntentIfNew(self, action, job_id, action_id):
+    def _recordSchedulingIntentIfNew(self, action, workflow_id, action_id):
         """Create a SCHEDULING record only for a previously unseen action ID.
 
         Args:
             action (object): Serializable action definition from the workflow.
-            job_id (int): Positive workflow ID owning the action.
-            action_id (int): Positive, JobData-issued action ID.
+            workflow_id (int): Positive workflow ID owning the action.
+            action_id (int): Positive, WorkflowData-issued action ID.
 
         Returns:
             int: The action ID, whether its record was created or already
@@ -162,7 +162,7 @@ class AsyncActionManager(ActionManager):
                 return existing["action_id"]
 
             conn.execute(
-                f"INSERT INTO {self.table_name}(action_id, machine, details, api_key, api_status, action_status, last_update, job_id) VALUES (?,?,?,?,?,?,?,?)",
+                f"INSERT INTO {self.table_name}(action_id, machine, details, api_key, api_status, action_status, last_update, workflow_id) VALUES (?,?,?,?,?,?,?,?)",
                 (
                     action_id,
                     getattr(action, "machine", None),
@@ -171,23 +171,23 @@ class AsyncActionManager(ActionManager):
                     None,
                     ActionStatus.SCHEDULING.name,
                     int(time.time()),
-                    job_id,
+                    workflow_id,
                 ),
             )
         self._maybeSimulateCrash("action_intent_persisted")
         return action_id
 
-    def startOrResumeAction(self, action, job_id, action_id) -> None:
+    def startOrResumeAction(self, action, workflow_id, action_id) -> None:
         """Start an action or recover its submission, monitoring or cancellation.
 
         action (object) is the serialized definition used only for a missing
-        record; job_id (int) is its positive workflow ID; action_id (int) is
-        always allocated by JobData and reused for recovery. Resumption restores
+        record; workflow_id (int) is its positive workflow ID; action_id (int) is
+        always allocated by WorkflowData and reused for recovery. Resumption restores
         supervision after the previous worker stopped; a live worker is reused,
         and progresses without repeated calls. This call never waits for API work.
         Return None; queryRecordedStatus observes progress independently.
         """
-        self._recordSchedulingIntentIfNew(action, job_id, action_id)
+        self._recordSchedulingIntentIfNew(action, workflow_id, action_id)
         status, _ = self.queryRecordedStatus(action_id)
         if status == ActionStatus.CANCELING:
             self._startCancellationWorker(action_id, complete_cancellation=self._completeCancellation)
@@ -208,7 +208,7 @@ class AsyncActionManager(ActionManager):
         """Return the highest action ID recorded by this manager.
 
         Takes no arguments. Returns a positive int, or None when this manager
-        has no action records. This inspects execution history only; JobData
+        has no action records. This inspects execution history only; WorkflowData
         assigns IDs to every queued stage using its actions-table primary key.
         """
         with self.conn as conn:
@@ -318,7 +318,7 @@ class AsyncActionManager(ActionManager):
         """Request or recover cancellation without submitting new work.
 
         Args:
-            action_id (int): Positive, JobData-issued action ID.
+            action_id (int): Positive, WorkflowData-issued action ID.
             recovery (tuple[object, int] | None): Optional pair containing the
                 stored action definition at index 0 and its positive workflow
                 ID at index 1. Used to recover a missing action record after a
@@ -334,12 +334,12 @@ class AsyncActionManager(ActionManager):
                 is supplied.
         """
         if recovery is not None:
-            action, job_id = recovery
+            action, workflow_id = recovery
             # A crash may leave the workflow head persisted without an action
             # record. Recreate that record so cancellation can persist its
             # intent and reconcile any remote work; this does not submit the
             # action, and an existing record is left unchanged.
-            self._recordSchedulingIntentIfNew(action, job_id, action_id)
+            self._recordSchedulingIntentIfNew(action, workflow_id, action_id)
         # Publish intent and interrupt execution before its worker can enter
         # cancellation. Repeated requests must not interrupt cancellation queries.
         with self._worker_lock:
@@ -360,7 +360,7 @@ class AsyncActionManager(ActionManager):
         """
         with self.conn as conn:
             action = conn.execute(
-                f"SELECT machine, details, job_id, api_key, action_status, submission_attempts, "
+                f"SELECT machine, details, workflow_id, api_key, action_status, submission_attempts, "
                 f"last_submission_attempt FROM {self.table_name} WHERE action_id = ?",
                 (action_id,),
             ).fetchone()
@@ -379,7 +379,7 @@ class AsyncActionManager(ActionManager):
                 action["machine"], self._remoteActionName(action_id),
                 failure_message=(
                     f"Remote lookup failed for {self.table_name} action {action_id} "
-                    f"(job {action['job_id']}, machine {action['machine']!r}); deferring reconciliation"
+                    f"(workflow {action['workflow_id']}, machine {action['machine']!r}); deferring reconciliation"
                 ),
                 record_error=True,
             )
@@ -422,7 +422,7 @@ class AsyncActionManager(ActionManager):
                 error = "Remote action was not found after the maximum number of submission attempts"
                 wfmanLog(
                     f"Submission retries exhausted for {self.table_name} action {action_id} "
-                    f"(job {action['job_id']}, machine {action['machine']!r}, "
+                    f"(workflow {action['workflow_id']}, machine {action['machine']!r}, "
                     f"{action['submission_attempts']} attempts); marking FAILED: {error}"
                 )
                 with self.conn as conn:
@@ -451,11 +451,11 @@ class AsyncActionManager(ActionManager):
             self._maybeSimulateCrash("before_remote_submission")
             checkForThreadCurrentWorkerInterruption()
             succeeded, api_key = self._callApiOperation(
-                action_id, submitted_action.initiateAction, action["job_id"],
+                action_id, submitted_action.initiateAction, action["workflow_id"],
                 name=self._remoteActionName(action_id),
                 failure_message=(
                     f"Submission failed for {self.table_name} action {action_id} "
-                    f"(job {action['job_id']}, machine {action['machine']!r}, "
+                    f"(workflow {action['workflow_id']}, machine {action['machine']!r}, "
                     f"attempt {action['submission_attempts'] + 1}/{self.max_submission_attempts}); "
                     "retaining SCHEDULING for reconciliation"
                 ),
@@ -487,7 +487,7 @@ class AsyncActionManager(ActionManager):
             action_id, self._queryStatusInternal, action["machine"], api_key,
             failure_message=(
                 f"Status poll failed for {self.table_name} action {action_id} "
-                f"(job {action['job_id']}, machine {action['machine']!r}, remote ID {api_key!r}); "
+                f"(workflow {action['workflow_id']}, machine {action['machine']!r}, remote ID {api_key!r}); "
                 "deferring reconciliation"
             ),
             record_error=True,
@@ -640,18 +640,18 @@ class AsyncActionManager(ActionManager):
     def getLiveActions(self):
         """List LIVE actions (ACTIVE and PROVIDER_HELD) without contacting providers.
 
-        Take no arguments. Return list[dict] with job_id (int workflow ID),
+        Take no arguments. Return list[dict] with workflow_id (int workflow ID),
         api_key (str | None provider ID), api_status (str | None raw state),
         and the action definition's getInfo fields.
         """
         out = []
         with self.conn as conn:
-            entries = conn.execute(f'SELECT job_id, api_key, api_status, details FROM {self.table_name} WHERE action_status IN '
+            entries = conn.execute(f'SELECT workflow_id, api_key, api_status, details FROM {self.table_name} WHERE action_status IN '
                                    "(SELECT action_status FROM action_status_groups WHERE group_name = 'LIVE')").fetchall()
             for entry in entries:
                 action = _unser(entry['details'])
                 dc = action.getInfo()
-                dc['job_id'] = entry['job_id']
+                dc['workflow_id'] = entry['workflow_id']
                 dc['api_key'] = entry['api_key']
                 dc['api_status'] = entry['api_status']
                 out.append(dc)
@@ -662,10 +662,10 @@ class AsyncActionManager(ActionManager):
         For the given action, return a dictionary containing "api_key", "api_status" and other custom fields defined on a per-action basis
         """        
         with self.conn as conn:
-            entry = conn.execute(f"SELECT job_id, details, api_status, api_key FROM {self.table_name} WHERE action_id = ?", (action_id,) ).fetchone()
+            entry = conn.execute(f"SELECT workflow_id, details, api_status, api_key FROM {self.table_name} WHERE action_id = ?", (action_id,) ).fetchone()
             action = _unser(entry['details'])
             dc = action.getInfo()
-            dc['job_id'] = entry['job_id']
+            dc['workflow_id'] = entry['workflow_id']
             dc['api_key'] = entry['api_key']
             dc['api_status'] = entry['api_status']
             return dc

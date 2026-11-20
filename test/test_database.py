@@ -40,7 +40,7 @@ class DatabaseTests(unittest.TestCase):
 
         Every enum state must have a workflow mapping. LIVE excludes submission
         and terminal states; EXECUTING adds submission. A completed head maps to
-        ACTIVE until JobData explicitly advances beyond the workflow's last stage.
+        ACTIVE until WorkflowData explicitly advances beyond the workflow's last stage.
         """
         initializeActionStatusViews(self.database)
         with self.database as conn:
@@ -62,7 +62,7 @@ class DatabaseTests(unittest.TestCase):
     def test_status_views_are_read_only_and_initialization_preserves_records(self):
         """Reject view mutations and safely initialize the shared rules repeatedly.
 
-        Action managers and JobData can share a connection; none may overwrite
+        Action managers and WorkflowData can share a connection; none may overwrite
         existing records or turn library status rules into editable table data.
         """
         initializeActionStatusViews(self.database)

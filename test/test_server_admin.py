@@ -29,7 +29,7 @@ from amscjobmanager import logging as manager_logging
 from amscjobmanager.actions_base import ActionClass
 from amscjobmanager.server.admin import AdminCallRequest, AdminDiscoveryRequest, AdminResponse, AdminServer, execute_admin_request
 from amscjobmanager.server.runtime import ServerRuntime
-from amscjobmanager.manager import JobManager
+from amscjobmanager.manager import WorkflowManager
 
 
 class AdminSocketTests(unittest.IsolatedAsyncioTestCase):
@@ -46,7 +46,7 @@ class AdminSocketTests(unittest.IsolatedAsyncioTestCase):
         self.enterContext(patch.object(manager_logging, 'wfman_log_func', self.logs))
         self.queries = Mock(side_effect=AssertionError('Password reached a user-query hook'))
         self.enterContext(patch.object(manager_logging, 'api_query_user_func', self.queries))
-        self.runtime = ServerRuntime(lambda: JobManager(max_workflows_active=0))
+        self.runtime = ServerRuntime(lambda: WorkflowManager(max_workflows_active=0))
         self.addCleanup(self.runtime.stop)
         self.runtime.start()
         await asyncio.to_thread(self.runtime._startup_worker.future.result, 3)
@@ -77,15 +77,15 @@ class AdminSocketTests(unittest.IsolatedAsyncioTestCase):
     async def test_wallet_commands_require_password_and_persist(self):
         """Use the Unix protocol to budget compute, reject unauthorized grants, and reopen.
 
-        Wallet changes go through a real JobManager/JobData, while the socket
+        Wallet changes go through a real WorkflowManager/WorkflowData, while the socket
         fixture supplies password protection. Unlike sandbox roots, the balance
         and enable flag must remain after the manager database is reopened.
         """
-        from amscjobmanager.manager import JobManager
-        from amscjobmanager.job_data import JobData
+        from amscjobmanager.manager import WorkflowManager
+        from amscjobmanager.workflow_data import WorkflowData
 
         database = self.root / 'wallet.sqlite'
-        manager = JobManager(database, max_workflows_active=0)
+        manager = WorkflowManager(database, max_workflows_active=0)
         self.runtime.stop()
         self.runtime = ServerRuntime(lambda: manager)
         self.server.runtime = self.runtime
@@ -95,20 +95,20 @@ class AdminSocketTests(unittest.IsolatedAsyncioTestCase):
         for command, hours in (('enable_wallet', None), ('recharge_wallet', 2.5)):
             denied = await asyncio.to_thread(execute_admin_request, self.address, AdminCallRequest(command=command, arguments={'machine': 'local', **({} if hours is None else {'node_hours': hours})}, password='wrong'))
             self.assertEqual(denied.code, 'authentication_failed')
-            self.assertEqual(manager(lambda jobs: jobs.getManager(ActionClass.COMPUTE).getWallets()), {})
+            self.assertEqual(manager(lambda workflows: workflows.getManager(ActionClass.COMPUTE).getWallets()), {})
         for command, hours in (('enable_wallet', None), ('recharge_wallet', 2.5),
                                ('disable_wallet', None)):
             result = await asyncio.to_thread(execute_admin_request, self.address, AdminCallRequest(command=command, arguments={'machine': 'local', **({} if hours is None else {'node_hours': hours})}, password=self.password))
             self.assertTrue(result.success, result)
-        snapshot = manager(lambda jobs: jobs.getManager(ActionClass.COMPUTE).getWallets())
+        snapshot = manager(lambda workflows: workflows.getManager(ActionClass.COMPUTE).getWallets())
         self.assertEqual(snapshot['local']['available_node_hours'], 2.5)
         self.assertFalse(snapshot['local']['enabled'])
         # Invalid command-specific fields must fail before changing any state.
         invalid = await self._send(json.dumps(dict(type='call', command='enable_wallet', password=self.password, arguments=dict(machine='local', path='/unexpected'))).encode() + b'\n')
         self.assertFalse(invalid['success'])
-        self.assertEqual(manager(lambda jobs: jobs.getManager(ActionClass.COMPUTE).getWallets()), snapshot)
+        self.assertEqual(manager(lambda workflows: workflows.getManager(ActionClass.COMPUTE).getWallets()), snapshot)
         manager.stop(False, close_database=True)
-        reopened = JobData(database)
+        reopened = WorkflowData(database)
         self.addCleanup(reopened.conn.close)
         self.assertEqual(reopened.getManager(ActionClass.COMPUTE).getWallets(), snapshot)
         self.queries.assert_not_called()
@@ -421,19 +421,19 @@ class AdminUtilityIntegrationTests(unittest.TestCase):
     def test_admin_help_uses_discovered_schemas_without_password(self):
         """Generate every admin help page from actual registry descriptions without authentication.
 
-        Stub only socket I/O; command definitions come from a real JobData.
+        Stub only socket I/O; command definitions come from a real WorkflowData.
         Offline help shows connection instructions, while detailed help uses
         SOCKET -h COMMAND and never prompts or submits an execution request.
         """
         import io
         import runpy
         from contextlib import redirect_stdout
-        from amscjobmanager.job_data import JobData
+        from amscjobmanager.workflow_data import WorkflowData
         from amscjobmanager.server.functions import FunctionRegistry
 
-        jobs = JobData()
-        self.addCleanup(jobs.conn.close)
-        descriptions = FunctionRegistry(jobs).describe('admin')
+        workflows = WorkflowData()
+        self.addCleanup(workflows.conn.close)
+        descriptions = FunctionRegistry(workflows).describe('admin')
         main = runpy.run_path('utilities/manager_admin.py')['main']
         for flag in ('-h', '--help'):
             with patch.dict(main.__globals__, {'execute_admin_request': Mock(side_effect=AssertionError('Offline help connected'))}), redirect_stdout(io.StringIO()):
@@ -566,10 +566,10 @@ class AdminUtilityIntegrationTests(unittest.TestCase):
                 submitted = call('submit_workflow', {'stages': [{'type': 'api', 'operations': [
                     {'type': 'write_file', 'machine': 'local', 'path': str(directory / name), 'content': 'test'}]}]})
                 self.assertTrue(submitted['success'], submitted)
-                job_id = submitted['results'][0]['result']['workflow_id']
+                workflow_id = submitted['results'][0]['result']['workflow_id']
                 deadline = time.monotonic() + 5
                 while time.monotonic() < deadline:
-                    listing = call('list_workflows', {'workflow_id': job_id})
+                    listing = call('list_workflows', {'workflow_id': workflow_id})
                     state = listing['results'][0]['result'][0]['workflow_status']
                     if state in ('COMPLETED', 'FAILED'):
                         return state

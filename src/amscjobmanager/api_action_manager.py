@@ -22,7 +22,7 @@ class APIActions(ActionManager):
         """Create API action storage and shared status views on connection (LockedConnection).
 
         connection yields a SQLite connection with sqlite3.Row records and is
-        owned by JobData. All SQL access stays inside its context blocks.
+        owned by WorkflowData. All SQL access stays inside its context blocks.
         workers (Workers | None) supplies execution, default a new registry.
         _test_crash_at (str | None) selects a test-only crash boundary; default
         None disables injection. Return None; no remote API is contacted.
@@ -34,7 +34,7 @@ class APIActions(ActionManager):
         with self.conn as conn:
             conn.execute('''CREATE TABLE IF NOT EXISTS api_actions (
                 action_id INTEGER PRIMARY KEY,
-                job_id INTEGER NOT NULL,
+                workflow_id INTEGER NOT NULL,
                 details BLOB NOT NULL,
                 action_status TEXT NOT NULL,
                 next_operation INTEGER NOT NULL DEFAULT 0
@@ -48,10 +48,10 @@ class APIActions(ActionManager):
         if point == self._test_crash_at:
             raise SimulatedCrash(point)
 
-    def _recordAction(self, action: APIAction, job_id: int, action_id: int, status: ActionStatus) -> bool:
+    def _recordAction(self, action: APIAction, workflow_id: int, action_id: int, status: ActionStatus) -> bool:
         """Persist a missing API record, retaining existing records unchanged.
 
-        action (APIAction) is the stored definition; job_id/action_id (positive
+        action (APIAction) is the stored definition; workflow_id/action_id (positive
         ints) identify workflow/action; status (ActionStatus) is the initial
         intent. Return True for a new record, False if it already exists.
         """
@@ -59,21 +59,21 @@ class APIActions(ActionManager):
             if self.hasAction(action_id):
                 return False
             conn.execute('INSERT INTO api_actions '
-                         '(action_id, job_id, details, action_status, last_update) VALUES (?, ?, ?, ?, ?)',
-                         (action_id, job_id, _ser(action), status.name, int(time.time())))
+                         '(action_id, workflow_id, details, action_status, last_update) VALUES (?, ?, ?, ?, ?)',
+                         (action_id, workflow_id, _ser(action), status.name, int(time.time())))
         return True
 
-    def startOrResumeAction(self, action: APIAction, job_id: int, action_id: int) -> None:
+    def startOrResumeAction(self, action: APIAction, workflow_id: int, action_id: int) -> None:
         """Start an API sequence or recover execution from its saved checkpoint.
 
-        action supplies the APIAction definition for a missing record. job_id
-        and action_id (positive ints) are assigned by JobData. Existing terminal
+        action supplies the APIAction definition for a missing record. workflow_id
+        and action_id (positive ints) are assigned by WorkflowData. Existing terminal
         records are retained. Resumption is recovery after the previous worker
         stopped: unfinished work continues from its saved cursor. A live worker
         is reused and executes the sequence without repeated calls.
         Return None without waiting for the sequence or cancellation to finish.
         """
-        if self._recordAction(action, job_id, action_id, ActionStatus.SCHEDULING):
+        if self._recordAction(action, workflow_id, action_id, ActionStatus.SCHEDULING):
             self._maybeSimulateCrash('action_intent_persisted')
         status, _ = self.queryRecordedStatus(action_id)
         if status == ActionStatus.CANCELING:
@@ -111,7 +111,7 @@ class APIActions(ActionManager):
                 # stack; another workflow can progress while an operation waits.
                 checkForThreadCurrentWorkerInterruption()
                 self._maybeSimulateCrash(f'api_operation_{index}_started')
-                action.operations[index].execute(row['job_id'])
+                action.operations[index].execute(row['workflow_id'])
                 self._maybeSimulateCrash(f'api_operation_{index}_completed')
                 # Commit effects' checkpoint only after success. The final
                 # cursor and terminal status must commit in the same transaction.
@@ -136,7 +136,7 @@ class APIActions(ActionManager):
             raise
         except Exception as exc:
             error = f'{type(exc).__name__}: {exc}'
-            wfmanLog(f'API action {action_id} (job {row["job_id"]}), operation {index} failed: {error}')
+            wfmanLog(f'API action {action_id} (workflow {row["workflow_id"]}), operation {index} failed: {error}')
             self._recordWorkerFailure(action_id, exc)
 
     def cancelOrResumeCancelingAction(self, action_id: int, *, recovery: tuple[APIAction, int] | None = None) -> None:
@@ -149,8 +149,8 @@ class APIActions(ActionManager):
         Return None without waiting; an existing cancellation worker is reused.
         """
         if recovery is not None:
-            action, job_id = recovery
-            self._recordAction(action, job_id, action_id, ActionStatus.CANCELED)
+            action, workflow_id = recovery
+            self._recordAction(action, workflow_id, action_id, ActionStatus.CANCELED)
         # Record intent and signal under the handoff lock so an interrupt cannot
         # arrive late and abort the worker's cancellation-completion phase.
         with self._worker_lock:
@@ -224,7 +224,7 @@ class APIActions(ActionManager):
     def getActionInfo(self, action_id: int) -> dict:
         """Return progress/details for positive integer action_id; raise ValueError if unknown.
 
-        The dictionary includes job_id (int), api_key/api_status (both None),
+        The dictionary includes workflow_id (int), api_key/api_status (both None),
         next_operation (zero-based int, equal to operation_count on completion),
         operation_count (int), operations (list[str] names), and error (str | None).
         """
@@ -232,5 +232,5 @@ class APIActions(ActionManager):
             row = conn.execute('SELECT * FROM api_actions WHERE action_id = ?', (action_id,)).fetchone()
         if row is None:
             raise ValueError(f'Unknown action_id: {action_id}')
-        return dict(_unser(row['details']).getInfo(), job_id=row['job_id'], api_key=None,
+        return dict(_unser(row['details']).getInfo(), workflow_id=row['workflow_id'], api_key=None,
                     api_status=None, next_operation=row['next_operation'], error=row['error'])

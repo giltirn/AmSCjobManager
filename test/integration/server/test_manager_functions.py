@@ -66,29 +66,27 @@ class ExtensionComputeActions(ComputeActions):
         ),)
 
 
-class ExtensionWorkflowManager(WorkflowManager):
-    """Advertise workflow-manager operations without modifying transport code."""
+class ExtensionWorkflowData(WorkflowData):
+    """Advertise workflow-data operations without modifying transport code."""
 
     def getMCPFunctions(self):
-        """Describe standard operations and a WorkflowManager-owned extension."""
-        def _inspect(manager: ExtensionWorkflowManager, args: ExtensionArguments) -> ExtensionResult:
-            """Return args.value plus ten under the supplied manager's lock."""
-            with manager:
-                return ExtensionResult(result=args.value + 10)
+        """Describe standard operations and a WorkflowData-owned extension."""
+        def _inspect(workflows: ExtensionWorkflowData, args: ExtensionArguments) -> ExtensionResult:
+            """Return args.value plus ten using the supplied WorkflowData owner."""
+            return ExtensionResult(result=args.value + 10)
 
         return super().getMCPFunctions() + (FunctionDefinition(
-            'inspect_manager_extension', 'Inspect a WorkflowManager extension.', _inspect, read_only=True,
+            'inspect_workflow_extension', 'Inspect a WorkflowData extension.', _inspect, read_only=True,
         ),)
 
     def getAdminFunctions(self):
-        """Describe standard administration and a WorkflowManager-owned extension."""
-        def _apply(manager: ExtensionWorkflowManager, args: ExtensionArguments) -> ExtensionResult:
-            """Return args.value plus twenty under the supplied manager's lock."""
-            with manager:
-                return ExtensionResult(result=args.value + 20)
+        """Describe standard administration and a WorkflowData-owned extension."""
+        def _apply(workflows: ExtensionWorkflowData, args: ExtensionArguments) -> ExtensionResult:
+            """Return args.value plus twenty using the supplied WorkflowData owner."""
+            return ExtensionResult(result=args.value + 20)
 
         return super().getAdminFunctions() + (FunctionDefinition(
-            'apply_manager_extension', 'Apply a WorkflowManager extension.', _apply,
+            'apply_workflow_extension', 'Apply a WorkflowData extension.', _apply,
         ),)
 
 
@@ -97,13 +95,13 @@ class ManagerFunctionTests(unittest.TestCase):
 
     def setUp(self):
         """Construct an empty database with the extension manager; register close cleanup."""
-        self.workflows = WorkflowData(_test_action_manager_factories={ActionClass.COMPUTE: ExtensionComputeActions})
+        self.workflows = ExtensionWorkflowData(_test_action_manager_factories={ActionClass.COMPUTE: ExtensionComputeActions})
         self.addCleanup(self.workflows.conn.close)
 
     def test_discovery_and_invocation_resolve_the_supplied_workflow_data(self):
         """Use one registry against two databases to prove manager instances are not captured."""
         registry = FunctionRegistry(self.workflows)
-        other = WorkflowData(_test_action_manager_factories={ActionClass.COMPUTE: ExtensionComputeActions})
+        other = ExtensionWorkflowData(_test_action_manager_factories={ActionClass.COMPUTE: ExtensionComputeActions})
         self.addCleanup(other.conn.close)
         descriptions = {item.name: item for item in registry.describe('mcp')}
         self.assertIn('inspect_extension', descriptions)
@@ -119,6 +117,13 @@ class ManagerFunctionTests(unittest.TestCase):
         result, message = registry.invoke(other, 'admin', 'apply_extension', {'value': 4})
         self.assertEqual(result, {'result': 12})
         self.assertEqual(message, 'Extension applied.')
+
+        # Workflow-owned operations resolve from the invocation's database,
+        # just like action-manager operations, rather than capturing discovery state.
+        receipt, _ = registry.invoke(other, 'mcp', 'submit_workflow',
+                                    {'stages': [{'type': 'api', 'operations': []}]})
+        self.assertEqual(self.workflows.listWorkflows(), [])
+        self.assertEqual(other.listWorkflows()[0]['workflow_id'], receipt['workflow_id'])
 
     def test_invalid_arguments_and_wrong_channels_never_invoke_methods(self):
         """Reject extra fields, type coercions, invalid bounds, and admin calls through MCP."""
@@ -161,6 +166,7 @@ class ManagerFunctionTests(unittest.TestCase):
             raise AssertionError('Registration must not execute this function')
 
         for definitions in ((definition, definition),
+                            (self.workflows.getMCPFunctions()[0],),
                             (replace(definition, invoke=_unannotated),),
                             (replace(definition, invoke=_wrong_arity),),
                             (replace(definition, invoke=_wrong_return),),
@@ -176,17 +182,18 @@ class ManagerFunctionTests(unittest.TestCase):
 import sys
 sys.modules['mcp'] = None
 sys.modules['amscjobmanager.server'] = None
-from amscjobmanager.manager import WorkflowManager
+from amscjobmanager.workflow_data import WorkflowData
 from amscjobmanager.actions_base import ActionClass
 from amscjobmanager.user_queries import UserQueryQueue
-manager = WorkflowManager(max_workflows_active=0)
+workflows = WorkflowData(max_workflows_active=0)
 try:
-    providers = [manager, UserQueryQueue(), manager.workflow_data.getManager(ActionClass.COMPUTE)]
+    providers = [workflows, UserQueryQueue(), workflows.getManager(ActionClass.COMPUTE)]
     for provider in providers:
         for definition in provider.getMCPFunctions() + provider.getAdminFunctions():
             definition.describe()
 finally:
-    manager.stop(False, close_database=True)
+    workflows.stopWorkers()
+    workflows.conn.close()
 """
         result = subprocess.run([sys.executable, '-c', script], capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -202,23 +209,68 @@ finally:
         self.assertEqual(definition.describe().parameter_order, ['value'])
         self.assertEqual(definition.invoke(None, ExtensionArguments(value=7)), ExtensionResult(result=7))
 
-    def test_workflow_manager_functions_are_backend_owned_and_keep_raw_receipt_shape(self):
-        """Dispatch workflow-manager callbacks directly without importing MCP or a transport handler."""
-        manager = ExtensionWorkflowManager(max_workflows_active=0)
-        self.addCleanup(manager.stop, False, close_database=True)
-        manager.start()
-        with manager as workflows:
-            registry = FunctionRegistry(workflows, manager=manager)
-        receipt, _ = registry.invoke(None, 'mcp', 'submit_workflow',
-            {'stages': [{'type': 'api', 'operations': []}]}, manager=manager)
+    def test_workflow_data_functions_work_without_a_background_manager(self):
+        """Dispatch workflow callbacks against plain storage, preserving public response shapes.
+
+        No WorkflowManager is constructed or started. Submit/list/cancel and
+        extension operations all resolve their owner from the supplied WorkflowData.
+        """
+        registry = FunctionRegistry(self.workflows)
+        receipt, _ = registry.invoke(self.workflows, 'mcp', 'submit_workflow',
+                                    {'stages': [{'type': 'api', 'operations': []}]})
         self.assertEqual(set(receipt), {'workflow_id', 'workflow_status'})
-        listing, _ = registry.invoke(None, 'mcp', 'list_workflows', {}, manager=manager)
+        self.assertEqual(receipt['workflow_status'], 'PENDING')
+        listing, _ = registry.invoke(self.workflows, 'mcp', 'list_workflows', {})
         self.assertEqual(listing['result'][0]['workflow_id'], receipt['workflow_id'])
-        extended, _ = registry.invoke(None, 'mcp', 'inspect_manager_extension', {'value': 4}, manager=manager)
+        extended, _ = registry.invoke(self.workflows, 'mcp', 'inspect_workflow_extension', {'value': 4})
         self.assertEqual(extended, {'result': 14})
+        extended, _ = registry.invoke(self.workflows, 'admin', 'apply_workflow_extension', {'value': 4})
+        self.assertEqual(extended, {'result': 24})
+        canceled, _ = registry.invoke(self.workflows, 'mcp', 'cancel_workflow',
+                                     {'workflow_id': receipt['workflow_id']})
+        self.assertEqual(canceled['workflow_status'], 'CANCELED')
         with self.assertRaises(FunctionError) as error:
-            registry.invoke(None, 'mcp', 'cancel_workflow', {'workflow_id': 999}, manager=manager)
+            registry.invoke(self.workflows, 'mcp', 'cancel_workflow', {'workflow_id': 999})
         self.assertEqual(error.exception.code, 'workflow_not_found')
+
+    def test_manager_dispatch_checks_health_under_the_lock_for_all_owners(self):
+        """Use one lock/health path for workflow, action-manager, and admin operations.
+
+        Inspect the real manager lock inside a health probe. Healthy callbacks
+        run while it is held; unhealthy managers must reject every owner/channel
+        before invoking its callback or changing workflow records.
+        """
+        manager = WorkflowManager(max_workflows_active=0)
+        self.addCleanup(manager.stop, False, close_database=True)
+        with manager as workflows:
+            registry = FunctionRegistry(workflows)
+
+        def health():
+            """Assert the captured manager lock is held and report healthy without starting a thread."""
+            self.assertTrue(manager._lock.locked())
+            return True
+
+        calls = (('mcp', 'list_workflows'), ('mcp', 'list_compute_wallets'),
+                 ('admin', 'add_sandbox'))
+        # Even a never-started manager can exercise the boundary using a health
+        # probe; no production thread competes with this deterministic lock test.
+        with patch.object(manager, 'isAlive', side_effect=health) as healthy:
+            for channel, name in calls[:2]:
+                result, _ = registry.invoke(None, channel, name, {}, manager=manager)
+                self.assertIn('result', result)
+            self.assertEqual(healthy.call_count, 2)
+        with patch.object(manager, 'isAlive', return_value=False), \
+             patch('amscjobmanager.api_general.getKnownMachines', return_value=['local']), \
+             patch.object(manager.workflow_data, 'listWorkflows', side_effect=AssertionError('Unhealthy read')), \
+             patch.object(manager.workflow_data.getManager(ActionClass.COMPUTE), 'getWallets',
+                          side_effect=AssertionError('Unhealthy action read')), \
+             patch('amscjobmanager.workflow_data.addSandboxDirs', side_effect=AssertionError('Unhealthy mutation')):
+            for channel, name in calls:
+                arguments = {'machine': 'local', 'path': '/tmp/blocked'} if channel == 'admin' else {}
+                with self.subTest(name=name), self.assertRaises(FunctionError) as error:
+                    registry.invoke(None, channel, name, arguments, manager=manager)
+                self.assertEqual(error.exception.code, 'manager_unavailable')
+        self.assertFalse(manager._lock.locked())
 
     def test_wallet_adapters_keep_enabled_out_of_public_inputs(self):
         """Retain separate enable/disable commands with typed machine-only inputs."""
@@ -274,8 +326,9 @@ class FunctionTransportTests(unittest.IsolatedAsyncioTestCase):
         from amscjobmanager.server.runner import ManagerHTTPServer
 
         temporary = self.enterContext(tempfile.TemporaryDirectory())
-        with patch('amscjobmanager.workflow_data.ComputeActions', ExtensionComputeActions):
-            manager = ExtensionWorkflowManager(max_workflows_active=0)
+        with patch('amscjobmanager.workflow_data.ComputeActions', ExtensionComputeActions), \
+             patch('amscjobmanager.manager.WorkflowData', ExtensionWorkflowData):
+            manager = WorkflowManager(max_workflows_active=0)
         server = ManagerHTTPServer(lambda: manager, port=0, log_path=Path(temporary) / 'server.log')
         self.addCleanup(server.runtime.stop)
         admin = AdminServer(Path(temporary) / 'private' / 'admin.sock', 'secret', server.runtime)
@@ -296,11 +349,11 @@ class FunctionTransportTests(unittest.IsolatedAsyncioTestCase):
             tools = await client.list_tools()
             names = {tool.name for tool in tools.tools}
             self.assertIn('inspect_extension', names)
-            self.assertIn('inspect_manager_extension', names)
+            self.assertIn('inspect_workflow_extension', names)
             self.assertNotIn('apply_extension', names)
             response = await client.call_tool('inspect_extension', {'value': 5})
             self.assertEqual(response.structured_content, {'result': 10})
-            response = await client.call_tool('inspect_manager_extension', {'value': 5})
+            response = await client.call_tool('inspect_workflow_extension', {'value': 5})
             self.assertEqual(response.structured_content, {'result': 15})
             rejected = await client.call_tool('apply_extension', {'value': 5})
             self.assertTrue(rejected.is_error)
@@ -330,7 +383,7 @@ class FunctionTransportTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(accepted.result, 15)
             self.assertEqual(accepted.message, 'Extension applied.')
             accepted = await asyncio.to_thread(execute_admin_request, admin.socket_path,
-                AdminCallRequest(command='apply_manager_extension', arguments=arguments, password='secret'))
+                AdminCallRequest(command='apply_workflow_extension', arguments=arguments, password='secret'))
             self.assertEqual(accepted.result, 25)
 
 

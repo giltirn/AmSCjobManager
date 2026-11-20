@@ -71,7 +71,7 @@ server calls from prompting after the terminal hook has been restored.
 
 `server.runner.ManagerHTTPServer(initialize_manager, port=8765, log_path=...)`
 constructs its own runtime and a generic MCP adapter. Tool definitions come from
-WorkflowManager, its action managers, and the user-query provider. `initialize_manager` is a no-argument
+WorkflowData, its action managers, and the user-query provider. `initialize_manager` is a no-argument
 factory that configures the API and returns a new `WorkflowManager`; it runs after
 listener startup. The server owns runtime startup/shutdown and emits readiness
 and termination announcements.
@@ -585,8 +585,8 @@ Execution uses a separately authenticated envelope:
 ```
 
 The server validates the envelope, password and registered argument schema,
-then resolves the current backend provider. Action-manager callbacks run under
-the WorkflowManager lock; WorkflowManager callbacks acquire their own locks, while query
+then resolves the current backend provider. WorkflowData and action-manager callbacks
+share registry-managed locking and a health check under the WorkflowManager lock, while query
 callbacks remain available independently of initialization. Success returns `success: true`, `code: "ok"`, an acknowledgment `message`, and the
 operation's `result` when non-null. Failures return `success: false` with a
 stable `code` and credential-free `message`. Unknown commands/arguments are

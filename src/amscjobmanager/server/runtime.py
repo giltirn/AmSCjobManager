@@ -76,8 +76,9 @@ class ServerRuntime:
         channel (str) selects mcp/admin; name (str) is a registered name;
         arguments (dict) are validated against the registered model. Return
         (JSON result envelope dict, acknowledgment str). The admin transport must
-        authenticate before calling. Action operations acquire WorkflowData here;
-        WorkflowManager adapters own their locks, and query callbacks need no manager.
+        authenticate before calling. The registry acquires the WorkflowManager
+        lock and checks health for workflow/action operations; query callbacks
+        need no manager.
         No retries or bound managers are retained.
         """
         # Query-provider operations remain available without a WorkflowManager.
@@ -110,7 +111,7 @@ class ServerRuntime:
                 manager = self._initialize_manager()
                 checkForThreadCurrentWorkerInterruption()
                 with manager as workflows:
-                    functions = FunctionRegistry(workflows, manager=manager, query_provider=self.queries)
+                    functions = FunctionRegistry(workflows, query_provider=self.queries)
                 with self._lock:
                     if self._state != 'starting':
                         raise WorkerInterrupted('Server startup was stopped')

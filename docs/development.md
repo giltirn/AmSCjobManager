@@ -315,12 +315,13 @@ malformed inputs, local execution, simulated Globus work, HTTP/CLI lifecycle and
 submission-key recovery tests.
 
 
-## Exposing action-manager functions
+## Exposing backend functions
 
 `WorkflowData.getManagerClasses()` enumerates registered `ActionClass` values;
-`getManager(action_class)` retrieves their existing instances. Managers advertise
+`getManager(action_class)` retrieves their existing instances. WorkflowData and
+action managers advertise
 transport-independent `FunctionDefinition` tuples through `getMCPFunctions()`
-and `getAdminFunctions()`. The base implementation returns empty tuples.
+and `getAdminFunctions()`. The ActionManager base implementation returns empty tuples.
 
 Definitions in `amscjobmanager.manager_functions` contain an external name,
 description, annotated `invoke` callable, effect/repeatability hints, and admin
@@ -335,18 +336,21 @@ layout; no mandatory `result` wrapper is imposed. Declaration order of input
 fields determines admin CLI positional ordering.
 
 Getters define local named `_functions` for their operations. `ComputeActions`
-provides wallet adapters, `WorkflowManager` provides workflow and sandbox adapters,
+provides wallet adapters, `WorkflowData` provides workflow and sandbox adapters,
 and `UserQueryQueue` provides authentication question/response adapters. Each
 callable receives its owner explicitly and must not capture the discovery-time
 instance. Enable/disable adapters pass their Boolean directly to the public
 method. Existing tool names, response shapes and privileges are retained.
 
-`ServerRuntime` builds `FunctionRegistry` from the managers and query provider
+`ServerRuntime` builds `FunctionRegistry` from WorkflowData, its action managers,
+and the query provider
 before publishing readiness. Duplicate names and invalid/missing model
 annotations fail initialization. MCP and admin maps remain separate. At dispatch
 the registry validates input, resolves the current provider, invokes once, and
-validates the returned model. Action-manager operations resolve through locked
-WorkflowData; WorkflowManager callbacks acquire their own locks; query operations remain
+validates the returned model. WorkflowData and action-manager callbacks share
+one dispatch path that acquires the WorkflowManager lock, checks its health,
+and resolves the current owner. Direct callers can instead supply an already-locked
+WorkflowData without constructing a background manager. Query operations remain
 available without WorkflowManager. Registry code contains no operation definitions,
 and MCP code handles only transport/schema adaptation. Do not perform provider
 calls or user waits while holding the WorkflowManager lock; existing workers handle

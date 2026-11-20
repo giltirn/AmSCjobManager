@@ -7,6 +7,12 @@ from .api_action_manager import APIActions
 from .database import LockedConnection
 from .action_manager import ActionManager, ActionStatus, ActionStatusGroup, SimulatedCrash, initializeActionStatusViews, _ser, _unser
 from .logging import wfmanLog
+from .globals import addSandboxDirs, getSandboxDirs, removeSandboxDirs
+from .manager_functions import EmptyFunctionResult, FunctionDefinition, FunctionError
+from .manager_models import (
+    ListWorkflowArguments, MachineFilter, SandboxArguments, SandboxDirectoryListing,
+    SubmitWorkflowArguments, WorkflowIdArguments, WorkflowListing, WorkflowReceipt, WorkflowSummary,
+)
 import time
 import json
 from typing import Tuple
@@ -14,6 +20,8 @@ from typing import Tuple
 class WorkflowData:
     """Submit, track and progress workflows backed by a database.
 
+    Own workflow/sandbox function definitions alongside the domain operations;
+    callers or transport dispatchers supply any required WorkflowManager lock.
     Use one live WorkflowData instance per database. Its connection lock serializes
     threads sharing this instance; separate instances/processes are not
     coordinated. Close the previous instance before reopening for recovery.
@@ -113,6 +121,114 @@ class WorkflowData:
             self.stopWorkers()
             self.conn.close()
             raise
+
+    def getMCPFunctions(self) -> tuple[FunctionDefinition, ...]:
+        """Describe workflow and sandbox inspection operations independently of transport.
+
+        Take no arguments; return definitions with local annotated callables.
+        Callables receive the current WorkflowData instance and validated input, returning
+        output models. The caller supplies any required WorkflowManager lock;
+        discovery does not execute operations.
+        """
+        def _submit_workflow(workflows: WorkflowData, args: SubmitWorkflowArguments) -> WorkflowReceipt:
+            """Submit args (SubmitWorkflowArguments) through workflows (WorkflowData).
+
+            Return WorkflowReceipt with the durable workflow ID and recorded status.
+            The caller owns any required manager lock.
+            """
+            workflow_id = workflows.enqueueWorkflow(args.stages, args.workflow_group, submission_key=args.submission_key)
+            return WorkflowReceipt(workflow_id=workflow_id, workflow_status=workflows.workflowStatus(workflow_id).name)
+
+        def _cancel_workflow(workflows: WorkflowData, args: WorkflowIdArguments) -> WorkflowReceipt:
+            """Request cancellation using workflows (WorkflowData) and args (WorkflowIdArguments).
+
+            Return WorkflowReceipt with args.workflow_id and its recorded status.
+            The caller owns any required manager lock.
+            """
+            try:
+                workflows.cancelWorkflow(args.workflow_id)
+            except ValueError as exc:
+                raise FunctionError('workflow_not_found', str(exc)) from exc
+            return WorkflowReceipt(workflow_id=args.workflow_id, workflow_status=workflows.workflowStatus(args.workflow_id).name)
+
+        def _list_workflows(workflows: WorkflowData, args: ListWorkflowArguments) -> WorkflowListing:
+            """Read workflow/head summaries from workflows (WorkflowData).
+
+            args (ListWorkflowArguments) selects filters and optional poll wakeup.
+            Return WorkflowListing; the caller owns any required manager lock.
+            """
+            statuses = None if args.statuses is None else [ActionStatus[status] for status in args.statuses]
+
+            # Validate an explicit ID even if filters exclude it, and apply
+            # filtering again after a requested asynchronous status refresh.
+            try:
+                states = workflows.listWorkflows(args.workflow_id, statuses)
+                if args.refresh:
+                    workflows.progressActiveActions(force_poll=True)
+                    states = workflows.listWorkflows(args.workflow_id, statuses)
+            except ValueError as exc:
+                raise FunctionError('workflow_not_found', str(exc)) from exc
+
+            # Convert recorded domain state to the public response schema.
+            summaries = []
+            for state in states:
+                workflow_id = state['workflow_id']
+                head_status, api_status = workflows.headActionStatus(workflow_id, return_api_status=True)
+                summaries.append(WorkflowSummary(
+                    workflow_id=workflow_id, workflow_group=state['workflow_group'],
+                    workflow_status=workflows.workflowStatus(workflow_id).name, workflow_stage=state['workflow_stage'],
+                    head_action_id=state['head_action_id'], head_action_type=state['head_action_type'],
+                    head_action_class=state['head_action_class'].name, head_action_status=head_status.name,
+                    api_status=api_status, last_status_change=state['last_status_change'],
+                ))
+            return WorkflowListing(result=summaries)
+
+        def _list_sandboxes(workflows: WorkflowData, args: MachineFilter) -> SandboxDirectoryListing:
+            """Read registered sandbox roots using args (MachineFilter).
+
+            workflows (WorkflowData) supplies the owner context but is unused.
+            Return SandboxDirectoryListing without directory probes or authentication.
+            """
+            return SandboxDirectoryListing(result=getSandboxDirs(args.machine))
+
+        return (
+            FunctionDefinition('submit_workflow', 'Persist an ordered workflow for background execution, or retrieve a keyed submission.', _submit_workflow),
+            FunctionDefinition('cancel_workflow', 'Request workflow cancellation, including its current compute or transfer job.', _cancel_workflow, idempotent=True),
+            FunctionDefinition('list_workflows', 'List all workflows, or select one by its positive workflow_id.', _list_workflows, read_only=True, idempotent=True),
+            FunctionDefinition('list_sandbox_directories', 'List registered sandbox directories for all machines or one selected machine.', _list_sandboxes, read_only=True, idempotent=True),
+        )
+
+    def getAdminFunctions(self) -> tuple[FunctionDefinition, ...]:
+        """Describe privileged sandbox administration through annotated local callables.
+
+        Take no arguments; return definitions receiving WorkflowData and validated
+        SandboxArguments under any caller-supplied WorkflowManager lock. Sandbox
+        state remains owned by the globals module; changes last for this process.
+        """
+        def _add_sandbox(workflows: WorkflowData, args: SandboxArguments) -> EmptyFunctionResult:
+            """Register args (SandboxArguments) through the existing sandbox owner.
+
+            workflows (WorkflowData) supplies the owner context but is unused.
+            Return EmptyFunctionResult; the caller owns any required manager lock.
+            """
+            addSandboxDirs({args.machine: args.path})
+            return EmptyFunctionResult()
+
+        def _remove_sandbox(workflows: WorkflowData, args: SandboxArguments) -> EmptyFunctionResult:
+            """Remove the registration selected by args (SandboxArguments), retaining files.
+
+            workflows (WorkflowData) supplies the owner context but is unused.
+            Return EmptyFunctionResult; the caller owns any required manager lock.
+            """
+            removeSandboxDirs({args.machine: args.path})
+            return EmptyFunctionResult()
+
+        return (
+            FunctionDefinition('add_sandbox', 'Add a sandbox directory for this server session; validation occurs on first use.', _add_sandbox,
+                               idempotent=True, success_message='Sandbox directory added.'),
+            FunctionDefinition('remove_sandbox', 'Remove an exact sandbox registration without deleting files.', _remove_sandbox,
+                               idempotent=True, success_message='Sandbox directory removed.'),
+        )
 
     def _maybeSimulateCrash(self, point):
         """Raise SimulatedCrash if point (str) matches the test hook; otherwise return None."""

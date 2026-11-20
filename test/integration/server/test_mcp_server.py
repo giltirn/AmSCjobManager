@@ -355,8 +355,8 @@ class MCPToolTests(unittest.IsolatedAsyncioTestCase):
     async def test_manager_health_is_rechecked_after_acquiring_lock(self):
         """If health changes while waiting for the lock, do not query cached records.
 
-        Allow the runtime state and pre-lock health checks to succeed, then
-        fail the post-lock health check.
+        Keep health checks successful until dispatch acquires the manager lock,
+        then report failure independently of how often discovery checks health.
         The tool must return manager_unavailable without calling listWorkflows.
         This complements the real crash test with a deterministic race check.
 
@@ -378,10 +378,25 @@ class MCPToolTests(unittest.IsolatedAsyncioTestCase):
         runtime.start()
         await asyncio.to_thread(runtime._startup_worker.future.result, 3)
         async with Client(server.mcp_server, cache=None) as client:
-            with patch.object(manager, 'isAlive', side_effect=[True, True, False]), \
+            acquired = threading.Event()
+            original_enter = WorkflowManager.__enter__
+
+            def acquire_then_fail(current_manager):
+                """Lock current_manager (WorkflowManager), mark failure, and return its WorkflowData."""
+                workflows = original_enter(current_manager)
+                acquired.set()
+                return workflows
+
+            def health():
+                """Return bool health for the captured manager, becoming false after lock acquisition."""
+                return not acquired.is_set()
+
+            with patch.object(WorkflowManager, '__enter__', acquire_then_fail), \
+                 patch.object(manager, 'isAlive', side_effect=health), \
                  patch.object(manager.workflow_data, 'listWorkflows') as listing:
                 response = await call_mcp(client, 'list_workflows', {})
                 self.assertEqual(response.structured_content['error']['code'], 'manager_unavailable')
+                self.assertTrue(acquired.is_set())
                 listing.assert_not_called()
 
     async def test_server_frontend_routes_hooks_to_file_without_redirecting_stdout(self):
